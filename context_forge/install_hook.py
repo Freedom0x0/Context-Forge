@@ -65,20 +65,20 @@ def install(target: Path | None = None) -> dict[str, int]:
         added += 1
     _save(path, payload)
 
-    # Register the background worker as a scheduled task.
+    # Drop the worker launcher into the user's Startup folder.
     try:
         from .worker_service import install as _install_worker
-        _install_worker()
-        added += 1  # count the task as an "added entry"
+        result = _install_worker()
+        added += 1
+        print(f"[install-hook] worker launcher at {result['launcher']}")
     except Exception as exc:
-        # Non-fatal: the hooks work without the task.
-        print(f"[install-hook] warning: worker task not installed ({exc})")
+        print(f"[install-hook] warning: worker launcher not installed ({exc})")
 
     return {"added": added, "path": str(path)}
 
 
 def uninstall(target: Path | None = None) -> dict[str, int]:
-    """Remove hooks + worker daemon scheduled task."""
+    """Remove hooks + worker daemon launcher."""
     path = _settings_path(target)
     payload = _load(path)
     hooks_root = payload.get("hooks", {})
@@ -100,6 +100,6 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
         _uninstall_worker()
         removed += 1
     except Exception as exc:
-        print(f"[install-hook] warning: worker task not removed ({exc})")
+        print(f"[install-hook] warning: worker launcher not removed ({exc})")
 
     return {"removed": removed, "path": str(path)}
