@@ -178,8 +178,8 @@ def process_now() -> None:
         encoding="utf-8",
     )
 
-    print("(this window closes in 10s)", flush=True)
-    time.sleep(10)
+    print("(this closes in 3s; full log in last_run.md)", flush=True)
+    time.sleep(3)
 
 
 @app.command()

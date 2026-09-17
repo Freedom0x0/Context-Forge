@@ -12,37 +12,39 @@ from ..queue import JobStore
 
 
 def _spawn_processor() -> None:
-    """Launch a detached process that shows a progress bar while
-    processing queued jobs, then exits.
+    """Launch a detached processor; output inherits the user's terminal.
 
-    Detached so this hook (which has a 1.5s timeout) returns instantly.
-    A small console window flashes with "Context Forge: processing..."
-    then auto-closes when the worker finishes.
+    We DO NOT use DETACHED_PROCESS — the spawn keeps the file
+    descriptors of CC's hook process, which inherited them from the
+    user's shell. So the spawn's print() output appears in the
+    terminal where Claude Code was running, alongside the
+    "Resume this session with: ..." prompt.
+
+    We DO NOT use CREATE_NEW_CONSOLE either — that would pop a
+    separate flash window.
     """
-    import threading
-    try:
-        import ctypes  # type: ignore
-    except ImportError:
-        ctypes = None
+    import tempfile
 
     python = Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"
     if not python.exists():
         return
     cwd = Path(__file__).resolve().parent.parent.parent  # project root
-    flags = 0x00000008  # DETACHED_PROCESS
-    if ctypes is not None:
-        try:
-            # CREATE_NEW_CONSOLE so the user sees a small progress window
-            flags |= 0x00000010
-        except Exception:
-            pass
+
+    # Open a log file so progress survives even if the terminal
+    # closes before the processor finishes.
+    log_path = Path(tempfile.gettempdir()) / "cf-process-now.log"
+    log_handle = open(log_path, "w", encoding="utf-8")
+
+    # stdout -> inherited terminal (user sees progress)
+    # stderr -> log file (we don't want to muddle stderr with the
+    #                user's shell; the visible output is enough)
+    # stdin  -> closed
     subprocess.Popen(
         [str(python), "-m", "context_forge.cli", "process-now"],
         cwd=str(cwd),
-        creationflags=flags,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=None,        # inherit parent's terminal
+        stderr=log_handle,
         close_fds=True,
     )
 
