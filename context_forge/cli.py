@@ -90,11 +90,10 @@ def install_hook(target: Path = typer.Option(None, "--target"),
 @worker_app.command("run")
 def worker_run(once: bool = typer.Option(False, "--once"),
                interval: float = typer.Option(0.0, "--interval", min=0.0)) -> None:
-    """Process queued review jobs.
+    """Process queued review jobs (long-running daemon).
 
-    Without `--once` the command enters a daemon loop polling every
-    `poll_interval_seconds` (or `--interval` override). Ctrl+C / SIGTERM
-    exit cleanly.
+    For the session-following UX, prefer `forge process-now` which
+    shows a progress bar and exits when done.
     """
     settings = load_settings()
     provider = settings.model_provider if settings else "none"
@@ -108,6 +107,57 @@ def worker_run(once: bool = typer.Option(False, "--once"),
         interval = settings.poll_interval_seconds if settings else 2.0
     run_loop(_store(), _vault(), gateway,
              interval_seconds=interval, max_attempts=max_attempts)
+
+
+@app.command("process-now")
+def process_now() -> None:
+    """Process all queued jobs once with a progress bar, then exit.
+
+    Intended for the SessionEnd hook: spawn detached, show one
+    line per job, exit when queue is empty. No background process
+    stays alive.
+    """
+    import sys
+    import time
+
+    settings = load_settings()
+    provider = settings.model_provider if settings else "none"
+    gateway = select_gateway(provider, settings)
+    max_attempts = settings.max_attempts if settings else 3
+    store = _store()
+    vault = _vault()
+    pending = sum(1 for j in store.list_jobs() if j["status"] == "queued")
+    if pending == 0:
+        print("[context-forge] nothing to process", flush=True)
+        return
+    print(f"[context-forge] processing {pending} job(s)...", flush=True)
+    done = 0
+    failures = 0
+    while True:
+        try:
+            settings2 = load_settings()
+            provider = settings2.model_provider if settings2 else "none"
+            gw = select_gateway(provider, settings2)
+            processed = process_one(store, vault, gw, max_attempts)
+        except Exception as exc:
+            print(f"[error] {type(exc).__name__}: {exc}", flush=True)
+            failures += 1
+            processed = False
+        if processed:
+            done += 1
+            print(f"[context-forge] {done}/{pending} done", flush=True)
+        else:
+            break
+    jobs = store.list_jobs()
+    still = sum(1 for j in jobs if j["status"] in ("queued", "running"))
+    failed = sum(1 for j in jobs if j["status"] in ("failed", "dead_letter"))
+    print(
+        f"[context-forge] finished: {done} ok, "
+        f"{failed} failed, {still} pending",
+        flush=True,
+    )
+    print("(this window will close in 3s)", flush=True)
+    time.sleep(3)
 
 
 @app.command()
@@ -167,6 +217,29 @@ def retention(days: int = typer.Option(30, "--days", min=0),
     typer.echo(f"{verb} {len(targets)} session(s)")
     for sid in targets:
         typer.echo(f"  {sid}")
+
+
+@app.command("install-daemon")
+def install_daemon(uninstall: bool = typer.Option(False, "--uninstall")) -> None:
+    """Opt-in: install a logon-time worker daemon (alternative to
+    session-following model).
+
+    Default flow uses `forge process-now` on SessionEnd (transient,
+    progress bar, exits when done). Use this only if you want the
+    worker running continuously in the background at all times.
+    """
+    from .worker_service import install as _install, uninstall as _uninstall
+
+    try:
+        if uninstall:
+            result = _uninstall()
+            typer.echo(f"removed launcher at {result['launcher']}")
+        else:
+            result = _install()
+            typer.echo(f"installed launcher at {result['launcher']}")
+    except Exception as exc:
+        typer.echo(f"failed: {exc}")
+        raise typer.Exit(code=1)
 
 
 @app.command("scan")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -488,3 +489,45 @@ def test_watchdog_watcher_detects_changes(tmp_path: Path) -> None:
     obs.stop()
     obs.join()
     assert marked
+
+
+def test_process_now_handles_queued_jobs(tmp_path: Path, monkeypatch) -> None:
+    """`forge process-now` drains the queue with progress output."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    import subprocess
+    import sys
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        '{"role":"user","content":"my app shows 502"}\n'
+        '{"role":"assistant","content":"check upstream timeouts"}',
+        encoding="utf-8",
+    )
+    # Enqueue via the path process-now actually reads: ~/.context-forge/queue.db
+    import hashlib
+    from context_forge.queue import JobStore
+    from context_forge.domain import SessionEvent, EventType
+    queue_dir = tmp_path / ".context-forge"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    store = JobStore(queue_dir / "queue.db")
+    ev = SessionEvent(
+        event_id="e1", event_type=EventType.SESSION_END, source="test",
+        session_id="sess-1", project="demo", cwd=str(tmp_path),
+        transcript_path=str(transcript),
+        transcript_hash=hashlib.sha256(transcript.read_bytes()).hexdigest(),
+    )
+    store.enqueue_event(ev)
+
+    # Run process-now as a subprocess to exercise the actual CLI path
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["USERPROFILE"] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "context_forge.cli", "process-now"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert "processing" in result.stdout
+    assert "1/1 done" in result.stdout
+    assert "1 ok" in result.stdout

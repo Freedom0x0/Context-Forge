@@ -65,20 +65,15 @@ def install(target: Path | None = None) -> dict[str, int]:
         added += 1
     _save(path, payload)
 
-    # Drop the worker launcher into the user's Startup folder.
-    try:
-        from .worker_service import install as _install_worker
-        result = _install_worker()
-        added += 1
-        print(f"[install-hook] worker launcher at {result['launcher']}")
-    except Exception as exc:
-        print(f"[install-hook] warning: worker launcher not installed ({exc})")
-
+    # No background daemon by default. SessionEnd hook spawns its
+    # own detached processor with a progress bar, runs the worker,
+    # then exits. For users who want the old logon auto-start, run
+    # `forge install-daemon` separately.
     return {"added": added, "path": str(path)}
 
 
 def uninstall(target: Path | None = None) -> dict[str, int]:
-    """Remove hooks + worker daemon launcher."""
+    """Remove hooks. Does not touch the optional logon daemon."""
     path = _settings_path(target)
     payload = _load(path)
     hooks_root = payload.get("hooks", {})
@@ -94,12 +89,4 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
     if not hooks_root:
         payload.pop("hooks", None)
     _save(path, payload)
-
-    try:
-        from .worker_service import uninstall as _uninstall_worker
-        _uninstall_worker()
-        removed += 1
-    except Exception as exc:
-        print(f"[install-hook] warning: worker launcher not removed ({exc})")
-
     return {"removed": removed, "path": str(path)}
