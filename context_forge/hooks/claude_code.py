@@ -74,11 +74,21 @@ def main() -> int:
     )
     queue_path = Path.home() / ".context-forge" / "queue.db"
     queued = JobStore(queue_path).enqueue_event(event)
-    print("queued" if queued else "duplicate")
-    # Only spawn the processor on SessionEnd; PreCompact fires mid-session
-    # and we don't want to interrupt the user.
+    # Write to stderr — Claude Code shows SessionEnd stderr alongside
+    # the "See ya! / Resume with: claude --resume ..." exit message.
+    # stdout of detached spawns isn't reliably visible across platforms.
     if event_name == "SessionEnd":
+        sys.stderr.write(
+            f"[context-forge] queued {session_id[:8]}; "
+            f"processing in background (will write {Path.home() / '.context-forge' / 'last_run.md'})\n"
+        )
+        sys.stderr.flush()
         _spawn_processor()
+    else:
+        sys.stderr.write(
+            f"[context-forge] {event_name} queued={queued} for {session_id[:8]}\n"
+        )
+        sys.stderr.flush()
     return 0
 
 
