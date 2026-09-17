@@ -522,14 +522,20 @@ def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> Non
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
     env["USERPROFILE"] = str(tmp_path)
-    subprocess.run(
+    # Skip the trailing 10s sleep in subprocess via a tiny monkey-patch
+    # isn't worth it; the subprocess returns after sleep but our test just
+    # inspects the file written during processing.
+    proc = subprocess.run(
         [sys.executable, "-m", "context_forge.cli", "process-now"],
-        capture_output=True, text=True, env=env, timeout=60,
+        capture_output=True, text=True, env=env, timeout=30,
     )
     last_run = queue_dir / "last_run.md"
     assert last_run.exists()
     body = last_run.read_text(encoding="utf-8")
     assert "1 session(s) processed" in body
+    assert "0 failed" in body
+    assert "[context-forge] processing 1 job(s)..." in proc.stdout
+    assert "[context-forge] 1/1 done" in proc.stdout
 
 
 def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
