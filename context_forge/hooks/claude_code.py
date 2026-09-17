@@ -74,21 +74,13 @@ def main() -> int:
     )
     queue_path = Path.home() / ".context-forge" / "queue.db"
     queued = JobStore(queue_path).enqueue_event(event)
-    # Write to stderr — Claude Code shows SessionEnd stderr alongside
-    # the "See ya! / Resume with: claude --resume ..." exit message.
-    # stdout of detached spawns isn't reliably visible across platforms.
+    # CC's SessionEnd hook stdout is hidden from the user terminal,
+    # so we can't show progress here. Spawn a detached processor that:
+    #   - writes a Windows toast notification (right-bottom bubble)
+    #   - writes ~/.context-forge/last_run.md for SessionStart to cat
+    # Both happen async; hook returns immediately within the 1.5s timeout.
     if event_name == "SessionEnd":
-        sys.stderr.write(
-            f"[context-forge] queued {session_id[:8]}; "
-            f"processing in background (will write {Path.home() / '.context-forge' / 'last_run.md'})\n"
-        )
-        sys.stderr.flush()
         _spawn_processor()
-    else:
-        sys.stderr.write(
-            f"[context-forge] {event_name} queued={queued} for {session_id[:8]}\n"
-        )
-        sys.stderr.flush()
     return 0
 
 

@@ -178,8 +178,50 @@ def process_now() -> None:
         encoding="utf-8",
     )
 
+    # Windows toast notification — the only way to reach the user
+    # at session-end time (CC's SessionEnd hook stdout is hidden).
+    if done or failed:
+        _show_toast(done, failed, knowledge_count, rule_count)
+
     print("(this closes in 3s; full log in last_run.md)", flush=True)
     time.sleep(3)
+
+
+def _show_toast(done: int, failed: int, knowledge: int, rules: int) -> None:
+    """Fire a Windows toast notification via PowerShell + NotifyIcon."""
+    import subprocess
+    title = "Context Forge"
+    body = (
+        f"{done} session(s) precipitated. "
+        f"{knowledge} knowledge, {rules} rules."
+        + (f" {failed} failed." if failed else "")
+    )
+    # PowerShell escapes: backticks need to be doubled in a Python
+    # single-quoted string. NotifyIcon needs STA threading mode.
+    ps = (
+        "[System.Reflection.Assembly]::LoadWithPartialName("
+        "'System.Windows.Forms') | Out-Null; "
+        "[System.Reflection.Assembly]::LoadWithPartialName("
+        "'System.Drawing') | Out-Null; "
+        "$n = New-Object System.Windows.Forms.NotifyIcon; "
+        "$n.Icon = [System.Drawing.SystemIcons]::Information; "
+        "$n.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info; "
+        f"$n.BalloonTipTitle = '{title}'; "
+        f"$n.BalloonTipText = '{body.replace(chr(39), chr(39)+chr(39))}'; "
+        "$n.Visible = $true; "
+        "$n.ShowBalloonTip(7000); "
+        "Start-Sleep -Milliseconds 7500; "
+        "$n.Dispose();"
+    )
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except Exception:
+        pass
 
 
 @app.command()

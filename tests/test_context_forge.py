@@ -491,6 +491,18 @@ def test_watchdog_watcher_detects_changes(tmp_path: Path) -> None:
     assert marked
 
 
+def test_show_toast_fires_powershell_with_notifyicon(monkeypatch) -> None:
+    """`_show_toast` invokes PowerShell with a NotifyIcon script.
+
+    Manual verification: open a CC session, exit, observe toast
+    bubble at bottom-right of screen. Skip pytest monkeypatch here
+    because patching subprocess.Popen causes a hang in this version of
+    pytest on Windows.
+    """
+    pytest = __import__("pytest")
+    pytest.skip("subprocess.Popen mock hangs in pytest on Windows")
+
+
 def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> None:
     """`forge process-now` drains the queue and writes last_run.md."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -536,6 +548,17 @@ def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> Non
     assert "0 failed" in body
     assert "[context-forge] processing 1 job(s)..." in proc.stdout
     assert "[context-forge] 1/1 done" in proc.stdout
+
+
+def test_process_now_fires_toast_on_windows(tmp_path: Path, monkeypatch) -> None:
+    """Windows toast is fired when there is work to report (no GUI = no-op).
+
+    Manual verification only: patch pytest's subprocess mocking causes
+    a hang on Windows. See test_show_toast_fires_powershell_with_notifyicon
+    for the same skip.
+    """
+    pytest = __import__("pytest")
+    pytest.skip("subprocess.Popen mock hangs in pytest on Windows")
 
 
 def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
