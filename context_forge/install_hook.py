@@ -13,10 +13,30 @@ import json
 import os
 from pathlib import Path
 
+HOOK_OWNER_KEY = "context_forge_managed"
+
+
+def _absolute_forge_command() -> str:
+    """Build a SessionStart command that works regardless of shell PATH.
+
+    Claude Code runs hooks in whatever shell the user launched it from
+    (often Git Bash on Windows, where `forge` isn't on PATH). Use the
+    absolute path of the `forge.exe` entry-point script.
+    """
+    scripts = Path.home() / "AppData/Local/Programs/Python/Python312/Scripts"
+    forge_exe = scripts / ("forge.exe" if (scripts / "forge.exe").exists()
+                             else "forge")
+    if forge_exe.exists():
+        return f'cmd /c "{forge_exe}" status'
+    python = Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"
+    if python.exists():
+        return f'cmd /c "{python}" -m context_forge.cli status'
+    return "forge status"
+
+
 HOOK_COMMAND = "python -m context_forge.hooks.claude_code"
 HOOK_EVENTS = ("SessionEnd", "PreCompact")
-SESSION_START_COMMAND = "forge status"
-HOOK_OWNER_KEY = "context_forge_managed"
+SESSION_START_COMMAND = _absolute_forge_command()
 
 
 def _settings_path(target: Path | None) -> Path:
@@ -45,31 +65,35 @@ def _owned_entries(hooks: list[dict]) -> list[dict]:
 
 
 def install(target: Path | None = None) -> dict[str, int]:
-    """Add hooks + register worker daemon scheduled task."""
+    """Add hooks. If owned entries already exist with outdated commands,
+    update them in place.
+    """
     path = _settings_path(target)
     payload = _load(path)
     hooks_root = payload.setdefault("hooks", {})
     added = 0
-    for event in HOOK_EVENTS:
-        bucket = hooks_root.setdefault(event, [])
-        if any(_owned_entries([h]) for h in bucket if isinstance(h, dict)):
-            continue
-        bucket.append({HOOK_OWNER_KEY: True,
-                       "hooks": [{"type": "command", "command": HOOK_COMMAND}]})
-        added += 1
-    start_bucket = hooks_root.setdefault("SessionStart", [])
-    if not any(_owned_entries([h]) for h in start_bucket if isinstance(h, dict)):
-        start_bucket.append({HOOK_OWNER_KEY: True,
-                             "hooks": [{"type": "command",
-                                        "command": SESSION_START_COMMAND}]})
-        added += 1
-    _save(path, payload)
+    updated = 0
 
-    # No background daemon by default. SessionEnd hook spawns its
-    # own detached processor with a progress bar, runs the worker,
-    # then exits. For users who want the old logon auto-start, run
-    # `forge install-daemon` separately.
-    return {"added": added, "path": str(path)}
+    def _add_or_update(bucket: list, command: str) -> None:
+        nonlocal added, updated
+        owned = [h for h in bucket if isinstance(h, dict) and h.get(HOOK_OWNER_KEY)]
+        if owned:
+            current = owned[0].get("hooks", [{}])[0].get("command", "")
+            if current == command:
+                return
+            owned[0]["hooks"] = [{"type": "command", "command": command}]
+            updated += 1
+            return
+        bucket.append({HOOK_OWNER_KEY: True,
+                       "hooks": [{"type": "command", "command": command}]})
+        added += 1
+
+    for event in HOOK_EVENTS:
+        _add_or_update(hooks_root.setdefault(event, []), HOOK_COMMAND)
+    _add_or_update(hooks_root.setdefault("SessionStart", []),
+                  SESSION_START_COMMAND)
+    _save(path, payload)
+    return {"added": added, "updated": updated, "path": str(path)}
 
 
 def uninstall(target: Path | None = None) -> dict[str, int]:

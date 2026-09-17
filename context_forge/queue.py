@@ -53,6 +53,11 @@ class JobStore:
           project TEXT NOT NULL, changed_path TEXT, session_id TEXT,
           reason TEXT NOT NULL, occurred_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS session_state (
+          session_id TEXT PRIMARY KEY,
+          lines_processed INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
         """)
         self.db.commit()
         # Migrations for tables created before newer columns were added.
@@ -248,6 +253,24 @@ class JobStore:
                 )
                 recorded += 1
         return recorded
+
+    def get_lines_processed(self, session_id: str) -> int:
+        row = self.db.execute(
+            "SELECT lines_processed FROM session_state WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        return row["lines_processed"] if row else 0
+
+    def set_lines_processed(self, session_id: str, lines: int) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO session_state(session_id, lines_processed, "
+                "updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "lines_processed=excluded.lines_processed, "
+                "updated_at=excluded.updated_at",
+                (session_id, lines, _now()),
+            )
 
     def delete_session(self, session_id: str) -> dict[str, int]:
         """Remove a session and all its derived state from the queue.

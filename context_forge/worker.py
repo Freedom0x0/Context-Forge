@@ -30,6 +30,35 @@ from .queue import JobStore
 from .vault import Vault
 
 
+def _read_transcript_slice(transcript_path: str, start_line: int
+                              ) -> tuple[str, int]:
+    """Return (slice_text, total_lines). Slices transcript from start_line.
+
+    On resume, only the new portion is passed to the model so already-
+    processed turns don't get re-precipitated.
+    """
+    if not transcript_path:
+        return "", 0
+    p = Path(transcript_path)
+    if not p.exists():
+        return "", 0
+    total = 0
+    with p.open("rb") as f:
+        for _ in f:
+            total += 1
+    if start_line > total:
+        start_line = 0  # transcript was rotated/truncated
+    if start_line >= total:
+        return "", total
+    lines: list[str] = []
+    with p.open("r", encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f):
+            if i < start_line:
+                continue
+            lines.append(line.rstrip("\n"))
+    return "\n".join(lines), total
+
+
 def _sigterm_to_keyboard_interrupt(signum, frame):  # noqa: ARG001
     raise KeyboardInterrupt
 
@@ -57,9 +86,36 @@ def process_one(store: JobStore, vault: Vault,
         max_attempts = settings.max_attempts if settings else 3
     try:
         event = SessionEvent.model_validate_json(job["payload_json"])
-        artifacts = gw.extract_session(
-            event.transcript_path, event.transcript_hash, event.session_id,
+
+        # Read only the NEW portion of the transcript (since last
+        # processing of this session). On first call, reads everything.
+        start_line = store.get_lines_processed(event.session_id)
+        slice_text, total_lines = _read_transcript_slice(
+            event.transcript_path, start_line,
         )
+
+        # If the slice is empty (worker already processed the full file),
+        # skip the model call but still mark the job succeeded.
+        if not slice_text.strip():
+            store.set_lines_processed(event.session_id, total_lines)
+            store.finish(job["id"], max_attempts=max_attempts)
+            return True
+
+        # Stage the slice as a temp file so the gateway reads it as if
+        # it were a real transcript. Clean up after.
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / f"cf-slice-{event.session_id}.jsonl"
+        tmp.write_text(slice_text, encoding="utf-8")
+        try:
+            artifacts = gw.extract_session(
+                str(tmp), event.transcript_hash, event.session_id,
+            )
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
         # Re-run domain validators so gateways that bypass Pydantic at
         # construction time still have to satisfy the contract.
         artifacts = SessionArtifacts.model_validate(artifacts.model_dump())
@@ -67,6 +123,9 @@ def process_one(store: JobStore, vault: Vault,
             _write_session_artifacts(vault, event, artifacts)
         if event.event_type is EventType.SESSION_END:
             store.auto_record_feedback_for_session(event.session_id)
+        # Always advance the offset, even on should_save=false, so we
+        # don't re-read the same lines next time.
+        store.set_lines_processed(event.session_id, total_lines)
         store.finish(job["id"], max_attempts=max_attempts)
     except Exception as exc:
         store.finish(job["id"], error=f"{type(exc).__name__}: {exc}",

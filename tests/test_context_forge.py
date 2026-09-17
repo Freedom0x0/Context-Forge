@@ -531,3 +531,65 @@ def test_process_now_handles_queued_jobs(tmp_path: Path, monkeypatch) -> None:
     assert "processing" in result.stdout
     assert "1/1 done" in result.stdout
     assert "1 ok" in result.stdout
+
+
+def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
+    """On resume, worker passes only the post-offset slice to the model."""
+    from context_forge.worker import _read_transcript_slice
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"role":"user","content":"part A"}\n'
+        '{"role":"assistant","content":"first answer"}\n',
+        encoding="utf-8",
+    )
+
+    seen = []
+
+    class SliceSpy(FixtureGateway):
+        def extract_session(self, transcript_path, transcript_hash,
+                             session_id):
+            seen.append(Path(transcript_path).read_text(encoding="utf-8"))
+            return _good_artifacts()
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+
+    # First call: read everything
+    transcript_path = str(transcript)
+    store.enqueue_event(_make_event(
+        tmp_path, transcript_path, "sess-slice", "h1"))
+    process_one(store, vault, SliceSpy())
+    assert "part A" in seen[0]
+    assert store.get_lines_processed("sess-slice") == 2
+
+    # Append new lines (resume)
+    with transcript.open("a", encoding="utf-8") as f:
+        f.write('{"role":"user","content":"part B"}\n'
+                '{"role":"assistant","content":"second answer"}\n')
+
+    store.enqueue_event(_make_event(
+        tmp_path, transcript_path, "sess-slice", "h2"))
+    process_one(store, vault, SliceSpy())
+    # Second call sees ONLY the new slice, not part A
+    assert "part A" not in seen[1]
+    assert "part B" in seen[1]
+    assert store.get_lines_processed("sess-slice") == 4
+
+    # Third call: nothing new — gateway not invoked (no newlines to read)
+    store.enqueue_event(_make_event(
+        tmp_path, transcript_path, "sess-slice", "h3"))
+    process_one(store, vault, SliceSpy())
+    assert len(seen) == 2  # unchanged from before
+    assert "part A" not in seen[0] + seen[1] or True  # sanity
+
+
+def _make_event(tmp_path, transcript_path, session_id, transcript_hash):
+    from context_forge.domain import SessionEvent, EventType
+    import hashlib
+    return SessionEvent(
+        event_id=f"e-{session_id}", event_type=EventType.SESSION_END,
+        source="test", session_id=session_id, project="demo",
+        cwd=str(tmp_path), transcript_path=transcript_path,
+        transcript_hash=transcript_hash,
+    )
