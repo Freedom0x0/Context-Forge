@@ -111,14 +111,13 @@ def worker_run(once: bool = typer.Option(False, "--once"),
 
 @app.command("process-now")
 def process_now() -> None:
-    """Process all queued jobs once with a progress bar, then exit.
+    """Process all queued jobs once, write result to last_run.md, exit.
 
-    Intended for the SessionEnd hook: spawn detached, show one
-    line per job, exit when queue is empty. No background process
-    stays alive.
+    Designed to be spawned by the SessionEnd hook. No interactive
+    console — the user sees the result via the SessionStart hook on
+    their next CC launch.
     """
     import sys
-    import time
 
     settings = load_settings()
     provider = settings.model_provider if settings else "none"
@@ -128,36 +127,47 @@ def process_now() -> None:
     vault = _vault()
     pending = sum(1 for j in store.list_jobs() if j["status"] == "queued")
     if pending == 0:
-        print("[context-forge] nothing to process", flush=True)
         return
-    print(f"[context-forge] processing {pending} job(s)...", flush=True)
     done = 0
     failures = 0
+    wrote_knowledge = 0
+    wrote_rule = 0
     while True:
         try:
             settings2 = load_settings()
-            provider = settings2.model_provider if settings2 else "none"
-            gw = select_gateway(provider, settings2)
+            p2 = settings2.model_provider if settings2 else "none"
+            gw = select_gateway(p2, settings2)
             processed = process_one(store, vault, gw, max_attempts)
+            if processed:
+                # Count what was actually written
+                vault_files = list(vault.root.glob("knowledge/accepted/*.md"))
+                rule_files = list(vault.root.glob("rules/proposals/*.md"))
+                wrote_knowledge = len(vault_files)
+                wrote_rule = len(rule_files)
         except Exception as exc:
-            print(f"[error] {type(exc).__name__}: {exc}", flush=True)
+            sys.stderr.write(f"[error] {type(exc).__name__}: {exc}\n")
+            sys.stderr.flush()
             failures += 1
             processed = False
         if processed:
             done += 1
-            print(f"[context-forge] {done}/{pending} done", flush=True)
         else:
             break
     jobs = store.list_jobs()
     still = sum(1 for j in jobs if j["status"] in ("queued", "running"))
     failed = sum(1 for j in jobs if j["status"] in ("failed", "dead_letter"))
-    print(
-        f"[context-forge] finished: {done} ok, "
-        f"{failed} failed, {still} pending",
-        flush=True,
+
+    from pathlib import Path
+    home = Path.home() / ".context-forge"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "last_run.md").write_text(
+        f"# Context Forge last run\n\n"
+        f"- {done} session(s) processed\n"
+        f"- {wrote_knowledge} knowledge file(s) in vault\n"
+        f"- {wrote_rule} rule(s) in vault\n"
+        f"- {failed} failed, {still} pending\n",
+        encoding="utf-8",
     )
-    print("(this window will close in 3s)", flush=True)
-    time.sleep(3)
 
 
 @app.command()

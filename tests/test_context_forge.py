@@ -491,8 +491,8 @@ def test_watchdog_watcher_detects_changes(tmp_path: Path) -> None:
     assert marked
 
 
-def test_process_now_handles_queued_jobs(tmp_path: Path, monkeypatch) -> None:
-    """`forge process-now` drains the queue with progress output."""
+def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> None:
+    """`forge process-now` drains the queue and writes last_run.md."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
@@ -505,12 +505,11 @@ def test_process_now_handles_queued_jobs(tmp_path: Path, monkeypatch) -> None:
         '{"role":"assistant","content":"check upstream timeouts"}',
         encoding="utf-8",
     )
-    # Enqueue via the path process-now actually reads: ~/.context-forge/queue.db
+    queue_dir = tmp_path / ".context-forge"
+    queue_dir.mkdir(parents=True, exist_ok=True)
     import hashlib
     from context_forge.queue import JobStore
     from context_forge.domain import SessionEvent, EventType
-    queue_dir = tmp_path / ".context-forge"
-    queue_dir.mkdir(parents=True, exist_ok=True)
     store = JobStore(queue_dir / "queue.db")
     ev = SessionEvent(
         event_id="e1", event_type=EventType.SESSION_END, source="test",
@@ -520,17 +519,17 @@ def test_process_now_handles_queued_jobs(tmp_path: Path, monkeypatch) -> None:
     )
     store.enqueue_event(ev)
 
-    # Run process-now as a subprocess to exercise the actual CLI path
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
     env["USERPROFILE"] = str(tmp_path)
-    result = subprocess.run(
+    subprocess.run(
         [sys.executable, "-m", "context_forge.cli", "process-now"],
         capture_output=True, text=True, env=env, timeout=60,
     )
-    assert "processing" in result.stdout
-    assert "1/1 done" in result.stdout
-    assert "1 ok" in result.stdout
+    last_run = queue_dir / "last_run.md"
+    assert last_run.exists()
+    body = last_run.read_text(encoding="utf-8")
+    assert "1 session(s) processed" in body
 
 
 def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
