@@ -11,44 +11,6 @@ from ..domain import EventType, SessionEvent
 from ..queue import JobStore
 
 
-def _spawn_processor() -> None:
-    """Launch a detached processor; output inherits the user's terminal.
-
-    We DO NOT use DETACHED_PROCESS — the spawn keeps the file
-    descriptors of CC's hook process, which inherited them from the
-    user's shell. So the spawn's print() output appears in the
-    terminal where Claude Code was running, alongside the
-    "Resume this session with: ..." prompt.
-
-    We DO NOT use CREATE_NEW_CONSOLE either — that would pop a
-    separate flash window.
-    """
-    import tempfile
-
-    python = Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"
-    if not python.exists():
-        return
-    cwd = Path(__file__).resolve().parent.parent.parent  # project root
-
-    # Open a log file so progress survives even if the terminal
-    # closes before the processor finishes.
-    log_path = Path(tempfile.gettempdir()) / "cf-process-now.log"
-    log_handle = open(log_path, "w", encoding="utf-8")
-
-    # stdout -> inherited terminal (user sees progress)
-    # stderr -> log file (we don't want to muddle stderr with the
-    #                user's shell; the visible output is enough)
-    # stdin  -> closed
-    subprocess.Popen(
-        [str(python), "-m", "context_forge.cli", "process-now"],
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        stdout=None,        # inherit parent's terminal
-        stderr=log_handle,
-        close_fds=True,
-    )
-
-
 def main() -> int:
     payload = json.load(sys.stdin)
     transcript = payload.get("transcript_path")
@@ -74,13 +36,11 @@ def main() -> int:
     )
     queue_path = Path.home() / ".context-forge" / "queue.db"
     queued = JobStore(queue_path).enqueue_event(event)
-    # CC's SessionEnd hook stdout is hidden from the user terminal,
-    # so we can't show progress here. Spawn a detached processor that:
-    #   - writes a Windows toast notification (right-bottom bubble)
-    #   - writes ~/.context-forge/last_run.md for SessionStart to cat
-    # Both happen async; hook returns immediately within the 1.5s timeout.
-    if event_name == "SessionEnd":
-        _spawn_processor()
+    # KISS: hook only enqueues. No spawn, no toast — CC's hook output
+    # is hidden from the user terminal, and detached-process output
+    # never reaches the user's shell reliably on Windows. The user
+    # runs `forge worker run --once` after exiting CC; the result is
+    # visible next time they open CC via SessionStart cat last_run.md.
     return 0
 
 

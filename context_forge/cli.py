@@ -111,15 +111,12 @@ def worker_run(once: bool = typer.Option(False, "--once"),
 
 @app.command("process-now")
 def process_now() -> None:
-    """Process all queued jobs with a visible progress window.
+    """Process queued jobs and write a summary to last_run.md.
 
-    Designed to be spawned by the SessionEnd hook. The window stays
-    open ~10s so the user can watch the precipitation happen as they
-    exit Claude Code. A `last_run.md` is also written so the next
-    SessionStart can show what happened if the window was missed.
+    Intended to be run manually: `forge worker run --once`. Exits as
+    soon as the queue is drained — no window, no toast, no sleep.
     """
     import sys
-    import time
 
     settings = load_settings()
     provider = settings.model_provider if settings else "none"
@@ -128,11 +125,10 @@ def process_now() -> None:
     store = _store()
     vault = _vault()
     pending = sum(1 for j in store.list_jobs() if j["status"] == "queued")
-    print(f"[context-forge] processing {pending} job(s)...", flush=True)
     if pending == 0:
-        # No work; close quickly so the user doesn't wonder why a window opened.
-        time.sleep(2)
+        sys.stdout.write("[context-forge] nothing to process\n")
         return
+    sys.stdout.write(f"[context-forge] processing {pending} job(s)...\n")
     done = 0
     failures = 0
     while True:
@@ -142,12 +138,12 @@ def process_now() -> None:
             gw = select_gateway(p2, settings2)
             processed = process_one(store, vault, gw, max_attempts)
         except Exception as exc:
-            print(f"[error] {type(exc).__name__}: {exc}", flush=True)
+            sys.stdout.write(f"[error] {type(exc).__name__}: {exc}\n")
             failures += 1
             processed = False
         if processed:
             done += 1
-            print(f"[context-forge] {done}/{pending} done", flush=True)
+            sys.stdout.write(f"[context-forge] {done}/{pending} done\n")
         else:
             break
     jobs = store.list_jobs()
@@ -155,15 +151,13 @@ def process_now() -> None:
     failed = sum(1 for j in jobs if j["status"] in ("failed", "dead_letter"))
     knowledge_count = len(list(vault.root.glob("knowledge/accepted/*.md")))
     rule_count = len(list(vault.root.glob("rules/proposals/*.md")))
-    print(
+    sys.stdout.write(
         f"[context-forge] finished: {done} ok, {failed} failed, "
-        f"{still} pending",
-        flush=True,
+        f"{still} pending\n"
     )
-    print(
+    sys.stdout.write(
         f"[context-forge] vault: {knowledge_count} knowledge, "
-        f"{rule_count} rules",
-        flush=True,
+        f"{rule_count} rules\n"
     )
 
     from pathlib import Path
@@ -177,51 +171,6 @@ def process_now() -> None:
         f"- {rule_count} rule(s) in vault\n",
         encoding="utf-8",
     )
-
-    # Windows toast notification — the only way to reach the user
-    # at session-end time (CC's SessionEnd hook stdout is hidden).
-    if done or failed:
-        _show_toast(done, failed, knowledge_count, rule_count)
-
-    print("(this closes in 3s; full log in last_run.md)", flush=True)
-    time.sleep(3)
-
-
-def _show_toast(done: int, failed: int, knowledge: int, rules: int) -> None:
-    """Fire a Windows toast notification via PowerShell + NotifyIcon."""
-    import subprocess
-    title = "Context Forge"
-    body = (
-        f"{done} session(s) precipitated. "
-        f"{knowledge} knowledge, {rules} rules."
-        + (f" {failed} failed." if failed else "")
-    )
-    # PowerShell escapes: backticks need to be doubled in a Python
-    # single-quoted string. NotifyIcon needs STA threading mode.
-    ps = (
-        "[System.Reflection.Assembly]::LoadWithPartialName("
-        "'System.Windows.Forms') | Out-Null; "
-        "[System.Reflection.Assembly]::LoadWithPartialName("
-        "'System.Drawing') | Out-Null; "
-        "$n = New-Object System.Windows.Forms.NotifyIcon; "
-        "$n.Icon = [System.Drawing.SystemIcons]::Information; "
-        "$n.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info; "
-        f"$n.BalloonTipTitle = '{title}'; "
-        f"$n.BalloonTipText = '{body.replace(chr(39), chr(39)+chr(39))}'; "
-        "$n.Visible = $true; "
-        "$n.ShowBalloonTip(7000); "
-        "Start-Sleep -Milliseconds 7500; "
-        "$n.Dispose();"
-    )
-    try:
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-STA", "-Command", ps],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-    except Exception:
-        pass
 
 
 @app.command()
