@@ -2,13 +2,62 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 
 from ..domain import EventType, SessionEvent
 from ..queue import JobStore
+
+
+def _spawn_daemon() -> None:
+    """Spawn a background worker daemon at SessionStart.
+
+    The daemon polls queue.db and processes jobs as they arrive.
+    It survives this hook process exiting (DETACHED_PROCESS on
+    Windows) so it stays alive for the lifetime of the Claude Code
+    session, and a fresh one is spawned next time CC starts. Multiple
+    daemons coexist safely via the claim lease.
+    """
+    import subprocess
+
+    python = Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"
+    if not python.exists():
+        return
+    cwd = Path(__file__).resolve().parent.parent.parent
+    flags = 0x00000008  # DETACHED_PROCESS
+    subprocess.Popen(
+        [str(python), "-m", "context_forge.cli", "worker", "run",
+         "--interval", "3"],
+        cwd=str(cwd),
+        creationflags=flags,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
+def _format_status_line() -> str:
+    """One-line status for SessionStart to show above the input box."""
+    from context_forge.vault import Vault
+    from context_forge.config import default_settings_path, load_settings
+
+    settings = load_settings()
+    if settings:
+        vault_root = settings.root
+    else:
+        vault_root = default_settings_path().parent / "vault"
+    if not vault_root.exists():
+        return "[context-forge] no vault configured"
+    k = len(list(vault_root.glob("knowledge/accepted/*.md")))
+    r = 0
+    for path in vault_root.glob("rules/**/*.md"):
+        try:
+            if "status: enabled" in path.read_text(encoding="utf-8"):
+                r += 1
+        except OSError:
+            pass
+    return f"[context-forge] {k} knowledge, {r} rules active"
 
 
 def main() -> int:
@@ -35,12 +84,20 @@ def main() -> int:
         transcript_hash=transcript_hash,
     )
     queue_path = Path.home() / ".context-forge" / "queue.db"
-    queued = JobStore(queue_path).enqueue_event(event)
-    # KISS: hook only enqueues. No spawn, no toast — CC's hook output
-    # is hidden from the user terminal, and detached-process output
-    # never reaches the user's shell reliably on Windows. The user
-    # runs `forge worker run --once` after exiting CC; the result is
-    # visible next time they open CC via SessionStart cat last_run.md.
+    JobStore(queue_path).enqueue_event(event)
+
+    if event_name == "SessionStart":
+        # Spawn the background daemon so SessionEnd jobs get processed
+        # automatically without the user running anything.
+        _spawn_daemon()
+        # Show a status line above the input box: "N knowledge, M rules".
+        # Claude Code displays SessionStart hook stdout there.
+        print(_format_status_line())
+    elif event_name == "PreCompact":
+        # Compaction clears the model's context. Reset the offset
+        # tracker so the next SessionEnd sees the full transcript again
+        # and the model gets a fresh perspective.
+        JobStore(queue_path).set_lines_processed(session_id, 0)
     return 0
 
 

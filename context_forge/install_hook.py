@@ -17,31 +17,13 @@ HOOK_OWNER_KEY = "context_forge_managed"
 
 
 def _absolute_forge_command() -> str:
-    """Build a SessionStart command that shows current state + last run.
+    """Build a SessionStart command that spawns the daemon and prints status.
 
-    Claude Code runs hooks in whatever shell the user launched it from
-    (often Git Bash on Windows, where `forge` isn't on PATH). Use the
-    absolute path of the `forge.exe` entry-point script.
-
-    Output combines `forge status` (queue/vault state) with the
-    last_run.md file written by the previous process-now spawn, so
-    the user sees "what happened last time I exited" right inside
-    the agent.
+    SessionStart runs claude_code.py so we get both:
+    - spawn the background worker (DETACHED_PROCESS)
+    - print the status line that CC shows above the input box
     """
-    scripts = Path.home() / "AppData/Local/Programs/Python/Python312/Scripts"
-    forge_exe = scripts / ("forge.exe" if (scripts / "forge.exe").exists()
-                             else "forge")
-    if forge_exe.exists():
-        bin_part = f'"{forge_exe}"'
-    else:
-        py = Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"
-        bin_part = f'"{py}" -m context_forge.cli' if py.exists() else "forge"
-
-    last_run = Path.home() / ".context-forge" / "last_run.md"
-    parts = [f"cmd /c {bin_part} status"]
-    if last_run.exists():
-        parts.append(f'type "{last_run}"')
-    return " && ".join(parts)
+    return "python -m context_forge.hooks.claude_code"
 
 
 HOOK_COMMAND = "python -m context_forge.hooks.claude_code"
