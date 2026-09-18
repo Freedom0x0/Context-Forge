@@ -1,8 +1,7 @@
 """Markdown vault: drafts, knowledge, rules.
 
-Auto-loop writes here. The worker auto-publishes up to three files per
-session: a `_drafts/` archival copy of the model output, an
-`accepted/` knowledge item, and a `proposed/` rule candidate.
+Auto-loop writes here. The worker auto-publishes up to two files per
+session: an `accepted/` knowledge item, and an `enabled` rule.
 
 User actions are file-based: edit content directly, archive by
 deleting, enable rules by changing `status: proposed` to `enabled`

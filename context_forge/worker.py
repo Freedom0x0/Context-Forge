@@ -1,11 +1,10 @@
-"""Worker: claim a job, extract session artifacts, write 3 vault files.
+"""Worker: claim a job, extract session artifacts, write vault files.
 
 The auto-loop is intentional: worker calls the model, gets one
 `SessionArtifacts` per session, and writes:
 
-  vault/_drafts/{session_id}.md              archival of model output
   vault/knowledge/accepted/{k_id}.md       auto-published knowledge
-  vault/rules/proposals/rule-{k_id}.md     proposed rule candidate
+  vault/rules/proposals/rule-{k_id}.md     enabled rule
 
 User actions are file-based, never command-based: edit, archive,
 or change frontmatter `status`. `user_owned: true` blocks auto-
@@ -69,7 +68,6 @@ def process_one(store: JobStore, vault: Vault,
     """Process a single queued job. Returns True if a job was handled.
 
     Side effects on success:
-    - vault/_drafts/{session_id}.md written (archival)
     - vault/knowledge/accepted/{k_id}.md if knowledge is non-null
     - vault/rules/proposals/rule-{k_id}.md if rule_candidate is non-null
 

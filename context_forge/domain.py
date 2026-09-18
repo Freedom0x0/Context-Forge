@@ -103,11 +103,10 @@ class RuleExtraction(BaseModel):
 class SessionArtifacts(BaseModel):
     """One model response per session end.
 
-    The worker auto-writes up to three vault files per session:
-    a `_drafts/` archival copy (when should_save=true), an
-    `accepted/` knowledge item (when should_save=true AND knowledge
-    is non-empty), and a `proposed/` rule candidate (when rule_candidate
-    is non-empty). User participation is file-based, never command-based.
+    The worker auto-writes up to two vault files per session:
+    an `accepted/` knowledge item (when should_save=true AND knowledge
+    is non-empty), and an `enabled` rule (when rule_candidate is
+    non-empty). User participation is file-based, never command-based.
     """
 
     title: str = Field(min_length=1)
