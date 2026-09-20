@@ -149,7 +149,24 @@ class HttpGateway:
         prompt = _PROMPT.format(transcript=excerpt)
         reply = self._call_chat(prompt)
         data = self._parse_json_object(reply)
-        return SessionArtifacts.model_validate(data)
+        try:
+            return SessionArtifacts.model_validate(data)
+        except Exception as exc:
+            # The model returned JSON, but of the wrong shape (we have
+            # seen `{"summary": ...}` from lighter models). Re-ask once
+            # with the validation error attached — cheaper and more
+            # reliable than failing the job.
+            repair = (
+                "Your previous reply did not match the required schema.\n"
+                f"Validation error: {exc}\n"
+                f"Your reply was: {json.dumps(data, ensure_ascii=False)[:600]}\n\n"
+                "Reply again with ONLY a JSON object using EXACTLY the "
+                "schema keys shown. Do not add or rename keys.\n\n"
+                f"{prompt}"
+            )
+            reply2 = self._call_chat(repair)
+            data2 = self._parse_json_object(reply2)
+            return SessionArtifacts.model_validate(data2)
 
     def compile_rule(self, knowledge_id, knowledge_text):
         prompt = (

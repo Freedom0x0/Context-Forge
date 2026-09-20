@@ -1,8 +1,8 @@
 """End-to-end tests for the auto-loop refactor.
 
 The auto-loop: hook -> queue.db -> worker extracts SessionArtifacts
--> vault/_drafts/ + vault/knowledge/accepted/ + vault/rules/proposals/
-User actions are file-based; the worker never auto-enables a rule.
+-> vault/knowledge/accepted/ + vault/rules/proposals/
+User actions are file-based (edit/delete vault files).
 """
 
 from __future__ import annotations
@@ -43,6 +43,25 @@ def event(path: Path) -> SessionEvent:
         session_id="sess-1", project="demo", cwd=str(path.parent),
         transcript_path=str(path), transcript_hash="hash-1",
     )
+
+
+def write_transcript(path: Path, *messages: str) -> Path:
+    """Write a Claude-Code-style JSONL transcript from plain messages.
+
+    The worker extracts a readable conversation from the raw JSONL, so
+    tests must supply real JSONL rather than plain text.
+    """
+    lines = []
+    for i, text in enumerate(messages):
+        role = "user" if i % 2 == 0 else "assistant"
+        lines.append(_json_line(role, text).rstrip("\n"))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _json_line(role: str, text: str) -> str:
+    import json as _json
+    return _json.dumps({"message": {"role": role, "content": text}}) + "\n"
 
 
 def _good_artifacts(session_id: str = "sess-1",
@@ -106,7 +125,7 @@ def test_fact_without_evidence_is_rejected(tmp_path: Path) -> None:
 
 def test_worker_writes_knowledge_and_rule(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("any content", encoding="utf-8")
+    write_transcript(transcript, "problem", "answer")
     vault = Vault(tmp_path / "vault")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
@@ -127,7 +146,7 @@ def test_worker_writes_knowledge_and_rule(tmp_path: Path) -> None:
 def test_worker_skips_rule_when_knowledge_missing(tmp_path: Path) -> None:
     """No knowledge item -> no rule candidate, even if model returns one."""
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     vault = Vault(tmp_path / "vault")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
@@ -148,7 +167,7 @@ def test_worker_skips_rule_when_knowledge_missing(tmp_path: Path) -> None:
 
 def test_should_save_false_writes_nothing(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     vault = Vault(tmp_path / "vault")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
@@ -170,7 +189,7 @@ def test_should_save_false_writes_nothing(tmp_path: Path) -> None:
 
 def test_user_owned_knowledge_blocks_overwrite(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     vault = Vault(tmp_path / "vault")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
@@ -193,7 +212,7 @@ def test_user_owned_knowledge_blocks_overwrite(tmp_path: Path) -> None:
 
 def test_duplicate_events_dedupe(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store = JobStore(tmp_path / "queue.db")
     assert store.enqueue_event(event(transcript)) is True
     assert store.enqueue_event(event(transcript)) is False
@@ -202,7 +221,7 @@ def test_duplicate_events_dedupe(tmp_path: Path) -> None:
 
 def test_session_delete_clears_queue_state(tmp_path: Path) -> None:
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
     process_one(store, Vault(tmp_path / "vault"), FixtureGateway(_good_artifacts()))
@@ -215,7 +234,7 @@ def test_session_delete_clears_queue_state(tmp_path: Path) -> None:
 def test_fact_without_evidence_fails_job(tmp_path: Path) -> None:
     """§24 case 4: fact without evidence -> job failed, no knowledge written."""
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     vault = Vault(tmp_path / "vault")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
@@ -307,7 +326,7 @@ def test_run_loop_processes_n_jobs(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "queue.db")
     for i in range(3):
         transcript = tmp_path / f"s{i}.jsonl"
-        transcript.write_text(f"hello {i}", encoding="utf-8")
+        write_transcript(transcript, f"msg {i}", "resp")
         ev = SessionEvent(
             event_id=f"evt-{i}", event_type=EventType.SESSION_END,
             source="test", session_id=f"sess-{i}", project="demo",
@@ -334,7 +353,7 @@ def test_run_loop_handles_gateway_explosion(tmp_path: Path) -> None:
     from context_forge.worker import run_loop
 
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store = JobStore(tmp_path / "queue.db")
     vault = Vault(tmp_path / "vault")
     store.enqueue_event(event(transcript))
@@ -401,7 +420,7 @@ def test_status_written_after_worker(tmp_path: Path, monkeypatch) -> None:
                         lambda: tmp_path / "status.md")
     vault = Vault(tmp_path / "vault")
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
     process_one(store, vault, FixtureGateway(_good_artifacts()))
@@ -412,7 +431,7 @@ def test_status_written_after_worker(tmp_path: Path, monkeypatch) -> None:
 def test_metrics_include_counts(tmp_path: Path) -> None:
     vault = Vault(tmp_path / "vault")
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store = JobStore(tmp_path / "queue.db")
     store.enqueue_event(event(transcript))
     process_one(store, vault, FixtureGateway(_good_artifacts()))
@@ -446,7 +465,7 @@ def test_doctor_fix_applies_retention(tmp_path: Path, monkeypatch) -> None:
 
     store = JobStore(tmp_path / ".context-forge" / "queue.db")
     transcript = tmp_path / "s.jsonl"
-    transcript.write_text("x", encoding="utf-8")
+    write_transcript(transcript, "chat", "reply")
     store.enqueue_event(event(transcript))
     old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     store.db.execute("UPDATE sessions SET created_at=? WHERE id=?", (old, "sess-1"))
@@ -543,11 +562,7 @@ def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
     from context_forge.worker import _read_transcript_slice
 
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        '{"role":"user","content":"part A"}\n'
-        '{"role":"assistant","content":"first answer"}\n',
-        encoding="utf-8",
-    )
+    write_transcript(transcript, "part A", "first answer")
 
     seen = []
 
@@ -570,8 +585,8 @@ def test_worker_processes_only_new_transcript_slice(tmp_path: Path) -> None:
 
     # Append new lines (resume)
     with transcript.open("a", encoding="utf-8") as f:
-        f.write('{"role":"user","content":"part B"}\n'
-                '{"role":"assistant","content":"second answer"}\n')
+        f.write(_json_line("user", "part B"))
+        f.write(_json_line("assistant", "second answer"))
 
     store.enqueue_event(_make_event(
         tmp_path, transcript_path, "sess-slice", "h2"))
@@ -598,3 +613,107 @@ def _make_event(tmp_path, transcript_path, session_id, transcript_hash):
         cwd=str(tmp_path), transcript_path=transcript_path,
         transcript_hash=transcript_hash,
     )
+
+
+# -- transcript extraction ----------------------------------------------
+
+
+def test_extract_conversation_keeps_text_drops_thinking() -> None:
+    """Raw CC JSONL -> readable conversation; thinking/attachments dropped."""
+    from context_forge.transcript import extract_conversation
+
+    lines = [
+        # user prompt
+        '{"message":{"role":"user","content":"my app 502s"}}',
+        # assistant with thinking + text + tool_use
+        '{"message":{"role":"assistant","content":['
+        '{"type":"thinking","thinking":"SECRET THOUGHT"},'
+        '{"type":"text","text":"check timeouts"},'
+        '{"type":"tool_use","name":"Bash","input":{"command":"curl -v"}}'
+        ']}}',
+        # tool result
+        '{"message":{"role":"user","content":['
+        '{"type":"tool_result","content":"upstream timed out"}]}}',
+        # attachment noise -> dropped
+        '{"type":"attachment","attachment":{"type":"total_tokens_reminder"}}',
+        # malformed line -> skipped
+        'not json at all',
+    ]
+    out = extract_conversation(lines)
+    assert "user: my app 502s" in out
+    assert "assistant: check timeouts" in out
+    assert "[tool Bash]" in out
+    assert "upstream timed out" in out
+    assert "SECRET THOUGHT" not in out  # thinking dropped
+    assert "total_tokens_reminder" not in out
+
+
+def test_extract_conversation_clips_long_blocks() -> None:
+    from context_forge.transcript import extract_conversation, MAX_BLOCK_CHARS
+    long_text = "x" * (MAX_BLOCK_CHARS * 3)
+    line = '{"message":{"role":"user","content":' + __import__("json").dumps(long_text) + '}}'
+    out = extract_conversation([line])
+    assert len(out) < MAX_BLOCK_CHARS * 2
+    assert out.endswith("...")
+
+
+def test_sanitize_text_redacts_secrets() -> None:
+    from context_forge.transcript import sanitize_text
+    out = sanitize_text("Authorization: Bearer abc123 and password=hunter2")
+    assert "abc123" not in out
+    assert "hunter2" not in out
+
+
+# -- cc-switch hook survival -------------------------------------------
+
+
+def test_cc_switch_sync_and_remove(tmp_path: Path) -> None:
+    """Hooks are mirrored into every Claude provider template."""
+    import sqlite3, json as _json
+    from context_forge import cc_switch
+
+    db = tmp_path / "cc-switch.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE providers (id TEXT, app_type TEXT, "
+                "settings_config TEXT)")
+    con.execute("INSERT INTO providers VALUES ('p1','claude','{\"env\":{}}')")
+    con.execute("INSERT INTO providers VALUES ('p2','claude','{\"env\":{}}')")
+    con.execute("INSERT INTO providers VALUES ('p3','codex','{\"env\":{}}')")
+    con.commit()
+    con.close()
+
+    hooks = {"SessionEnd": [{"command": "x"}]}
+    result = cc_switch.sync_hooks(hooks, db_path=db)
+    assert result["providers"] == 2      # codex untouched
+    assert result["updated"] == 2
+
+    con = sqlite3.connect(db)
+    for pid in ("p1", "p2"):
+        cfg = _json.loads(con.execute(
+            "SELECT settings_config FROM providers WHERE id=?", (pid,),
+        ).fetchone()[0])
+        assert cfg["hooks"] == hooks
+        assert cfg["env"] == {}          # existing keys preserved
+    codex = _json.loads(con.execute(
+        "SELECT settings_config FROM providers WHERE id='p3'").fetchone()[0])
+    assert "hooks" not in codex
+    con.close()
+
+    # Second sync is a no-op
+    assert cc_switch.sync_hooks(hooks, db_path=db)["updated"] == 0
+
+    # Remove strips them again
+    assert cc_switch.remove_hooks(db_path=db)["updated"] == 2
+    con = sqlite3.connect(db)
+    cfg = _json.loads(con.execute(
+        "SELECT settings_config FROM providers WHERE id='p1'").fetchone()[0])
+    assert "hooks" not in cfg
+    con.close()
+
+
+def test_cc_switch_noop_when_absent(tmp_path: Path) -> None:
+    from context_forge import cc_switch
+    missing = tmp_path / "nope.db"
+    assert cc_switch.is_available(missing) is False
+    assert cc_switch.sync_hooks({"x": []}, db_path=missing)["providers"] == 0
+    assert cc_switch.remove_hooks(db_path=missing)["providers"] == 0

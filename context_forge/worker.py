@@ -99,11 +99,18 @@ def process_one(store: JobStore, vault: Vault,
             store.finish(job["id"], max_attempts=max_attempts)
             return True
 
-        # Stage the slice as a temp file so the gateway reads it as if
-        # it were a real transcript. Clean up after.
+        # Stage the slice as a readable conversation, not raw JSONL.
+        # Raw CC transcripts are full of tool results and thinking
+        # blocks; feeding that to the model makes it improvise.
+        from .transcript import extract_conversation, sanitize_text
+        conversation = sanitize_text(extract_conversation(slice_text.splitlines()))
+        if not conversation.strip():
+            store.set_lines_processed(event.session_id, total_lines)
+            store.finish(job["id"], max_attempts=max_attempts)
+            return True
         import tempfile
         tmp = Path(tempfile.gettempdir()) / f"cf-slice-{event.session_id}.jsonl"
-        tmp.write_text(slice_text, encoding="utf-8")
+        tmp.write_text(conversation, encoding="utf-8")
         try:
             artifacts = gw.extract_session(
                 str(tmp), event.transcript_hash, event.session_id,
