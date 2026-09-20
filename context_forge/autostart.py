@@ -34,7 +34,8 @@ def _legacy_bat_path() -> Path:
 
 
 def heartbeat_path() -> Path:
-    return Path.home() / ".context-forge" / "watcher-heartbeat"
+    from .config import runtime_dir
+    return runtime_dir() / "watcher-heartbeat"
 
 
 def _python_exe(windowless: bool = False) -> str:

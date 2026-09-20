@@ -35,7 +35,8 @@ def transcript_root() -> Path:
 
 
 def baseline_path() -> Path:
-    return Path.home() / ".context-forge" / "watcher-baseline"
+    from .config import runtime_dir
+    return runtime_dir() / "watcher-baseline"
 
 
 def ensure_baseline() -> float:
@@ -139,7 +140,8 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
 
 
 def heartbeat_path() -> Path:
-    return Path.home() / ".context-forge" / "watcher-heartbeat"
+    from .config import runtime_dir
+    return runtime_dir() / "watcher-heartbeat"
 
 
 def _beat() -> None:

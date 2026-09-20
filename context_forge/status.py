@@ -19,7 +19,8 @@ def collect(store: JobStore) -> dict[str, int | str]:
 
     m = store.metrics()
     settings = load_settings()
-    vault_root = settings.root if settings else Path.home() / ".context-forge" / "vault"
+    from .config import runtime_dir
+    vault_root = settings.root if settings else runtime_dir() / "vault"
     rules_enabled = 0
     if vault_root.exists():
         for path in vault_root.glob("rules/**/*.md"):

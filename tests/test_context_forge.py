@@ -13,6 +13,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 from context_forge.domain import (
     Attempt,
     Claim,
@@ -35,6 +37,19 @@ from context_forge.index import parse_frontmatter
 from context_forge.queue import JobStore
 from context_forge.vault import Vault
 from context_forge.worker import process_one
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime(tmp_path_factory, monkeypatch):
+    """Never let a test write into the real ~/.context-forge.
+
+    Regression guard: `Vault.scan()` used to derive its index path from
+    Path.home() while the vault path came from tmp_path, so every test
+    run left a new `index-*.db` behind in the developer's home dir
+    (140+ accumulated).
+    """
+    monkeypatch.setenv("CONTEXT_FORGE_HOME",
+                       str(tmp_path_factory.mktemp("cf-home")))
 
 
 def event(path: Path) -> SessionEvent:
@@ -527,7 +542,9 @@ def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> Non
         '{"role":"assistant","content":"check upstream timeouts"}',
         encoding="utf-8",
     )
-    queue_dir = tmp_path / ".context-forge"
+    # process-now reads the queue from the runtime dir (CONTEXT_FORGE_HOME),
+    # not from HOME, so enqueue there.
+    queue_dir = Path(os.environ["CONTEXT_FORGE_HOME"])
     queue_dir.mkdir(parents=True, exist_ok=True)
     import hashlib
     from context_forge.queue import JobStore
@@ -551,7 +568,7 @@ def test_process_now_writes_last_run_summary(tmp_path: Path, monkeypatch) -> Non
         [sys.executable, "-m", "context_forge.cli", "process-now"],
         capture_output=True, text=True, env=env, timeout=30,
     )
-    last_run = queue_dir / "last_run.md"
+    last_run = Path(env["CONTEXT_FORGE_HOME"]) / "last_run.md"
     assert last_run.exists()
     body = last_run.read_text(encoding="utf-8")
     assert "1 session(s) processed" in body

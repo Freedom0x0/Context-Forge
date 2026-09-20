@@ -38,8 +38,18 @@ class Settings(BaseModel):
             raise ValueError(f"vault_path is not an existing directory: {path}")
 
 
+def runtime_dir() -> Path:
+    """Directory holding runtime state (queue, index, watcher files).
+
+    Honours CONTEXT_FORGE_HOME so tests and alternate profiles never
+    write into the user's real home directory.
+    """
+    return Path(os.environ.get("CONTEXT_FORGE_HOME",
+                               "~/.context-forge")).expanduser()
+
+
 def default_settings_path() -> Path:
-    return Path(os.environ.get("CONTEXT_FORGE_HOME", "~/.context-forge")).expanduser() / "config.toml"
+    return runtime_dir() / "config.toml"
 
 
 def load_settings(path: Path | None = None) -> Settings | None:

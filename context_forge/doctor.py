@@ -48,7 +48,8 @@ def check_vault_canonical(settings: Settings | None) -> tuple[str, bool, str]:
 
 def check_queue(stalled_hours: int = 24,
                 retention_days: int | None = None) -> tuple[str, bool, str]:
-    path = Path.home() / ".context-forge" / "queue.db"
+    from .config import runtime_dir
+    path = runtime_dir() / "queue.db"
     if not path.exists():
         return ("queue", True, f"queue not initialised at {path}")
     try:
@@ -81,7 +82,8 @@ def check_index(vault_root: Path) -> tuple[str, bool, str]:
         return ("index", True, f"vault missing at {vault_root} — skipped")
     import hashlib
     key = hashlib.sha256(str(vault_root).encode("utf-8")).hexdigest()[:16]
-    db_path = Path.home() / ".context-forge" / f"index-{key}.db"
+    from .config import runtime_dir
+    db_path = runtime_dir() / f"index-{key}.db"
     if not db_path.exists():
         return ("index", True, f"no index at {db_path}; run forge scan")
     try:
@@ -129,7 +131,8 @@ def check_watcher() -> tuple[str, bool, str]:
 
 def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
     settings = load_settings()
-    vault_root = settings.root if settings else Path.home() / ".context-forge" / "vault"
+    from .config import runtime_dir
+    vault_root = settings.root if settings else runtime_dir() / "vault"
     if settings and settings.retention_days:
         retention_days = settings.retention_days
     return [

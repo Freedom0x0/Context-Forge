@@ -37,20 +37,23 @@ app.add_typer(worker_app, name="worker")
 
 
 def _store() -> JobStore:
-    return JobStore(Path.home() / ".context-forge" / "queue.db")
+    from .config import runtime_dir
+    return JobStore(runtime_dir() / "queue.db")
 
 
 def _vault() -> Vault:
     settings = load_settings()
     if settings:
         return Vault(settings.root)
-    return Vault(Path.home() / ".context-forge" / "vault")
+    from .config import runtime_dir
+    return Vault(runtime_dir() / "vault")
 
 
 def _index_path(vault_root: Path) -> Path:
+    from .config import runtime_dir
     import hashlib
     key = hashlib.sha256(str(vault_root).encode("utf-8")).hexdigest()[:16]
-    return Path.home() / ".context-forge" / f"index-{key}.db"
+    return runtime_dir() / f"index-{key}.db"
 
 
 # -- core 6 --------------------------------------------------------------
@@ -161,7 +164,8 @@ def process_now() -> None:
     )
 
     from pathlib import Path
-    home = Path.home() / ".context-forge"
+    from .config import runtime_dir
+    home = runtime_dir()
     home.mkdir(parents=True, exist_ok=True)
     (home / "last_run.md").write_text(
         f"# Context Forge last run\n\n"

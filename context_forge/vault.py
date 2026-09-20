@@ -189,8 +189,9 @@ class Vault:
 
     def _scan_rule_feedback(self) -> None:
         """Read `feedback:` from rule frontmatter and emit to the feedback table."""
+        from .config import runtime_dir
         from .queue import JobStore
-        store = JobStore(self._index_path().parent / "queue.db")
+        store = JobStore(runtime_dir() / "queue.db")
         for path in self.root.glob("rules/**/*.md"):
             text = path.read_text(encoding="utf-8")
             front, _ = parse_frontmatter(text)
@@ -206,9 +207,10 @@ class Vault:
         return sum(1 for _ in self.root.rglob("*.md") if _.name != "index.md")
 
     def _index_path(self) -> Path:
+        from .config import runtime_dir
         import hashlib
         key = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:16]
-        return Path.home() / ".context-forge" / f"index-{key}.db"
+        return runtime_dir() / f"index-{key}.db"
 
     # -- rendering -------------------------------------------------------
 
