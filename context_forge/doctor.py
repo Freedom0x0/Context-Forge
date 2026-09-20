@@ -104,6 +104,29 @@ def check_provider(settings: Settings | None) -> tuple[str, bool, str]:
             f"provider={provider}; user-configured credentials required for live calls")
 
 
+def check_watcher() -> tuple[str, bool, str]:
+    """Is the transcript watcher installed, and is it alive?
+
+    Precipitation no longer depends on Claude Code hooks, so a dead
+    watcher means nothing gets saved. This is the check that catches it.
+    """
+    from .autostart import heartbeat_path, status
+
+    info = status()
+    if not info["installed"]:
+        return ("watcher", False,
+                "autostart missing — run `forge install-hook`")
+    age = info["age_seconds"]
+    if age is None:
+        return ("watcher", False,
+                "no heartbeat yet — start it or log in again")
+    if not info["alive"]:
+        return ("watcher", False,
+                f"last beat {age:.0f}s ago (launcher is installed; "
+                f"it restarts at next logon)")
+    return ("watcher", True, f"alive, last beat {age:.0f}s ago")
+
+
 def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
     settings = load_settings()
     vault_root = settings.root if settings else Path.home() / ".context-forge" / "vault"
@@ -115,6 +138,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_queue(retention_days=retention_days),
         check_index(vault_root),
         check_provider(settings),
+        check_watcher(),
     ]
 
 

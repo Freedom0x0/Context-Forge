@@ -471,12 +471,15 @@ def test_doctor_fix_applies_retention(tmp_path: Path, monkeypatch) -> None:
     store.db.execute("UPDATE sessions SET created_at=? WHERE id=?", (old, "sess-1"))
     store.db.commit()
 
+    import context_forge.doctor as doctor_mod
+    monkeypatch.setattr(doctor_mod, "check_watcher",
+                        lambda: ("watcher", True, "mocked"))
     import context_forge.cli as cli
     cli._store = lambda: store
     cli._vault = lambda: Vault(tmp_path / "vault")
     from typer.testing import CliRunner
     result = CliRunner().invoke(cli.app, ["doctor", "--fix"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "cleaned" in result.output
 
 
@@ -795,13 +798,53 @@ def test_autostart_install_uninstall(tmp_path: Path, monkeypatch) -> None:
     from context_forge import autostart
     monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
     result = autostart.install()
-    bat = Path(result["launcher"])
-    assert bat.exists()
-    body = bat.read_text(encoding="utf-8")
+    vbs = Path(result["launcher"])
+    assert vbs.suffix == ".vbs"
+    body = vbs.read_text(encoding="utf-8")
     assert "watch-transcripts" in body
+    assert "Loop" in body              # self-restarting
+    assert ", 0, True" in body         # hidden window
     assert autostart.status()["installed"] is True
     autostart.uninstall()
     assert autostart.status()["installed"] is False
+
+
+def test_autostart_replaces_legacy_bat(tmp_path: Path, monkeypatch) -> None:
+    from context_forge import autostart
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    legacy = tmp_path / "ContextForgeWatcher.bat"
+    legacy.write_text("@echo off" + chr(10), encoding="utf-8")
+    autostart.install()
+    assert not legacy.exists()          # old fire-and-forget launcher removed
+    assert autostart._vbs_path().exists()
+
+
+def test_autostart_status_reports_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    from context_forge import autostart
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    monkeypatch.setattr(autostart, "heartbeat_path",
+                        lambda: tmp_path / "heartbeat")
+    autostart.install()
+    stale = autostart.status()
+    assert stale["alive"] is False       # no heartbeat file yet
+    (tmp_path / "heartbeat").write_text("now", encoding="utf-8")
+    fresh = autostart.status()
+    assert fresh["alive"] is True
+    assert fresh["age_seconds"] is not None
+
+
+def test_doctor_reports_watcher_state(tmp_path: Path, monkeypatch) -> None:
+    from context_forge import autostart, doctor
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    monkeypatch.setattr(autostart, "heartbeat_path",
+                        lambda: tmp_path / "hb")
+    name, ok, _ = doctor.check_watcher()
+    assert name == "watcher"
+    assert ok is False                   # nothing installed in tmp
+    autostart.install()
+    assert doctor.check_watcher()[1] is False   # installed but no beat
+    (tmp_path / "hb").write_text("now", encoding="utf-8")
+    assert doctor.check_watcher()[1] is True    # alive
 
 
 def test_scan_once_ignores_history_before_baseline(tmp_path: Path,

@@ -1,7 +1,9 @@
 """Logon autostart for the transcript watcher.
 
-Drops a small launcher into the user's Startup folder so
-`forge watch-transcripts` runs in the background at every logon.
+Drops a hidden VBS launcher into the user's Startup folder. The VBS
+runs `forge watch-transcripts` with no visible window and restarts it
+if it ever exits, so a crash doesn't silently stop precipitation.
+
 No admin rights, no Task Scheduler, no service registration.
 
 This is the piece that makes precipitation independent of Claude
@@ -14,10 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 
 TASK_NAME = "ContextForgeWatcher"
-
-
-class PlatformError(RuntimeError):
-    pass
+_LEGACY_BAT = f"{TASK_NAME}.bat"
+_HEARTBEAT_STALE_SECONDS = 300
 
 
 def _startup_dir() -> Path:
@@ -25,42 +25,81 @@ def _startup_dir() -> Path:
             / "Programs/Startup")
 
 
-def _bat_path() -> Path:
-    return _startup_dir() / f"{TASK_NAME}.bat"
+def _vbs_path() -> Path:
+    return _startup_dir() / f"{TASK_NAME}.vbs"
 
 
-def _python_exe() -> str:
-    candidates = [
-        Path.home() / "AppData/Local/Programs/Python/Python312/python.exe",
-        Path.home() / "AppData/Local/Microsoft/WindowsApps/python3.exe",
+def _legacy_bat_path() -> Path:
+    return _startup_dir() / _LEGACY_BAT
+
+
+def heartbeat_path() -> Path:
+    return Path.home() / ".context-forge" / "watcher-heartbeat"
+
+
+def _python_exe(windowless: bool = False) -> str:
+    """Path to a Python interpreter, preferring the windowless one."""
+    names = ("pythonw.exe", "python.exe") if windowless else ("python.exe",)
+    roots = [
+        Path.home() / "AppData/Local/Programs/Python/Python312",
+        Path.home() / "AppData/Local/Programs/Python/Python313",
     ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return "python"
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.exists():
+                return str(candidate)
+    return "pythonw" if windowless else "python"
 
 
 def install() -> dict[str, str]:
-    """Write the Startup launcher."""
+    """Write the hidden, self-restarting Startup launcher."""
     sd = _startup_dir()
     sd.mkdir(parents=True, exist_ok=True)
-    bat = _bat_path()
-    bat.write_text(
-        "@echo off\r\n"
-        f'start /b "" "{_python_exe()}" -m context_forge.cli '
-        "watch-transcripts\r\n",
+
+    # Older releases used a fire-and-forget .bat; replace it.
+    legacy = _legacy_bat_path()
+    if legacy.exists():
+        legacy.unlink()
+
+    python = _python_exe(windowless=True)
+    vbs = _vbs_path()
+    vbs.write_text(
+        "' Context Forge watcher — hidden window, auto-restart on exit.\r\n"
+        "Set sh = CreateObject(\"WScript.Shell\")\r\n"
+        "Do\r\n"
+        f'  sh.Run """{python}"" -m context_forge.cli watch-transcripts", 0, True\r\n'
+        "  WScript.Sleep 30000\r\n"
+        "Loop\r\n",
         encoding="utf-8",
     )
-    return {"launcher": str(bat)}
+    return {"launcher": str(vbs)}
 
 
 def uninstall() -> dict[str, str]:
-    bat = _bat_path()
-    if bat.exists():
-        bat.unlink()
-    return {"launcher": str(bat)}
+    for path in (_vbs_path(), _legacy_bat_path()):
+        if path.exists():
+            path.unlink()
+    return {"launcher": str(_vbs_path())}
 
 
 def status() -> dict[str, object]:
-    bat = _bat_path()
-    return {"launcher": str(bat), "installed": bat.exists()}
+    """Report whether the launcher exists and when the watcher last ran."""
+    import time
+    vbs = _vbs_path()
+    heartbeat = heartbeat_path()
+    result: dict[str, object] = {
+        "launcher": str(vbs),
+        "installed": vbs.exists(),
+        "heartbeat": str(heartbeat),
+        "alive": False,
+        "age_seconds": None,
+    }
+    if heartbeat.exists():
+        try:
+            age = time.time() - heartbeat.stat().st_mtime
+            result["age_seconds"] = round(age, 1)
+            result["alive"] = age < _HEARTBEAT_STALE_SECONDS
+        except OSError:
+            pass
+    return result

@@ -138,6 +138,20 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
     return processed
 
 
+def heartbeat_path() -> Path:
+    return Path.home() / ".context-forge" / "watcher-heartbeat"
+
+
+def _beat() -> None:
+    """Touch the heartbeat so `forge doctor` can tell we're alive."""
+    try:
+        p = heartbeat_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def run(store: JobStore, vault: Vault, gateway=None, *,
         interval_seconds: float = DEFAULT_INTERVAL,
         settle_seconds: float = DEFAULT_SETTLE,
@@ -162,6 +176,7 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
           f"(every {interval_seconds:g}s, settle {settle_seconds:g}s)")
     try:
         while True:
+            _beat()
             try:
                 scan_once(store, vault, gateway,
                           settle_seconds=settle_seconds,
