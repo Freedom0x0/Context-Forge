@@ -262,6 +262,54 @@ def scan_cmd() -> None:
     typer.echo(f"indexed {result['files']} documents; index.md generated")
 
 
+@app.command("watch-transcripts")
+def watch_transcripts(once: bool = typer.Option(False, "--once"),
+                       interval: float = typer.Option(15.0, "--interval",
+                                                       min=1.0),
+                       settle: float = typer.Option(60.0, "--settle",
+                                                     min=1.0),
+                       all_history: bool = typer.Option(
+                           False, "--all-history",
+                           help="ignore the baseline and scan every "
+                                "transcript you have ever recorded")) -> None:
+    """Precipitate from Claude Code transcripts directly.
+
+    Reads ~/.claude/projects/**/*.jsonl instead of relying on Claude
+    Code hooks. Those files are outside any other tool's config, so
+    this keeps working no matter how often cc-switch rewrites
+    ~/.claude/settings.json or which model is active.
+
+    Transcripts touched before the watcher's baseline are ignored, so
+    installing never replays your history. `--once` runs a single pass.
+    """
+    from .watcher import baseline_path, run as watch_run, scan_once
+
+    settings = load_settings()
+    provider = settings.model_provider if settings else "none"
+    max_attempts = settings.max_attempts if settings else 3
+    try:
+        gateway = select_gateway(provider, settings)
+    except Exception as exc:
+        typer.echo(f"gateway unavailable: {exc}")
+        raise typer.Exit(code=1)
+
+    baseline = 0.0 if all_history else None
+    if all_history:
+        typer.echo("[warn] --all-history reprocesses every past transcript")
+
+    if once:
+        n = scan_once(_store(), _vault(), gateway, settle_seconds=settle,
+                      max_attempts=max_attempts, baseline=baseline)
+        typer.echo(f"processed {n} session(s)")
+        return
+    if baseline is not None:
+        from .watcher import reset_baseline
+        reset_baseline(baseline)
+    typer.echo(f"baseline: {baseline_path()}")
+    watch_run(_store(), _vault(), gateway, interval_seconds=interval,
+              settle_seconds=settle, max_attempts=max_attempts)
+
+
 @app.command("watch")
 def watch_cmd(daemon: bool = typer.Option(False, "--daemon"),
                interval: float = typer.Option(2.0, "--interval", min=0.5)) -> None:

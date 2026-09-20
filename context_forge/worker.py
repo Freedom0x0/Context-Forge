@@ -29,6 +29,20 @@ from .queue import JobStore
 from .vault import Vault
 
 
+def count_complete_lines(path: Path) -> int:
+    """Count newline-terminated lines only.
+
+    A transcript may be mid-append, leaving a partial final line. We
+    never advance the offset past a partial line, or the next pass
+    would skip content that was still being written.
+    """
+    try:
+        with path.open("rb") as f:
+            return f.read().count(b"\n")
+    except OSError:
+        return 0
+
+
 def _read_transcript_slice(transcript_path: str, start_line: int
                               ) -> tuple[str, int]:
     """Return (slice_text, total_lines). Slices transcript from start_line.
@@ -41,10 +55,7 @@ def _read_transcript_slice(transcript_path: str, start_line: int
     p = Path(transcript_path)
     if not p.exists():
         return "", 0
-    total = 0
-    with p.open("rb") as f:
-        for _ in f:
-            total += 1
+    total = count_complete_lines(p)
     if start_line > total:
         start_line = 0  # transcript was rotated/truncated
     if start_line >= total:
@@ -55,65 +66,52 @@ def _read_transcript_slice(transcript_path: str, start_line: int
             if i < start_line:
                 continue
             lines.append(line.rstrip("\n"))
-    return "\n".join(lines), total
+    return "\n".join(lines[: total - start_line]), total
 
 
 def _sigterm_to_keyboard_interrupt(signum, frame):  # noqa: ARG001
     raise KeyboardInterrupt
 
 
-def process_one(store: JobStore, vault: Vault,
-                gateway: LlmGateway | None = None,
-                max_attempts: int | None = None) -> bool:
-    """Process a single queued job. Returns True if a job was handled.
+def process_session(store: JobStore, vault: Vault,
+                    gateway: LlmGateway,
+                    session_id: str,
+                    transcript_path: str | None,
+                    transcript_hash: str | None,
+                    project: str,
+                    max_attempts: int = 3) -> str:
+    """Process the new transcript lines for one session.
 
-    Side effects on success:
-    - vault/knowledge/accepted/{k_id}.md if knowledge is non-null
-    - vault/rules/proposals/rule-{k_id}.md if rule_candidate is non-null
-
-    Files flagged `user_owned: true` are skipped (not overwritten).
+    Returns "processed", "skipped" (nothing new / nothing readable) or
+    "failed: <error>". Shared by the queue worker and the transcript
+    watcher so both paths behave identically.
     """
-    from . import status as status_mod
-
-    job = store.claim()
-    if job is None:
-        return False
-    gw = gateway or NoOpGateway()
-    if max_attempts is None:
-        settings = load_settings()
-        max_attempts = settings.max_attempts if settings else 3
     try:
-        event = SessionEvent.model_validate_json(job["payload_json"])
-
-        # Read only the NEW portion of the transcript (since last
-        # processing of this session). On first call, reads everything.
-        start_line = store.get_lines_processed(event.session_id)
+        start_line = store.get_lines_processed(session_id)
         slice_text, total_lines = _read_transcript_slice(
-            event.transcript_path, start_line,
+            transcript_path, start_line,
         )
-
-        # If the slice is empty (worker already processed the full file),
-        # skip the model call but still mark the job succeeded.
         if not slice_text.strip():
-            store.set_lines_processed(event.session_id, total_lines)
-            store.finish(job["id"], max_attempts=max_attempts)
-            return True
+            store.set_lines_processed(session_id, total_lines)
+            return "skipped"
 
-        # Stage the slice as a readable conversation, not raw JSONL.
-        # Raw CC transcripts are full of tool results and thinking
-        # blocks; feeding that to the model makes it improvise.
+        # Feed the model a readable conversation, not raw JSONL.
+        # CC transcripts are full of tool results and thinking blocks;
+        # raw input makes lighter models improvise the output shape.
         from .transcript import extract_conversation, sanitize_text
-        conversation = sanitize_text(extract_conversation(slice_text.splitlines()))
+        conversation = sanitize_text(
+            extract_conversation(slice_text.splitlines())
+        )
         if not conversation.strip():
-            store.set_lines_processed(event.session_id, total_lines)
-            store.finish(job["id"], max_attempts=max_attempts)
-            return True
+            store.set_lines_processed(session_id, total_lines)
+            return "skipped"
+
         import tempfile
-        tmp = Path(tempfile.gettempdir()) / f"cf-slice-{event.session_id}.jsonl"
+        tmp = Path(tempfile.gettempdir()) / f"cf-slice-{session_id}.jsonl"
         tmp.write_text(conversation, encoding="utf-8")
         try:
-            artifacts = gw.extract_session(
-                str(tmp), event.transcript_hash, event.session_id,
+            artifacts = gateway.extract_session(
+                str(tmp), transcript_hash, session_id,
             )
         finally:
             try:
@@ -125,13 +123,41 @@ def process_one(store: JobStore, vault: Vault,
         # construction time still have to satisfy the contract.
         artifacts = SessionArtifacts.model_validate(artifacts.model_dump())
         if artifacts.should_save:
-            _write_session_artifacts(vault, event, artifacts)
+            _write_session_artifacts(vault, session_id, project, artifacts)
+        # Advance the offset even when nothing was saved, so the next
+        # pass doesn't re-read the same lines.
+        store.set_lines_processed(session_id, total_lines)
+        return "processed"
+    except Exception as exc:
+        return f"failed: {type(exc).__name__}: {exc}"
+
+
+def process_one(store: JobStore, vault: Vault,
+                gateway: LlmGateway | None = None,
+                max_attempts: int | None = None) -> bool:
+    """Claim one queued job and process it. True if a job was handled."""
+    from . import status as status_mod
+
+    job = store.claim()
+    if job is None:
+        return False
+    gw = gateway or NoOpGateway()
+    if max_attempts is None:
+        settings = load_settings()
+        max_attempts = settings.max_attempts if settings else 3
+    try:
+        event = SessionEvent.model_validate_json(job["payload_json"])
+        result = process_session(
+            store, vault, gw, event.session_id, event.transcript_path,
+            event.transcript_hash, event.project, max_attempts,
+        )
         if event.event_type is EventType.SESSION_END:
             store.auto_record_feedback_for_session(event.session_id)
-        # Always advance the offset, even on should_save=false, so we
-        # don't re-read the same lines next time.
-        store.set_lines_processed(event.session_id, total_lines)
-        store.finish(job["id"], max_attempts=max_attempts)
+        if result.startswith("failed:"):
+            store.finish(job["id"], error=result[len("failed:"):].strip(),
+                         max_attempts=max_attempts)
+        else:
+            store.finish(job["id"], max_attempts=max_attempts)
     except Exception as exc:
         store.finish(job["id"], error=f"{type(exc).__name__}: {exc}",
                      max_attempts=max_attempts)
@@ -146,21 +172,17 @@ def process_one(store: JobStore, vault: Vault,
     return True
 
 
-def _write_session_artifacts(vault: Vault, event: SessionEvent,
+def _write_session_artifacts(vault: Vault, session_id: str, project: str,
                               artifacts: SessionArtifacts) -> None:
     """Write knowledge + rule candidate.
 
     Each write is best-effort: a single failure (e.g. user-owned file)
     must not block the other writes.
     """
-
     if artifacts.knowledge is not None:
         try:
-            vault.write_knowledge_auto(
-                event.session_id, artifacts.knowledge, artifacts,
-            )
+            vault.write_knowledge_auto(session_id, artifacts.knowledge, artifacts)
         except FileExistsError as exc:
-            # user_owned file -- skip, do not overwrite
             print(f"[worker] knowledge skip: {exc}")
         except Exception as exc:
             print(f"[worker] knowledge write failed: {exc}")
@@ -168,9 +190,7 @@ def _write_session_artifacts(vault: Vault, event: SessionEvent,
     if artifacts.rule_candidate is not None and artifacts.knowledge is not None:
         try:
             vault.write_rule_candidate(
-                event.session_id,
-                artifacts.knowledge.id,
-                event.project,
+                session_id, artifacts.knowledge.id, project,
                 artifacts.rule_candidate,
             )
         except FileExistsError as exc:

@@ -1,0 +1,173 @@
+"""Watch Claude Code transcripts directly — no hooks, no settings.json.
+
+Claude Code appends to `~/.claude/projects/<slug>/<session>.jsonl`
+continuously. Those files live outside any other tool's configuration,
+so watching them keeps Context Forge working no matter how often
+cc-switch rewrites `~/.claude/settings.json` or which model is active.
+
+A transcript is processed only when it
+  1. has complete lines past the stored offset, AND
+  2. has been untouched for `settle_seconds` (so we never read a
+     half-written line, and never hammer the model during active work).
+
+Each pass reuses `worker.process_session`, so the watcher and the
+hook-driven path behave identically.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+from .gateways import NoOpGateway, select_gateway
+from .queue import JobStore
+from .vault import Vault
+from .worker import count_complete_lines, process_session
+
+DEFAULT_INTERVAL = 15.0
+DEFAULT_SETTLE = 60.0
+_CWD_SCAN_LINES = 200
+
+
+def transcript_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def baseline_path() -> Path:
+    return Path.home() / ".context-forge" / "watcher-baseline"
+
+
+def ensure_baseline() -> float:
+    """Epoch before which transcripts are ignored.
+
+    Without this the watcher would replay the user's entire Claude Code
+    history on first run — expensive and surprising. Created on first
+    use, so precipitation starts from the moment the watcher appears.
+    """
+    p = baseline_path()
+    if p.exists():
+        try:
+            return float(p.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pass
+    now = time.time()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(now), encoding="utf-8")
+    except OSError:
+        pass
+    return now
+
+
+def reset_baseline(when: float | None = None) -> float:
+    """Move the baseline (0 = re-scan everything from now on)."""
+    value = time.time() if when is None else when
+    p = baseline_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(value), encoding="utf-8")
+    return value
+
+
+def read_session_meta(transcript: Path) -> tuple[str, str] | None:
+    """Return (session_id, project) for a transcript, or None.
+
+    `cwd` lives on ordinary records, not on the leading bookkeeping
+    ones, so we scan a bounded prefix. The project name is the
+    directory whose work the session belongs to.
+    """
+    try:
+        with transcript.open("r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= _CWD_SCAN_LINES:
+                    break
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                cwd = rec.get("cwd")
+                if cwd:
+                    return transcript.stem, Path(cwd).name
+    except OSError:
+        return None
+    return None
+
+
+def scan_once(store: JobStore, vault: Vault, gateway, *,
+              settle_seconds: float = DEFAULT_SETTLE,
+              max_attempts: int = 3,
+              baseline: float | None = None,
+              now: float | None = None) -> int:
+    """Process every transcript that has settled with new content.
+
+    Transcripts last touched before `baseline` are ignored, so a fresh
+    install never replays history. Returns the number of sessions
+    actually processed.
+    """
+    root = transcript_root()
+    if not root.exists():
+        return 0
+    current = time.time() if now is None else now
+    floor = ensure_baseline() if baseline is None else baseline
+    processed = 0
+    for transcript in sorted(root.glob("*/*.jsonl")):
+        try:
+            mtime = transcript.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < floor:
+            continue  # predates the watcher; never replay history
+        if current - mtime < settle_seconds:
+            continue  # still being written, or user is mid-session
+        total = count_complete_lines(transcript)
+        session_id = transcript.stem
+        if total <= store.get_lines_processed(session_id):
+            continue
+        meta = read_session_meta(transcript)
+        if meta is None:
+            continue
+        _, project = meta
+        result = process_session(
+            store, vault, gateway, session_id, str(transcript),
+            None, project, max_attempts,
+        )
+        if result == "processed":
+            processed += 1
+        elif result.startswith("failed:"):
+            print(f"[watcher] {session_id[:8]}: {result}")
+    return processed
+
+
+def run(store: JobStore, vault: Vault, gateway=None, *,
+        interval_seconds: float = DEFAULT_INTERVAL,
+        settle_seconds: float = DEFAULT_SETTLE,
+        max_attempts: int | None = None) -> None:
+    """Poll forever. Ctrl+C / SIGTERM exits cleanly."""
+    import signal
+
+    def _sigterm(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm)
+    except (AttributeError, ValueError):
+        pass
+
+    if max_attempts is None:
+        from .config import load_settings
+        settings = load_settings()
+        max_attempts = settings.max_attempts if settings else 3
+
+    print(f"[watcher] watching {transcript_root()} "
+          f"(every {interval_seconds:g}s, settle {settle_seconds:g}s)")
+    try:
+        while True:
+            try:
+                scan_once(store, vault, gateway,
+                          settle_seconds=settle_seconds,
+                          max_attempts=max_attempts)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("[watcher] interrupted; exiting")

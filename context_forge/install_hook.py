@@ -86,17 +86,16 @@ def install(target: Path | None = None) -> dict[str, int]:
                   SESSION_START_COMMAND)
     _save(path, payload)
 
-    # Mirror the hooks into cc-switch's provider templates so a
-    # provider switch doesn't wipe them (cc-switch rewrites
-    # ~/.claude/settings.json from `providers.settings_config`).
+    # The reliable half: a logon launcher for the transcript watcher.
+    # The hooks above are a latency optimisation only — the watcher
+    # reads transcripts straight from disk and cannot be disabled by
+    # another tool rewriting ~/.claude/settings.json.
     try:
-        from . import cc_switch
-        if cc_switch.is_available():
-            result = cc_switch.sync_hooks(payload["hooks"])
-            print(f"[install-hook] cc-switch: {result['updated']}/"
-                  f"{result['providers']} provider(s) updated")
+        from . import autostart
+        result = autostart.install()
+        print(f"[install-hook] watcher autostart at {result['launcher']}")
     except Exception as exc:
-        print(f"[install-hook] warning: cc-switch sync failed ({exc})")
+        print(f"[install-hook] warning: autostart not installed ({exc})")
 
     return {"added": added, "updated": updated, "path": str(path)}
 
@@ -120,10 +119,9 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
     _save(path, payload)
 
     try:
-        from . import cc_switch
-        if cc_switch.is_available():
-            cc_switch.remove_hooks()
+        from . import autostart
+        autostart.uninstall()
     except Exception as exc:
-        print(f"[install-hook] warning: cc-switch cleanup failed ({exc})")
+        print(f"[install-hook] warning: autostart not removed ({exc})")
 
     return {"removed": removed, "path": str(path)}

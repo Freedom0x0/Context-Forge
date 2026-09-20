@@ -664,56 +664,178 @@ def test_sanitize_text_redacts_secrets() -> None:
     assert "hunter2" not in out
 
 
-# -- cc-switch hook survival -------------------------------------------
 
 
-def test_cc_switch_sync_and_remove(tmp_path: Path) -> None:
-    """Hooks are mirrored into every Claude provider template."""
-    import sqlite3, json as _json
-    from context_forge import cc_switch
-
-    db = tmp_path / "cc-switch.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE providers (id TEXT, app_type TEXT, "
-                "settings_config TEXT)")
-    con.execute("INSERT INTO providers VALUES ('p1','claude','{\"env\":{}}')")
-    con.execute("INSERT INTO providers VALUES ('p2','claude','{\"env\":{}}')")
-    con.execute("INSERT INTO providers VALUES ('p3','codex','{\"env\":{}}')")
-    con.commit()
-    con.close()
-
-    hooks = {"SessionEnd": [{"command": "x"}]}
-    result = cc_switch.sync_hooks(hooks, db_path=db)
-    assert result["providers"] == 2      # codex untouched
-    assert result["updated"] == 2
-
-    con = sqlite3.connect(db)
-    for pid in ("p1", "p2"):
-        cfg = _json.loads(con.execute(
-            "SELECT settings_config FROM providers WHERE id=?", (pid,),
-        ).fetchone()[0])
-        assert cfg["hooks"] == hooks
-        assert cfg["env"] == {}          # existing keys preserved
-    codex = _json.loads(con.execute(
-        "SELECT settings_config FROM providers WHERE id='p3'").fetchone()[0])
-    assert "hooks" not in codex
-    con.close()
-
-    # Second sync is a no-op
-    assert cc_switch.sync_hooks(hooks, db_path=db)["updated"] == 0
-
-    # Remove strips them again
-    assert cc_switch.remove_hooks(db_path=db)["updated"] == 2
-    con = sqlite3.connect(db)
-    cfg = _json.loads(con.execute(
-        "SELECT settings_config FROM providers WHERE id='p1'").fetchone()[0])
-    assert "hooks" not in cfg
-    con.close()
+# -- transcript watcher (no hooks required) -----------------------------
 
 
-def test_cc_switch_noop_when_absent(tmp_path: Path) -> None:
-    from context_forge import cc_switch
-    missing = tmp_path / "nope.db"
-    assert cc_switch.is_available(missing) is False
-    assert cc_switch.sync_hooks({"x": []}, db_path=missing)["providers"] == 0
-    assert cc_switch.remove_hooks(db_path=missing)["providers"] == 0
+def _write_cc_transcript(path: Path, cwd: str, *messages: str) -> Path:
+    """Write a transcript shaped like CC's own (~/.claude/projects/...)."""
+    import json as _json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for i, text in enumerate(messages):
+        role = "user" if i % 2 == 0 else "assistant"
+        lines.append(_json.dumps({
+            "cwd": cwd, "sessionId": path.stem,
+            "message": {"role": role, "content": text},
+        }))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_count_complete_lines_ignores_partial_tail(tmp_path: Path) -> None:
+    from context_forge.worker import count_complete_lines
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(b'{"a":1}\n{"b":2}\n{"partial')   # last line unterminated
+    assert count_complete_lines(p) == 2
+
+
+def test_read_session_meta_finds_cwd(tmp_path: Path) -> None:
+    from context_forge.watcher import read_session_meta
+    tx = _write_cc_transcript(
+        tmp_path / "abc-123.jsonl", r"C:\work\my-app", "hi", "hello")
+    meta = read_session_meta(tx)
+    assert meta == ("abc-123", "my-app")
+
+
+def test_read_session_meta_none_when_no_cwd(tmp_path: Path) -> None:
+    from context_forge.watcher import read_session_meta
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"type":"mode"}\n{"type":"last-prompt"}\n', encoding="utf-8")
+    assert read_session_meta(p) is None
+
+
+def test_scan_once_processes_settled_transcript(tmp_path: Path,
+                                                 monkeypatch) -> None:
+    """A quiet transcript with new lines gets precipitated."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-demo"
+    tx = _write_cc_transcript(projects / "s1.jsonl", r"C:\work\demo",
+                              "my app 502s", "check upstream timeouts")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    seen = []
+
+    class Spy(FixtureGateway):
+        def extract_session(self, transcript_path, transcript_hash, session_id):
+            seen.append(Path(transcript_path).read_text(encoding="utf-8"))
+            return _good_artifacts(session_id, f"k-{session_id}")
+
+    # settle_seconds=0 so the just-written file counts as settled
+    n = watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
+    assert n == 1
+    assert "my app 502s" in seen[0]
+    assert store.get_lines_processed("s1") == 2
+    assert (vault.root / "knowledge" / "accepted" / "k-s1.md").exists()
+
+    # Second pass: nothing new
+    assert watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0) == 0
+
+
+def test_scan_once_skips_fresh_transcript(tmp_path: Path, monkeypatch) -> None:
+    """A transcript still being written is left alone."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-demo"
+    _write_cc_transcript(projects / "s2.jsonl", r"C:\work\demo", "mid", "session")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    called = []
+
+    class Spy(FixtureGateway):
+        def extract_session(self, *a, **kw):
+            called.append(1)
+            return _good_artifacts()
+
+    n = watcher.scan_once(store, vault, Spy(), settle_seconds=3600, baseline=0)
+    assert n == 0
+    assert called == []          # model never invoked
+    assert store.get_lines_processed("s2") == 0  # offset untouched
+
+
+def test_scan_once_incremental_on_append(tmp_path: Path, monkeypatch) -> None:
+    """Appending more lines later precipitates only the new part."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-demo"
+    tx = _write_cc_transcript(projects / "s3.jsonl", r"C:\work\demo",
+                              "first half", "answer one")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    seen = []
+
+    class Spy(FixtureGateway):
+        def extract_session(self, transcript_path, *a, **kw):
+            seen.append(Path(transcript_path).read_text(encoding="utf-8"))
+            return _good_artifacts()
+
+    watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
+
+    with tx.open("a", encoding="utf-8") as f:
+        f.write(_json_line("user", "second half"))
+        f.write(_json_line("assistant", "answer two"))
+
+    watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
+    assert len(seen) == 2
+    assert "first half" in seen[0]
+    assert "first half" not in seen[1]    # only the new slice
+    assert "second half" in seen[1]
+    assert store.get_lines_processed("s3") == 4
+
+
+def test_autostart_install_uninstall(tmp_path: Path, monkeypatch) -> None:
+    from context_forge import autostart
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    result = autostart.install()
+    bat = Path(result["launcher"])
+    assert bat.exists()
+    body = bat.read_text(encoding="utf-8")
+    assert "watch-transcripts" in body
+    assert autostart.status()["installed"] is True
+    autostart.uninstall()
+    assert autostart.status()["installed"] is False
+
+
+def test_scan_once_ignores_history_before_baseline(tmp_path: Path,
+                                                    monkeypatch) -> None:
+    """A fresh install must not replay the user's whole CC history."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-old"
+    tx = _write_cc_transcript(projects / "old.jsonl", r"C:\work\old",
+                              "ancient session", "old answer")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    called = []
+
+    class Spy(FixtureGateway):
+        def extract_session(self, *a, **kw):
+            called.append(1)
+            return _good_artifacts()
+
+    # baseline in the future relative to the file -> skipped
+    future = tx.stat().st_mtime + 10_000
+    assert watcher.scan_once(store, vault, Spy(), settle_seconds=0,
+                             baseline=future) == 0
+    assert called == []
+
+
+def test_ensure_baseline_is_stable(tmp_path: Path, monkeypatch) -> None:
+    from context_forge import watcher
+    monkeypatch.setattr(watcher, "baseline_path",
+                        lambda: tmp_path / "baseline")
+    first = watcher.ensure_baseline()
+    assert watcher.ensure_baseline() == first      # not rewritten
+    moved = watcher.reset_baseline(0.0)
+    assert moved == 0.0
+    assert watcher.ensure_baseline() == 0.0
