@@ -129,6 +129,11 @@ def process_session(store: JobStore, vault: Vault,
         store.set_lines_processed(session_id, total_lines)
         return "processed"
     except Exception as exc:
+        from .provider_http import RateLimited
+        if isinstance(exc, RateLimited):
+            # Offset intentionally left un-advanced: the next pass
+            # retries the same slice. Nothing is lost.
+            return "ratelimited"
         return f"failed: {type(exc).__name__}: {exc}"
 
 

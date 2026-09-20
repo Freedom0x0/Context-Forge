@@ -134,6 +134,11 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         )
         if result == "processed":
             processed += 1
+        elif result == "ratelimited":
+            # The proxy is shared with Claude Code; stop this pass
+            # rather than queueing more 429s behind it.
+            print(f"[watcher] rate limited; pausing this pass")
+            break
         elif result.startswith("failed:"):
             print(f"[watcher] {session_id[:8]}: {result}")
     return processed

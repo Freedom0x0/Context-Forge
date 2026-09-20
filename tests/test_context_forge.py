@@ -899,3 +899,116 @@ def test_ensure_baseline_is_stable(tmp_path: Path, monkeypatch) -> None:
     moved = watcher.reset_baseline(0.0)
     assert moved == 0.0
     assert watcher.ensure_baseline() == 0.0
+
+
+# -- provider robustness (the "nothing precipitates" root causes) -------
+
+
+def _remote_gateway(handler):
+    import httpx
+    from context_forge.provider_http import RemoteGateway
+    gw = RemoteGateway(api_url="https://api.test", api_key="sk-x",
+                       model="m", max_attempts=2)
+    gw._client = httpx.Client(transport=httpx.MockTransport(handler))
+    gw.base_delay = 0.0
+    gw.rate_limit_delay = 0.0      # don't sleep in tests
+    return gw
+
+
+def test_429_raises_rate_limited() -> None:
+    """A throttled proxy must surface as RateLimited, not a generic error."""
+    import httpx
+    import pytest as _pytest
+    from context_forge.provider_http import RateLimited
+
+    gw = _remote_gateway(lambda req: httpx.Response(
+        429, headers={"retry-after": "0"}, text="slow down"))
+    with _pytest.raises(RateLimited):
+        gw.extract_session(None, None, "s1")
+
+
+def test_429_is_not_a_hard_failure_for_the_worker(tmp_path: Path) -> None:
+    """Rate limiting must leave the offset alone so the slice is retried."""
+    from context_forge.provider_http import RateLimited
+    from context_forge.worker import process_session
+
+    tx = tmp_path / "t.jsonl"
+    write_transcript(tx, "work", "reply")
+
+    class Throttled:
+        name = "throttled"
+        def extract_session(self, *a, **kw):
+            raise RateLimited("429")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    result = process_session(store, vault, Throttled(), "s1", str(tx), None,
+                             "demo", 3)
+    assert result == "ratelimited"
+    assert store.get_lines_processed("s1") == 0   # nothing consumed
+
+
+def test_empty_reply_reports_shape() -> None:
+    """A reply with no text block must say why, not just 'no JSON'."""
+    import json
+    import httpx
+    import pytest as _pytest
+    from context_forge.provider_http import GatewayError
+
+    def handler(req):
+        return httpx.Response(200, json={
+            "stop_reason": "max_tokens",
+            # thinking only: what a reasoning model emits when the
+            # token budget runs out before it writes any text
+            "content": [{"type": "thinking", "thinking": "x" * 9000}],
+            "usage": {"output_tokens": 2048},
+        })
+
+    gw = _remote_gateway(handler)
+    with _pytest.raises(GatewayError) as err:
+        gw.extract_session(None, None, "s1")
+    msg = str(err.value)
+    assert "empty response" in msg
+    assert "max_tokens" in msg
+    assert "thinking" in msg
+
+
+def test_remote_request_asks_for_room_to_think() -> None:
+    """max_tokens must cover the reasoning block plus the JSON answer.
+
+    Measured: at 2048 a reasoning model returns stop_reason=max_tokens
+    with a thinking block only, so the reply is empty and every session
+    fails to precipitate.
+    """
+    import json
+    import httpx
+    from context_forge.domain import SessionArtifacts
+
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"content": [
+            {"type": "text", "text": json.dumps(
+                {"title": "t", "should_save": False, "reason": "x"})}]})
+
+    gw = _remote_gateway(handler)
+    gw.extract_session(None, None, "s1")
+    assert seen["body"]["max_tokens"] >= 8192
+
+
+def test_excerpt_keeps_head_and_tail() -> None:
+    """Long sessions keep their newest turns, not just the oldest."""
+    from context_forge.provider_http import HttpGateway
+    import tempfile, os
+    fd, name = tempfile.mkstemp(suffix=".jsonl")
+    os.close(fd)
+    p = Path(name)
+    try:
+        p.write_text("HEAD" + ("x" * 40000) + "TAIL", encoding="utf-8")
+        out = HttpGateway._transcript_excerpt(str(p), None)
+        assert out.startswith("HEAD")
+        assert out.endswith("TAIL")
+        assert len(out) < 20000
+    finally:
+        p.unlink()

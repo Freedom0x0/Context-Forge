@@ -70,10 +70,33 @@ class GatewayError(RuntimeError):
     """Raised by HTTP gateways when the model is unreachable or misbehaves."""
 
 
+class RateLimited(GatewayError):
+    """The provider is throttling us; retrying later will help.
+
+    The watcher treats this differently from a hard failure: the
+    session is left un-advanced and simply picked up on a later pass,
+    so a busy proxy never loses a session.
+    """
+
+
+def _retry_after(response) -> float | None:
+    """Parse a Retry-After header (seconds form) if the server sent one."""
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 class HttpGateway:
     """HTTP + retry + JSON plumbing shared by RemoteGateway and LocalGateway."""
 
     name = "http"
+
+    # A shared local proxy needs long gaps, not quick retries.
+    rate_limit_delay = 20.0
 
     def __init__(self, max_attempts: int = 3, base_delay: float = 1.0,
                  timeout: float = 30.0) -> None:
@@ -101,7 +124,17 @@ class HttpGateway:
                 last_exc = exc
                 self._sleep_backoff(attempt)
                 continue
-            if response.status_code in {429, 500, 502, 503, 504}:
+            if response.status_code == 429:
+                # The local proxy is shared with Claude Code itself, so
+                # we compete for quota. Honour Retry-After when present
+                # and back off far longer than for a transient 5xx.
+                delay = _retry_after(response) or self.rate_limit_delay * attempt
+                last_exc = RateLimited(
+                    f"429 rate limited; sleeping {delay:.0f}s"
+                )
+                time.sleep(min(delay, 300.0))
+                continue
+            if response.status_code in {500, 502, 503, 504}:
                 last_exc = GatewayError(
                     f"{response.status_code} {response.reason_phrase}"
                 )
@@ -112,6 +145,8 @@ class HttpGateway:
                     f"{response.status_code} {response.text[:200]}"
                 )
             return _CallResult(text=response.text, attempts=attempt)
+        if isinstance(last_exc, RateLimited):
+            raise last_exc
         raise GatewayError(f"max attempts exhausted: {last_exc}")
 
     def _sleep_backoff(self, attempt: int) -> None:
@@ -140,8 +175,15 @@ class HttpGateway:
         from .transcript import sanitize_transcript
         sanitized = sanitize_transcript(Path(transcript_path))
         body = sanitized.content.strip()
-        if len(body) > 8000:
-            body = body[:8000] + "\n... (truncated)"
+        # Keep both ends: a resumed session's newest turns carry the
+        # actual work, but the opening frames the problem. A plain
+        # head-truncation fed the model only the oldest material.
+        limit = 12000
+        if len(body) > limit:
+            head = limit // 3
+            tail = limit - head
+            body = (body[:head] + "\n... (middle omitted) ...\n"
+                    + body[-tail:])
         return body or "(empty)"
 
     def extract_session(self, transcript_path, transcript_hash, session_id):
@@ -213,7 +255,11 @@ class RemoteGateway(HttpGateway):
         }
         body = {
             "model": self.model,
-            "max_tokens": 2048,
+            # Reasoning-capable models spend most of the budget on a
+            # thinking block before emitting text. At 2048 the reply
+            # was cut off mid-thought and contained no text block at
+            # all (measured: stop_reason=max_tokens, thinking only).
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
         }
         result = self._post(self.api_url, headers, body)
@@ -222,7 +268,21 @@ class RemoteGateway(HttpGateway):
         except json.JSONDecodeError as exc:
             raise GatewayError(f"anthropic returned non-JSON: {exc}") from exc
         blocks = payload.get("content") or []
-        texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+        texts = [b.get("text", "") for b in blocks
+                 if b.get("type") == "text" and (b.get("text") or "").strip()]
+        if not texts:
+            # No usable text block: usually the reply was cut off inside
+            # a thinking block (bump max_tokens), or the proxy returned
+            # an error-shaped 200. Surface the shape so it's diagnosable
+            # instead of a bare "no JSON object".
+            kinds = [b.get("type") for b in blocks]
+            sizes = [len(b.get("text") or b.get("thinking") or "")
+                     for b in blocks]
+            raise GatewayError(
+                f"empty response (stop_reason={payload.get('stop_reason')!r}, "
+                f"blocks={kinds}, sizes={sizes}, "
+                f"usage={payload.get('usage')})"
+            )
         return "\n".join(texts)
 
 
