@@ -1,10 +1,15 @@
-"""Install or remove the Claude Code hook for Context Forge.
+"""Install the Claude Code SessionStart hook and the watcher autostart.
 
-Writes SessionEnd, PreCompact, and SessionStart entries into the
-user-level `settings.json`. Idempotent: existing entries are not
-duplicated, and running with `--uninstall` removes only the entries
-we own. SessionStart prints `forge status` so Claude Code can show
-the user pending review counts without manual commands.
+Two independent pieces:
+
+1. `SessionStart` hook — prints a one-line status above the input
+   box. Cosmetic; losing it changes nothing functionally.
+2. Watcher autostart — a Startup-folder launcher for
+   `forge watch-transcripts`. This is what actually precipitates,
+   and it reads transcripts from disk so it cannot be disabled by
+   another tool rewriting `~/.claude/settings.json`.
+
+Both are idempotent; `--uninstall` removes only what this owns.
 """
 
 from __future__ import annotations
@@ -26,8 +31,11 @@ def _absolute_forge_command() -> str:
     return "python -m context_forge.hooks.claude_code"
 
 
+# Only SessionStart is wired: it prints the status line CC shows
+# above the input box. Precipitation is the watcher's job, so
+# SessionEnd / PreCompact hooks would be dead weight.
 HOOK_COMMAND = "python -m context_forge.hooks.claude_code"
-HOOK_EVENTS = ("SessionEnd", "PreCompact")
+HOOK_EVENTS: tuple[str, ...] = ()
 SESSION_START_COMMAND = _absolute_forge_command()
 
 
