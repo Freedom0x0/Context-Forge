@@ -7,7 +7,7 @@
 
 ```bash
 git clone <repo>
-cd code-mentor
+cd Context-Forge
 python -m pip install -e .
 
 # 可选：装 MCP server 依赖（让 Claude Code / Desktop 直接读 vault）

@@ -1,5 +1,0 @@
-timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
-2026-08-11T14:52	c117132	code-mentor	-	baseline	baseline	-	初始评估	full_test
-2026-08-11T15:25	aada028	code-mentor	-	88.8	baseline_eval	-	dim8 偏弱 / dim1 混入 vault 路径	full_test
-2026-08-11T15:32	7a11f3a	code-mentor	-	-	test_set	dim8	加 2 个复合压力 prompt（scope+blacklist / im-sure+settle），dry_run 验证	full_test
-2026-08-11T15:35	8b06a03	code-mentor	88.8	89.5	keep	dim1	description 净化 — 移除具体路径，留触发词+行为边界。+0.7 边际收益低，进入 HL-4 监控。	dry_run

@@ -64,8 +64,8 @@ Claude Code hooks / transcript
 需要 Python 3.12+：
 
 ```bash
-git clone https://github.com/Freedom0x0/code-mentor.git
-cd code-mentor
+git clone https://github.com/Freedom0x0/Context-Forge.git
+cd Context-Forge
 python -m pip install -e ".[mcp]"
 ```
 
