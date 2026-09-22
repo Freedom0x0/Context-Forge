@@ -98,7 +98,8 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
               settle_seconds: float = DEFAULT_SETTLE,
               max_attempts: int = 3,
               baseline: float | None = None,
-              now: float | None = None) -> int:
+              now: float | None = None,
+              memory_store=None) -> int:
     """Process every transcript that has settled with new content.
 
     Transcripts last touched before `baseline` are ignored, so a fresh
@@ -130,7 +131,7 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         _, project = meta
         result = process_session(
             store, vault, gateway, session_id, str(transcript),
-            None, project, max_attempts,
+            None, project, max_attempts, memory_store,
         )
         if result == "processed":
             processed += 1
@@ -162,7 +163,8 @@ def _beat() -> None:
 def run(store: JobStore, vault: Vault, gateway=None, *,
         interval_seconds: float = DEFAULT_INTERVAL,
         settle_seconds: float = DEFAULT_SETTLE,
-        max_attempts: int | None = None) -> None:
+        max_attempts: int | None = None,
+        memory_store=None) -> None:
     """Poll forever. Ctrl+C / SIGTERM exits cleanly."""
     import signal
 
@@ -187,7 +189,8 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
             try:
                 scan_once(store, vault, gateway,
                           settle_seconds=settle_seconds,
-                          max_attempts=max_attempts)
+                          max_attempts=max_attempts,
+                          memory_store=memory_store)
             except Exception as exc:  # noqa: BLE001
                 print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
             time.sleep(interval_seconds)

@@ -1,7 +1,7 @@
 [project]
 name = "context-forge"
-version = "0.1.0"
-description = "Local-first compiler for development-session knowledge"
+version = "1.0.0"
+description = "Local-first continuous-learning memory system for agents"
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.0,<3.0",

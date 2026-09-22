@@ -41,6 +41,13 @@ def _store() -> JobStore:
     return JobStore(runtime_dir() / "queue.db")
 
 
+def _memory():
+    from .config import runtime_dir
+    from .memory import MemoryStore
+    path = runtime_dir() / "memory.db"
+    return MemoryStore(path, readonly=False) if path.exists() else None
+
+
 def _vault() -> Vault:
     settings = load_settings()
     if settings:
@@ -74,6 +81,9 @@ def init(vault_path: Path) -> None:
     settings = Settings(vault_path=vault_path.resolve())
     cfg_path.write_bytes(tomli_w.dumps(settings.model_dump(mode="json")))
     Vault(vault_path / "context-forge")  # create dirs
+    from .memory import MemoryStore
+    from .config import runtime_dir
+    MemoryStore.initialize(runtime_dir() / "memory.db")
     typer.echo(f"wrote {cfg_path} (vault = {settings.root})")
 
 
@@ -103,13 +113,13 @@ def worker_run(once: bool = typer.Option(False, "--once"),
     gateway = select_gateway(provider, settings)
     max_attempts = settings.max_attempts if settings else 3
     if once:
-        processed = process_one(_store(), _vault(), gateway, max_attempts)
+        processed = process_one(_store(), _vault(), gateway, max_attempts, _memory())
         typer.echo("processed" if processed else "empty")
         return
     if interval <= 0:
         interval = settings.poll_interval_seconds if settings else 2.0
     run_loop(_store(), _vault(), gateway,
-             interval_seconds=interval, max_attempts=max_attempts)
+             interval_seconds=interval, max_attempts=max_attempts, memory_store=_memory())
 
 
 @app.command("process-now")
@@ -139,7 +149,7 @@ def process_now() -> None:
             settings2 = load_settings()
             p2 = settings2.model_provider if settings2 else "none"
             gw = select_gateway(p2, settings2)
-            processed = process_one(store, vault, gw, max_attempts)
+            processed = process_one(store, vault, gw, max_attempts, _memory())
         except Exception as exc:
             sys.stdout.write(f"[error] {type(exc).__name__}: {exc}\n")
             failures += 1
@@ -303,7 +313,7 @@ def watch_transcripts(once: bool = typer.Option(False, "--once"),
 
     if once:
         n = scan_once(_store(), _vault(), gateway, settle_seconds=settle,
-                      max_attempts=max_attempts, baseline=baseline)
+                      max_attempts=max_attempts, baseline=baseline, memory_store=_memory())
         typer.echo(f"processed {n} session(s)")
         return
     if baseline is not None:
@@ -311,7 +321,7 @@ def watch_transcripts(once: bool = typer.Option(False, "--once"),
         reset_baseline(baseline)
     typer.echo(f"baseline: {baseline_path()}")
     watch_run(_store(), _vault(), gateway, interval_seconds=interval,
-              settle_seconds=settle, max_attempts=max_attempts)
+              settle_seconds=settle, max_attempts=max_attempts, memory_store=_memory())
 
 
 @app.command("watch")

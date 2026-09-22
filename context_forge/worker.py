@@ -79,7 +79,8 @@ def process_session(store: JobStore, vault: Vault,
                     transcript_path: str | None,
                     transcript_hash: str | None,
                     project: str,
-                    max_attempts: int = 3) -> str:
+                    max_attempts: int = 3,
+                    memory_store=None) -> str:
     """Process the new transcript lines for one session.
 
     Returns "processed", "skipped" (nothing new / nothing readable) or
@@ -124,6 +125,13 @@ def process_session(store: JobStore, vault: Vault,
         artifacts = SessionArtifacts.model_validate(artifacts.model_dump())
         if artifacts.should_save:
             _write_session_artifacts(vault, session_id, project, artifacts)
+            if memory_store is not None:
+                from .memory_lifecycle import MemoryLifecycle
+                model = getattr(gateway, "model", None) or getattr(gateway, "name", None)
+                MemoryLifecycle(memory_store, model=model, prompt_version="session-artifacts-v1").publish_session(
+                    artifacts, session_id=session_id, project=project,
+                    source_reference=transcript_path or "",
+                )
         # Advance the offset even when nothing was saved, so the next
         # pass doesn't re-read the same lines.
         store.set_lines_processed(session_id, total_lines)
@@ -139,7 +147,8 @@ def process_session(store: JobStore, vault: Vault,
 
 def process_one(store: JobStore, vault: Vault,
                 gateway: LlmGateway | None = None,
-                max_attempts: int | None = None) -> bool:
+                max_attempts: int | None = None,
+                memory_store=None) -> bool:
     """Claim one queued job and process it. True if a job was handled."""
     from . import status as status_mod
 
@@ -155,6 +164,7 @@ def process_one(store: JobStore, vault: Vault,
         result = process_session(
             store, vault, gw, event.session_id, event.transcript_path,
             event.transcript_hash, event.project, max_attempts,
+            memory_store,
         )
         if event.event_type is EventType.SESSION_END:
             store.auto_record_feedback_for_session(event.session_id)
@@ -208,7 +218,8 @@ def run_loop(store: JobStore, vault: Vault,
              gateway: LlmGateway | None = None,
              interval_seconds: float = 2.0,
              max_attempts: int = 3,
-             stop_after: int | None = None) -> int:
+             stop_after: int | None = None,
+             memory_store=None) -> int:
     """Long-running worker. `stop_after` lets tests terminate cleanly."""
     import signal
     import time
@@ -222,7 +233,7 @@ def run_loop(store: JobStore, vault: Vault,
     try:
         while True:
             try:
-                processed = process_one(store, vault, gateway, max_attempts)
+                processed = process_one(store, vault, gateway, max_attempts, memory_store)
             except Exception as exc:  # noqa: BLE001
                 print(f"[worker] loop error: {type(exc).__name__}: {exc}")
                 processed = False

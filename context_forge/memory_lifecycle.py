@@ -34,15 +34,17 @@ class MemoryLifecycle:
         sources = self._sources(artifacts, session_id, source_reference)
         scopes = (Scope(kind="project", project=project),) if project else (Scope(kind="unknown"),)
         result: list[Candidate] = []
+        knowledge_id = None
         if artifacts.knowledge and artifacts.should_save:
             item = artifacts.knowledge
+            knowledge_id = _id(f"knowledge:{session_id}:{item.id}")
             draft = MemoryDraft(
                 kind="knowledge", role="claim", body=item.body, summary=artifacts.title,
                 status="candidate", evidence_level="unverified" if sources else "unknown",
                 confidence=item.confidence, model=self.model, prompt_version=self.prompt_version,
                 scopes=scopes, sources=sources,
             )
-            result.append(Candidate(_id(f"knowledge:{session_id}:{item.id}"), draft))
+            result.append(Candidate(knowledge_id, draft))
         if artifacts.rule_candidate and artifacts.should_save:
             rule = artifacts.rule_candidate
             draft = MemoryDraft(
@@ -50,7 +52,8 @@ class MemoryLifecycle:
                 status="candidate", evidence_level="unverified" if sources else "unknown",
                 model=self.model, prompt_version=self.prompt_version, scopes=scopes, sources=sources,
             )
-            result.append(Candidate(_id(f"rule:{session_id}:{rule.instruction}"), draft))
+            relations = (Relation(target_id=knowledge_id, target_version=1, kind="derived_from"),) if knowledge_id else ()
+            result.append(Candidate(_id(f"rule:{session_id}:{rule.instruction}"), draft, relations))
         return tuple(result)
 
     def publish(self, candidate: Candidate, *, actor: str = "model"):
