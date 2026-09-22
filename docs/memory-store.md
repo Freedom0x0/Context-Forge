@@ -88,3 +88,9 @@ All tests use temporary directories. No dependency additions, runtime switch, li
 `context_forge.memory_lifecycle.MemoryLifecycle` is the application layer for the next integration stage. It converts validated `SessionArtifacts` into zero or more `candidate` memories, preserving session evidence and model/prompt metadata. Publishing promotes automatic candidates to `active`; it does not treat model self-confidence or repeated summaries as independent verification.
 
 Human corrections use version-pinned writes through `revise`, `suppress`, `restore`, `scope` and `supersede`. A stale background proposal fails with `VersionConflict`, and a model proposal cannot revive a disabled, suppressed or user-owned memory. The service does not execute remembered rules, call a model inside a database transaction, or replace host retrieval behavior until the lifecycle integration task explicitly switches those paths.
+
+## Recall service
+
+`context_forge.memory_recall.MemoryRecall` wraps scoped FTS results as complete recall units: current content, applicability, retained sources, active relationships and an explanation of unresolved conditions or conflicts. `search` can record `retrieved` or `tool_returned`; `mark` records later `presented`, `referenced`, `applied` and `validated` stages. These events are observational and never change memory confidence or versions.
+
+The MCP server preserves the legacy vault tools and adds `context_forge_memory_search` and `context_forge_memory_get`. Search requires an explicit project, accepts an optional changed path, uses `limit=0` for the bounded unlimited mode, and may receive a request ID for idempotent tool-return tracking. A missing or invalid authoritative database is reported as an error rather than an empty result.

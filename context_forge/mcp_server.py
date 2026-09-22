@@ -14,6 +14,12 @@ from __future__ import annotations
 from .rules import RuleMatcher
 
 
+def _memory():
+    from .config import runtime_dir
+    from .memory import MemoryStore
+    return MemoryStore(runtime_dir() / "memory.db", readonly=False)
+
+
 def _store():
     from .cli import _store as cli_store
     return cli_store()
@@ -41,6 +47,26 @@ def create_server():
     @server.tool()
     def context_forge_search(query: str) -> list[dict[str, str]]:
         return [dict(row) for row in _index().search(query)]
+
+    @server.tool()
+    def context_forge_memory_search(query: str, project: str,
+                                    changed_path: str = "", limit: int = 8,
+                                    request_id: str = "") -> list[dict]:
+        from .memory_recall import MemoryRecall
+        results = MemoryRecall(_memory()).search(
+            query, project=project or None, changed_path=changed_path or None,
+            limit=None if limit == 0 else limit, request_id=request_id or None,
+            stage="tool_returned",
+        )
+        return [result.as_dict() for result in results]
+
+    @server.tool()
+    def context_forge_memory_get(memory_id: str, version: int = 0) -> dict:
+        from .memory_recall import MemoryRecall
+        result = MemoryRecall(_memory()).get(memory_id, version=version or None)
+        if result is None:
+            raise KeyError(memory_id)
+        return result.as_dict()
 
     @server.tool()
     def context_forge_get(path: str) -> str:

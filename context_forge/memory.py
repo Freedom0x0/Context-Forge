@@ -146,6 +146,36 @@ class MemoryStore:
         with self._connection() as connection:
             return [dict(row) for row in connection.execute('SELECT * FROM memory_events WHERE memory_id=? ORDER BY id', (memory_id,))]
 
+    def record_retrieval(self, memory_id: str, version: int, *, request_id: str,
+                         stage: str, idempotency_key: str, session_id: str | None = None,
+                         explanation: dict | None = None) -> None:
+        if stage not in {'retrieved', 'tool_returned', 'presented', 'referenced', 'applied', 'validated'}:
+            raise ValueError('invalid retrieval stage')
+        if not request_id or not idempotency_key:
+            raise ValueError('request and idempotency key required')
+        payload = canonical_json(explanation or {})
+        with self._connection(write=True) as connection:
+            prior = connection.execute('SELECT memory_id,version,request_id,stage,session_id,explanation_json '
+                                       'FROM retrieval_events WHERE idempotency_key=?', (idempotency_key,)).fetchone()
+            values = (memory_id, version, request_id, stage, session_id, payload)
+            if prior:
+                if tuple(prior) != values:
+                    raise IdempotencyConflict('retrieval idempotency key was used for a different event')
+                return
+            if self._record(connection, memory_id, version) is None:
+                raise KeyError((memory_id, version))
+            connection.execute('INSERT INTO retrieval_events(idempotency_key,request_id,stage,memory_id,version,session_id,explanation_json,created_at) '
+                               'VALUES (?,?,?,?,?,?,?,?)',
+                               (idempotency_key, request_id, stage, memory_id, version, session_id, payload, now()))
+
+    def retrieval_events(self, request_id: str | None = None) -> list[dict]:
+        with self._connection() as connection:
+            if request_id is None:
+                rows = connection.execute('SELECT * FROM retrieval_events ORDER BY id')
+            else:
+                rows = connection.execute('SELECT * FROM retrieval_events WHERE request_id=? ORDER BY id', (request_id,))
+            return [dict(row) for row in rows]
+
     def put(self, memory_id: str, draft: MemoryDraft, *, expected_version: int,
             idempotency_key: str, actor: Actor = 'model', reason: str,
             relations: tuple[Relation, ...] = ()) -> MemoryRecord:
