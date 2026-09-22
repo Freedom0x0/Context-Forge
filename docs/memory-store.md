@@ -94,3 +94,9 @@ Human corrections use version-pinned writes through `revise`, `suppress`, `resto
 `context_forge.memory_recall.MemoryRecall` wraps scoped FTS results as complete recall units: current content, applicability, retained sources, active relationships and an explanation of unresolved conditions or conflicts. `search` can record `retrieved` or `tool_returned`; `mark` records later `presented`, `referenced`, `applied` and `validated` stages. These events are observational and never change memory confidence or versions.
 
 The MCP server preserves the legacy vault tools and adds `context_forge_memory_search` and `context_forge_memory_get`. Search requires an explicit project, accepts an optional changed path, uses `limit=0` for the bounded unlimited mode, and may receive a request ID for idempotent tool-return tracking. A missing or invalid authoritative database is reported as an error rather than an empty result.
+
+## Merge analysis
+
+`context_forge.memory_merge.MemoryMerge.report()` is read-only and deterministic for one database snapshot. It distinguishes exact duplicates from token-similarity candidates and reports broad global scopes. Similarity is only a review signal: it does not establish equivalence, contradiction or supersession.
+
+`apply_exact` may archive only records whose normalized content and complete decision boundary match. Rule boundaries must match exactly, including project and path scopes. Sources remain attached to the archived version, prior outgoing relations are retained, and a version-pinned `duplicate_of` relation identifies the canonical record. Human-owned, disabled or suppressed records are not automatically changed. `undo_exact` restores the duplicate and revokes the relation while preserving history.

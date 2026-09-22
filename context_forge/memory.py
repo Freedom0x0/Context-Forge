@@ -142,6 +142,11 @@ class MemoryStore:
             versions = connection.execute('SELECT version FROM memory_versions WHERE memory_id=? ORDER BY version', (memory_id,))
             return [self._record(connection, memory_id, row['version']) for row in versions]
 
+    def current_records(self) -> list[MemoryRecord]:
+        with self._connection() as connection:
+            return [self._record(connection, row['id'])
+                    for row in connection.execute('SELECT id FROM memories ORDER BY id')]
+
     def events(self, memory_id: str) -> list[dict]:
         with self._connection() as connection:
             return [dict(row) for row in connection.execute('SELECT * FROM memory_events WHERE memory_id=? ORDER BY id', (memory_id,))]

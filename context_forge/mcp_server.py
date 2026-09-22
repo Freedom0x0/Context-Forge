@@ -69,6 +69,11 @@ def create_server():
         return result.as_dict()
 
     @server.tool()
+    def context_forge_memory_report(similarity_threshold: float = 0.6) -> dict:
+        from .memory_merge import MemoryMerge
+        return MemoryMerge(_memory()).report(similarity_threshold=similarity_threshold).as_dict()
+
+    @server.tool()
     def context_forge_get(path: str) -> str:
         target = (_vault().root / path).resolve()
         if target != _vault().root and _vault().root not in target.parents:
