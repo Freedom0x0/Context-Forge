@@ -82,3 +82,9 @@ Feedback rows preserve original row ID, session, outcome, note and timestamp in 
 `export_markdown(directory)` writes deterministic current-record snapshots with all draft metadata and sources. Filenames are SHA-256 hashes of IDs, preventing path traversal; existing file symlinks are rejected and files are replaced atomically. Export errors never roll back or alter authoritative data. Markdown is a one-way current view, **not a complete historical backup**. Export does not remove obsolete files in a reused directory; use a fresh directory when a clean snapshot is needed.
 
 All tests use temporary directories. No dependency additions, runtime switch, live migration, lifecycle automation or model-quality claim is part of this storage implementation.
+
+## Lifecycle service
+
+`context_forge.memory_lifecycle.MemoryLifecycle` is the application layer for the next integration stage. It converts validated `SessionArtifacts` into zero or more `candidate` memories, preserving session evidence and model/prompt metadata. Publishing promotes automatic candidates to `active`; it does not treat model self-confidence or repeated summaries as independent verification.
+
+Human corrections use version-pinned writes through `revise`, `suppress`, `restore`, `scope` and `supersede`. A stale background proposal fails with `VersionConflict`, and a model proposal cannot revive a disabled, suppressed or user-owned memory. The service does not execute remembered rules, call a model inside a database transaction, or replace host retrieval behavior until the lifecycle integration task explicitly switches those paths.
