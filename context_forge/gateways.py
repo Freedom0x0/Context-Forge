@@ -68,7 +68,7 @@ class OfflineGateway:
         )
 
     def compile_rule(self, knowledge_id, knowledge_text) -> RuleExtraction:
-        return RuleExtraction(instruction=knowledge_text.strip()[:400])
+        return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
 
 
 class NoOpGateway:
@@ -88,7 +88,7 @@ class NoOpGateway:
         )
 
     def compile_rule(self, knowledge_id, knowledge_text) -> RuleExtraction:
-        return RuleExtraction(instruction=knowledge_text.strip()[:400])
+        return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
 
 
 def _fixture_artifacts() -> SessionArtifacts:
@@ -116,7 +116,7 @@ class FixtureGateway:
         return self.fixture
 
     def compile_rule(self, knowledge_id, knowledge_text):
-        return RuleExtraction(instruction=knowledge_text.strip()[:400])
+        return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
 
 
 def select_gateway(provider: str, settings=None) -> LlmGateway:

@@ -1,7 +1,7 @@
-from context_forge.domain import RuleExtraction, SessionArtifacts, KnowledgeItem
+from context_forge.domain import Condition, RuleExtraction, SessionArtifacts, KnowledgeItem
 from context_forge.memory import MemoryStore, ProtectedMemory, VersionConflict
 from context_forge.memory_lifecycle import MemoryLifecycle
-from context_forge.memory_models import Scope
+from context_forge.memory_models import AccessPolicy, Applicability
 
 
 def test_zero_and_multiple_candidates(tmp_path):
@@ -15,6 +15,24 @@ def test_zero_and_multiple_candidates(tmp_path):
     assert all(candidate.draft.model == "deepseek-v4-flash" for candidate in candidates)
     assert all(candidate.draft.evidence_level == "unverified" for candidate in candidates)
     assert {c.draft.confidence for c in candidates if c.draft.kind == "rule"} == {"high"}
+
+
+def test_every_extraction_field_reaches_the_draft(tmp_path):
+    service = MemoryLifecycle(MemoryStore.initialize(tmp_path / "memory.db"))
+    condition = Condition(condition="antd 5", result="true")
+    artifacts = SessionArtifacts(title="lesson", knowledge=KnowledgeItem(
+        id="k", body="use tests", role="hypothesis", technologies=["antd"], domains=["search"],
+        applicability=[condition], counterexamples=["antd 6"]),
+        rule_candidate=RuleExtraction(
+            instruction="run tests", role="procedure", technologies=["pytest"], domains=["testing"],
+            applicability=[condition], counterexamples=["offline"]))
+    by_kind = {c.draft.kind: c.draft for c in service.candidates(artifacts, session_id="s1")}
+    for draft in by_kind.values():
+        assert draft.applicability == (Applicability(condition="antd 5", result="true"),)
+    assert (by_kind["knowledge"].scope.technologies, by_kind["knowledge"].scope.domains,
+            by_kind["knowledge"].scope.exclusions) == (("antd",), ("search",), ("antd 6",))
+    assert (by_kind["rule"].scope.technologies, by_kind["rule"].scope.domains,
+            by_kind["rule"].scope.exclusions) == (("pytest",), ("testing",), ("offline",))
 
 
 def test_publish_is_idempotent_and_human_suppression_wins(tmp_path):
@@ -55,7 +73,9 @@ def test_scope_correction_changes_visibility(tmp_path):
     service = MemoryLifecycle(store)
     candidate = service.candidates(SessionArtifacts(title="lesson", knowledge=KnowledgeItem(id="k", body="boundary")), session_id="s1", project="one")[0]
     record = service.publish(candidate)
-    scoped = service.scope(record.id, (Scope(kind="project", project="two"),), expected_version=record.version,
-                           idempotency_key="scope-1")
+    scoped = service.scope(
+        record.id,
+        AccessPolicy(visibility="selected_projects", allowed_projects=("two",)),
+        expected_version=record.version, idempotency_key="scope-1")
     assert store.search("boundary", project="one") == []
     assert store.search("boundary", project="two")[0].version == scoped.version

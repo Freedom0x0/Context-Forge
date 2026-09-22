@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Truth = Literal['true', 'false', 'unknown']
 Actor = Literal['human', 'user', 'model', 'tool', 'import', 'system']
+Role = Literal['observation', 'claim', 'hypothesis', 'preference', 'procedure']
+Level = Literal['principle', 'pattern', 'instance']
+
+DEFAULT_OWNER = 'local'
 
 
 class MemoryModel(BaseModel):
@@ -14,6 +18,8 @@ class MemoryModel(BaseModel):
 
 
 class Scope(MemoryModel):
+    """Legacy boundary shape (pre-P1 snapshots and Gen1 vault metadata)."""
+
     kind: Literal['global', 'project', 'unknown'] = 'unknown'
     project: str | None = None
     paths: tuple[str, ...] = ()
@@ -27,6 +33,44 @@ class Scope(MemoryModel):
         if any(not path for path in self.paths):
             raise ValueError('path patterns must not be empty')
         return self
+
+
+class MemorySpace(MemoryModel):
+    """所属主体/记忆空间 — 不承担项目授权。"""
+
+    owner: str = Field(default=DEFAULT_OWNER, min_length=1)
+    privacy: Literal['shared', 'private'] = 'shared'
+
+
+class AccessPolicy(MemoryModel):
+    """项目级显式授权 — 与来源、适用条件分离。"""
+
+    visibility: Literal['owner', 'selected_projects', 'shared'] = 'shared'
+    allowed_projects: tuple[str, ...] = ()
+
+    @model_validator(mode='after')
+    def valid_selection(self) -> AccessPolicy:
+        if self.visibility == 'selected_projects' and not self.allowed_projects:
+            raise ValueError('selected_projects access requires allowed_projects')
+        return self
+
+
+class Provenance(MemoryModel):
+    """来源上下文 — 只作溯源与排序加分，不决定可见性。"""
+
+    projects: tuple[str, ...] = ()
+    sessions: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+
+
+class ApplicabilityScope(MemoryModel):
+    """适用条件 — 参与排序与采用判断。"""
+
+    technologies: tuple[str, ...] = ()
+    domains: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    exclusions: tuple[str, ...] = ()
+    visibility: Literal['global', 'scoped'] = 'scoped'
 
 
 class Applicability(MemoryModel):
@@ -46,7 +90,7 @@ class Source(MemoryModel):
 
 class MemoryDraft(MemoryModel):
     kind: Literal['knowledge', 'rule', 'review'] = 'knowledge'
-    role: Literal['observation', 'claim', 'hypothesis', 'preference', 'procedure'] = 'claim'
+    role: Role = 'claim'
     body: str = Field(min_length=1)
     summary: str = ''
     status: Literal['candidate', 'active', 'disabled', 'archived', 'conflicted', 'stale'] = 'candidate'
@@ -58,9 +102,14 @@ class MemoryDraft(MemoryModel):
     risk: str | None = None
     model: str | None = None
     prompt_version: str | None = None
-    scopes: tuple[Scope, ...] = (Scope(),)
+    space: MemorySpace = MemorySpace()
+    access: AccessPolicy = AccessPolicy()
+    provenance: Provenance = Provenance()
+    scope: ApplicabilityScope = ApplicabilityScope()
     applicability: tuple[Applicability, ...] = ()
     sources: tuple[Source, ...] = ()
+    proof_count: int = 0
+    last_confirmed_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('sources')
@@ -83,8 +132,8 @@ class MemoryDraft(MemoryModel):
         for condition in self.applicability:
             if not set(condition.evidence_ids) <= identities:
                 raise ValueError('applicability evidence must reference this version sources')
-        if not self.scopes:
-            raise ValueError('at least one explicit scope is required')
+        if self.role == 'observation' and not (self.provenance.projects or self.provenance.sessions):
+            raise ValueError('episodic memory requires provenance projects or sessions')
         return self
 
 
@@ -102,3 +151,38 @@ class MemoryRecord(MemoryModel):
     version: int
     draft: MemoryDraft
     created_at: str
+
+
+class BoundarySplit(NamedTuple):
+    space: MemorySpace
+    access: AccessPolicy
+    provenance: Provenance
+    scope: ApplicabilityScope
+    applicability: tuple[Applicability, ...]
+
+
+def derive_level(draft: MemoryDraft) -> Level:
+    """三层抽象由 role + ApplicabilityScope 推导，不落库。"""
+    if draft.role == 'observation':
+        return 'instance'
+    if draft.role == 'preference':
+        return 'principle'
+    scope = draft.scope
+    return 'pattern' if (scope.technologies or scope.domains or scope.constraints) else 'principle'
+
+
+def split_legacy_scopes(scopes: Sequence[Scope], *, owner: str = DEFAULT_OWNER,
+                        privacy: Literal['shared', 'private'] = 'shared') -> BoundarySplit:
+    """Deterministic Scope → 边界三分 mapping; provenance is never dropped."""
+    projects = tuple(sorted({scope.project for scope in scopes if scope.kind == 'project' and scope.project}))
+    paths = tuple(sorted({path for scope in scopes for path in scope.paths}))
+    global_visible = any(scope.kind == 'global' for scope in scopes)
+    unresolved = Applicability(condition='未声明适用范围', result='unknown') if all(
+        scope.kind == 'unknown' for scope in scopes) else None
+    return BoundarySplit(
+        space=MemorySpace(owner=owner, privacy=privacy),
+        access=AccessPolicy(),
+        provenance=Provenance(projects=projects, paths=paths),
+        scope=ApplicabilityScope(visibility='global' if global_visible else 'scoped'),
+        applicability=(unresolved,) if unresolved else (),
+    )

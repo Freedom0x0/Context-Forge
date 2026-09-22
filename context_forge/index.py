@@ -8,6 +8,7 @@ and must never be edited by hand.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -124,6 +125,24 @@ class DocumentIndex:
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             docs.append(VaultDocument(path, front, body, digest))
         return docs
+
+
+def yaml_scalar(value: object) -> str:
+    """Render one frontmatter value as a YAML-safe plain or quoted scalar.
+
+    A plain scalar silently breaks the whole block when it contains `: `
+    or ` #`, ends with `:`, or when it starts with an indicator (`paths: **/*`
+    parses as an alias, `sources: a quote: x` as a mapping, `x: |pipe` as a
+    block scalar). Empty is quoted so it stays a string, not null. Values that
+    are already a flow collection (`[...]`, `{...}`) are left alone.
+    """
+    text = "" if value is None else str(value)
+    if text and text[:1] in "[{" and text[-1:] in "]}":
+        return text
+    if (not text or text[0] in "-?:,[]{}#&*!|>'\"%@`"
+            or re.search(r"(:\s)|(\s#)|(:$)|[\n\r]", text)):
+        return json.dumps(text, ensure_ascii=False)
+    return text
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, str], str]:

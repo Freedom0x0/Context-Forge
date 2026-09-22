@@ -9,7 +9,10 @@ from context_forge.memory import (
     IdempotencyConflict, MemoryStore, MemoryStoreError, ProtectedMemory,
     SourceConflict, VersionConflict,
 )
-from context_forge.memory_models import Applicability, MemoryDraft, Relation, Scope, Source
+from context_forge.memory_models import (
+    AccessPolicy, Applicability, MemoryDraft, Provenance, Relation, Scope, Source,
+)
+from context_forge.memory_schema import SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -18,7 +21,8 @@ def store(tmp_path):
 
 
 def draft(body='SQLite 数据库事务回滚', **overrides):
-    return MemoryDraft(body=body, status='active', scopes=(Scope(kind='project', project='demo'),), **overrides)
+    return MemoryDraft(body=body, status='active',
+                       provenance=Provenance(projects=('demo',)), **overrides)
 
 
 def put(store, memory_id='one', value=None, **options):
@@ -34,7 +38,7 @@ def test_noncreating_reads_and_explicit_schema(tmp_path):
     store = MemoryStore.initialize(path)
     assert MemoryStore.initialize(path).get('absent') is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     with pytest.raises(MemoryStoreError, match='read-only'):
         put(MemoryStore(path))
@@ -110,7 +114,8 @@ def test_failure_rolls_back_every_projection(store, monkeypatch):
     assert store.search('事务', project='demo') == [original]
     with sqlite3.connect(store.path) as connection:
         assert connection.execute('SELECT count(*) FROM memory_sources').fetchone()[0] == 0
-        assert connection.execute('SELECT count(*) FROM memory_scopes').fetchone()[0] == 1
+        assert connection.execute('SELECT count(*) FROM memory_access_projection').fetchone()[0] == 1
+        assert connection.execute('SELECT count(*) FROM memory_applicability_projection').fetchone()[0] == 1
         assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -189,29 +194,31 @@ def test_model_only_verification_and_invalid_conditions_rejected():
         Scope(kind='project', project='unknown')
 
 
-def test_search_chinese_ascii_safety_scopes_and_limits(store):
+def test_search_chinese_ascii_safety_and_limits(store):
+    restricted = AccessPolicy(visibility='selected_projects', allowed_projects=('other',))
     for number in range(12):
-        put(store, f'other-{number}', MemoryDraft(body='SQLite 数据库事务回滚', status='active', scopes=(Scope(kind='project', project='other'),)))
-    put(store, 'unknown', MemoryDraft(body='SQLite 数据库事务回滚', status='active'))
+        put(store, f'other-{number}', MemoryDraft(body='SQLite 数据库事务回滚', status='active', access=restricted))
     record = put(store, 'visible')
     put(store, 'disabled', draft().model_copy(update={'status': 'disabled'}))
     assert store.search('数据库', project='demo', limit=1) == [record]
     assert store.search('SQLITE', project='demo') == [record]
     assert store.search('库', project='demo') == [record]
-    assert store.search('SQLite', project=None) == []
-    assert store.search('SQLite', project='unknown') == []
+    assert store.search('SQLite', project=None) == [record]
+    assert len(store.search('数据库', project='other', limit=None)) == 13
     assert store.search('"* - : ()', project='demo') == []
     assert store.search('SQLite OR missing', project='demo') == []
     assert store.search('SQLite', project='demo', byte_budget=1) == []
 
 
-def test_path_filter_before_truncation_global_explicit_and_stable_order(store):
-    put(store, 'a-hidden', MemoryDraft(body='transaction', status='active', scopes=(Scope(kind='global', paths=('other/**',)),)))
+def test_hard_filter_before_truncation_and_stable_order(store):
+    put(store, 'a-hidden', MemoryDraft(body='transaction', status='active',
+                                       access=AccessPolicy(visibility='selected_projects',
+                                                           allowed_projects=('hidden',))))
     for memory_id in ['z', 'b']:
-        put(store, memory_id, MemoryDraft(body='transaction', status='active', scopes=(Scope(kind='global', paths=('src/**/*.py',)),)))
-    assert [record.id for record in store.search('transaction', project=None, changed_path='src/main.py', limit=1)] == ['b']
-    assert [record.id for record in store.search('transaction', project=None, changed_path='src/main.py', limit=None)] == ['b', 'z']
-    assert store.search('transaction', project=None) == []
+        put(store, memory_id, MemoryDraft(body='transaction', status='active'))
+    assert [record.id for record in store.search('transaction', project='demo', limit=1)] == ['b']
+    assert [record.id for record in store.search('transaction', project='demo', limit=None)] == ['b', 'z']
+    assert [record.id for record in store.search('transaction', project='hidden', limit=None)] == ['a-hidden', 'b', 'z']
 
 
 def test_rebuild_missing_index_and_rollback(store, monkeypatch):

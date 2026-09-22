@@ -7,7 +7,9 @@
 ```python
 from pathlib import Path
 from context_forge.memory import MemoryStore
-from context_forge.memory_models import MemoryDraft, Scope, Source, Applicability
+from context_forge.memory_models import (
+    Applicability, MemoryDraft, Provenance, Source,
+)
 
 store = MemoryStore.initialize(Path("memory.db"))
 record = store.put(
@@ -17,7 +19,7 @@ record = store.put(
         summary="Atomic memory updates",
         role="procedure",
         status="active",
-        scopes=(Scope(kind="project", project="example"),),
+        provenance=Provenance(projects=("example",), sessions=("test-run",)),
         sources=(Source(identity="test-run:123", kind="tool", excerpt="Rollback test passed"),),
         applicability=(Applicability(condition="SQLite storage", result="unknown"),),
     ),
@@ -31,7 +33,7 @@ matches = reader.search("transaction", project="example")
 original = reader.get(record.id, version=1)
 ```
 
-Initialization is explicit and records `PRAGMA user_version=1`. It is repeatable for a compatible database, initializes an empty database, and refuses unrelated or unsupported schemas. Future migrations must be explicit. Ordinary opens never create a missing database or migrate a schema. Errors are diagnostic `MemoryStoreError` exceptions, not empty search results. Each operation opens and closes its own connection; no `close()` is necessary. Existing writers use `MemoryStore(path, readonly=False)`.
+Initialization is explicit and records `PRAGMA user_version=2`. `MemoryStore.migrate(path, dry_run=True)` is the explicit v1 → v2 upgrade: it splits the legacy `Scope` into `MemorySpace` / `AccessPolicy` / `Provenance` / `ApplicabilityScope`, takes an online backup first and rebuilds the projection tables. Ordinary opens never migrate. It is repeatable for a compatible database, initializes an empty database, and refuses unrelated or unsupported schemas. Future migrations must be explicit. Ordinary opens never create a missing database or migrate a schema. Errors are diagnostic `MemoryStoreError` exceptions, not empty search results. Each operation opens and closes its own connection; no `close()` is necessary. Existing writers use `MemoryStore(path, readonly=False)`.
 
 `put` accepts a complete `MemoryDraft` snapshot, not a partial patch. Use the currently read version as `expected_version`; zero means create. A stale revision raises `VersionConflict`. A retry of the identical request and key returns its original revision, even after later corrections. Reusing the key with a changed request raises `IdempotencyConflict`. `user` normalizes to `human`. Automatic writes cannot change user-owned, suppressed, or disabled records; an explicit human revision can restore them. `history(id)` and `events(id)` preserve the preceding content and reasons.
 
@@ -39,7 +41,7 @@ Initialization is explicit and records `PRAGMA user_version=1`. It is repeatable
 
 `Source.identity` identifies one immutable evidence observation. References to that identity reuse the same row; changed evidence under the same identity raises `SourceConflict`. Use a new identity for a new observation, and include the originating session/tool run in session-local identifiers. Content repetition alone is not proof of independent evidence. `observed_at`, `session_id`, reference, excerpt and a content hash survive queue deletion.
 
-The `role` is one of observation, claim, hypothesis, preference or procedure; it is separate from the business `kind` (knowledge, rule or review). Evidence defaults to `unknown`. Supported/contradicted levels require retained sources; verified requires a retained tool observation. Storage validates attribution structure, not whether a tool observation actually proves a claim; that judgment belongs to the later lifecycle layer. Model self-confidence and legacy feedback never automatically upgrade evidence.
+The `role` is one of observation, claim, hypothesis, preference or procedure; it is separate from the business `kind` (knowledge, rule or review). `memory_models.derive_level(draft)` derives `instance` / `pattern` / `principle` from `role` + `scope`; it is never stored. `observation` requires `provenance.projects` or `provenance.sessions`. Evidence defaults to `unknown`. Supported/contradicted levels require retained sources; verified requires a retained tool observation. Storage validates attribution structure, not whether a tool observation actually proves a claim; that judgment belongs to the later lifecycle layer. Model self-confidence and legacy feedback never automatically upgrade evidence.
 
 `Applicability(condition=..., result="true" | "false" | "unknown", evidence_ids=(...))` retains tri-state conditions separately from access scopes. Conditions and relation evidence must identify sources in the version being written. Unknown conditions are returned as unknown; search does not interpret them as permission to apply a procedure.
 
@@ -47,7 +49,7 @@ Pass `relations=(Relation(target_id=..., target_version=..., kind=..., evidence_
 
 ## Search and inspection boundaries
 
-`search(query, project=..., changed_path=None, limit=8, byte_budget=65536)` returns current full records, including applicability and sources. It excludes unknown/other-project scopes, disabled/archived/candidate/stale states, suppressed records and `value="discard"`. Global access must be explicit. Path restrictions use the existing rule glob matcher and require a matching changed path. Scope filtering precedes result truncation; ranking uses ascending BM25, then ID. `limit=None` removes the count limit while retaining the byte budget. A record too large for the remaining budget is omitted whole, so its conditions are never silently stripped.
+`search(query, project=..., changed_path=None, limit=8, byte_budget=65536, owner=...)` returns current full records, including applicability and sources. It excludes disabled/archived/candidate/stale states, suppressed records and `value="discard"`. Beyond that only four boundary eliminations apply: `space.owner` mismatch, `space.privacy="private"` across owners, `access.visibility="selected_projects"` without the current project in `allowed_projects`, and a `scope.exclusions` hit. **`project` is provenance, never a default filter** — cross-project memories stay reachable and only `AccessPolicy` restricts them. Boundary filtering precedes result truncation; ranking uses ascending BM25, then ID. `limit=None` removes the count limit while retaining the byte budget. A record too large for the remaining budget is omitted whole, so its conditions are never silently stripped.
 
 Chinese bigrams and lowercase ASCII tokens share the same tokenizer. Query syntax is treated as data, with quoted generated MATCH terms. A single Chinese character uses a scoped literal fallback capped at 100 returned records and the byte budget. Empty/punctuation-only queries return no results. This is local lexical search, not semantic retrieval. `rebuild_fts()` recreates the derived index transactionally from authoritative versions, including when the FTS table has been dropped.
 
@@ -100,3 +102,19 @@ The MCP server preserves the legacy vault tools and adds `context_forge_memory_s
 `context_forge.memory_merge.MemoryMerge.report()` is read-only and deterministic for one database snapshot. It distinguishes exact duplicates from token-similarity candidates and reports broad global scopes. Similarity is only a review signal: it does not establish equivalence, contradiction or supersession.
 
 `apply_exact` may archive only records whose normalized content and complete decision boundary match. Rule boundaries must match exactly, including project and path scopes. Sources remain attached to the archived version, prior outgoing relations are retained, and a version-pinned `duplicate_of` relation identifies the canonical record. Human-owned, disabled or suppressed records are not automatically changed. `undo_exact` restores the duplicate and revokes the relation while preserving history.
+
+
+## Boundary trio and tech detection
+
+`MemoryDraft` carries four separate boundary objects. They are different fields with different enums and must not be conflated:
+
+| Object | Fields | Role |
+|---|---|---|
+| `MemorySpace` | `owner`, `privacy: shared\|private` | subject-level identity and privacy |
+| `AccessPolicy` | `visibility: owner\|selected_projects\|shared`, `allowed_projects` | explicit project authorisation |
+| `Provenance` | `projects`, `sessions`, `paths` | where it came from; sorting bonus only |
+| `ApplicabilityScope` | `technologies`, `domains`, `constraints`, `exclusions`, `visibility: global\|scoped` | when it applies |
+
+`memory_access_projection` and `memory_applicability_projection` mirror these for fast filtering; both are rebuildable from `snapshot_json` via `rebuild_projections()` / `rebuild_fts()`. There is no `generality` column — the level is derived.
+
+`context_forge.tech_detect.detect(root)` returns a `TechProfile(technologies, domains, raw_evidence)` from manifests, lockfiles and import scanning. `context_forge.vault_retag.retag(root, dry_run=True)` retags a Gen1 vault with `role` / `confidence` / `technologies` / `domains` / `access_visibility` / `allowed_projects` / `privacy` and reports the basis for every change; `rollback(root)` restores the `.retag-backup/` copies.

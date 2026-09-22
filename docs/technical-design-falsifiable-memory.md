@@ -846,6 +846,7 @@ Obsidian Vault 是**用户拥有的数据**，不是供应商格式：
 CREATE TABLE memory_access_projection (
   memory_id TEXT NOT NULL, version INTEGER NOT NULL,
   owner TEXT NOT NULL,
+  privacy TEXT NOT NULL CHECK(privacy IN ('shared','private')),
   visibility TEXT NOT NULL CHECK(visibility IN ('owner','selected_projects','shared')),
   allowed_projects_json TEXT NOT NULL CHECK(json_valid(allowed_projects_json)),
   PRIMARY KEY(memory_id, version)

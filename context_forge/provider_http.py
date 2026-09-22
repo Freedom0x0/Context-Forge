@@ -47,16 +47,39 @@ _PROMPT = (
     '"knowledge": {{"id": string, "body": string, '
     '"sources": [string], '
     '"confidence": "low|medium|high", '
-    '"topics": [string]}} | null, '
+    '"topics": [string], '
+    '"role": "observation|claim|hypothesis|preference|procedure", '
+    '"technologies": [string], "domains": [string], '
+    '"applicability": [{{"condition": string, '
+    '"result": "true|false|unknown"}}], '
+    '"counterexamples": [string]}} | null, '
     '"rule_candidate": {{"instruction": string, "paths": [string], '
-    '"confidence": "low|medium|high"}} | null'
+    '"confidence": "low|medium|high", '
+    '"role": "observation|claim|hypothesis|preference|procedure", '
+    '"technologies": [string], "domains": [string], '
+    '"applicability": [{{"condition": string, '
+    '"result": "true|false|unknown"}}], '
+    '"counterexamples": [string]}} | null'
     "}}\n"
     "Facts MUST cite at least one evidence id. Open questions and "
     "inferences can omit evidence. Set should_save=false if the session "
     "lacks an actionable lesson. If should_save=true and you derive a "
     "reusable lesson, populate `knowledge`; if that lesson would "
     "generalise into a project rule, populate `rule_candidate` too. "
-    "Skip both fields if no reusable knowledge emerged.\n\n"
+    "Skip both fields if no reusable knowledge emerged.\n"
+    "Classify every lesson by what it actually is, not by whether the "
+    "text names a project: `observation` = what happened at one place "
+    "and time, `claim`/`hypothesis` = what is generally true, "
+    "`procedure` = how to do something, `preference` = how the user "
+    "wants things done. A project name appearing in the text proves "
+    "nothing about the type. Keep `sources` for every type, including "
+    "general claims -- provenance is never dropped.\n"
+    "For every `claim`, `hypothesis` and `procedure`, fill "
+    "`applicability` with the conditions under which it holds and use "
+    "result `unknown` where you cannot tell, and fill `counterexamples` "
+    "with cases where it fails. An assertion with no stated conditions "
+    "will be treated as a guess. Never record credentials, tokens or "
+    "private URLs in any field.\n\n"
     "Transcript (sanitized):\n{transcript}\n"
 )
 
@@ -217,7 +240,18 @@ class HttpGateway:
             "rule instruction, a comma-separated list of glob "
             "patterns and a confidence. Reply with strict JSON only: "
             '{"instruction": string, "paths": [string], '
-            '"confidence": "low|medium|high"}\n\n'
+            '"confidence": "low|medium|high", '
+            '"role": "observation|claim|hypothesis|preference|procedure", '
+            '"technologies": [string], "domains": [string], '
+            '"applicability": [{"condition": string, '
+            '"result": "true|false|unknown"}], '
+            '"counterexamples": [string]}\n'
+            "Classify by what the lesson is, not by whether the text "
+            "names a project. For anything that is not a single observed "
+            "event, fill `applicability` (use result `unknown` where "
+            "unsure) and `counterexamples`; an assertion with no stated "
+            "conditions is a guess. Never record credentials or private "
+            "URLs.\n\n"
             f"Knowledge id: {knowledge_id}\n{knowledge_text}"
         )
         reply = self._call_chat(prompt)

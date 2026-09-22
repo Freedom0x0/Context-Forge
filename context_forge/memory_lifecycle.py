@@ -6,7 +6,10 @@ from typing import Iterable
 
 from .domain import SessionArtifacts
 from .memory import MemoryStore, ProtectedMemory, VersionConflict
-from .memory_models import Applicability, MemoryDraft, Relation, Scope, Source
+from .memory_models import (
+    AccessPolicy, Applicability, ApplicabilityScope, MemoryDraft, Provenance,
+    Relation, Source,
+)
 
 
 @dataclass(frozen=True)
@@ -32,26 +35,39 @@ class MemoryLifecycle:
     def candidates(self, artifacts: SessionArtifacts, *, session_id: str,
                    project: str | None = None, source_reference: str = "") -> tuple[Candidate, ...]:
         sources = self._sources(artifacts, session_id, source_reference)
-        scopes = (Scope(kind="project", project=project),) if project else (Scope(kind="unknown"),)
+        provenance = Provenance(projects=(project,) if project else (), sessions=(session_id,))
         result: list[Candidate] = []
         knowledge_id = None
         if artifacts.knowledge and artifacts.should_save:
             item = artifacts.knowledge
             knowledge_id = _id(f"knowledge:{session_id}:{item.id}")
             draft = MemoryDraft(
-                kind="knowledge", role="claim", body=item.body, summary=artifacts.title,
+                kind="knowledge", role=item.role, body=item.body, summary=artifacts.title,
                 status="candidate", evidence_level="unverified" if sources else "unknown",
                 confidence=item.confidence, model=self.model, prompt_version=self.prompt_version,
-                scopes=scopes, sources=sources,
+                provenance=provenance,
+                scope=ApplicabilityScope(technologies=tuple(item.technologies),
+                                         domains=tuple(item.domains),
+                                         exclusions=tuple(item.counterexamples)),
+                applicability=tuple(Applicability(condition=condition.condition, result=condition.result)
+                                    for condition in item.applicability),
+                sources=sources,
             )
             result.append(Candidate(knowledge_id, draft))
         if artifacts.rule_candidate and artifacts.should_save:
             rule = artifacts.rule_candidate
             draft = MemoryDraft(
-                kind="rule", role="procedure", body=rule.instruction, summary=artifacts.title,
+                kind="rule", role=rule.role, body=rule.instruction, summary=artifacts.title,
                 status="candidate", evidence_level="unverified" if sources else "unknown",
                 confidence=rule.confidence, model=self.model,
-                prompt_version=self.prompt_version, scopes=scopes, sources=sources,
+                prompt_version=self.prompt_version,
+                provenance=provenance,
+                scope=ApplicabilityScope(technologies=tuple(rule.technologies),
+                                         domains=tuple(rule.domains),
+                                         exclusions=tuple(rule.counterexamples)),
+                applicability=tuple(Applicability(condition=condition.condition, result=condition.result)
+                                    for condition in rule.applicability),
+                sources=sources,
             )
             relations = (Relation(target_id=knowledge_id, target_version=1, kind="derived_from"),) if knowledge_id else ()
             result.append(Candidate(_id(f"rule:{session_id}:{rule.instruction}"), draft, relations))
@@ -77,7 +93,9 @@ class MemoryLifecycle:
             artifacts, session_id=session_id, project=project, source_reference=source_reference))
 
     def revise(self, memory_id: str, *, body: str | None = None,
-               status: str | None = None, scopes: tuple[Scope, ...] | None = None,
+               status: str | None = None, access: AccessPolicy | None = None,
+               provenance: Provenance | None = None,
+               applicability_scope: ApplicabilityScope | None = None,
                reason: str, expected_version: int, idempotency_key: str):
         record = self.store.get(memory_id)
         if record is None:
@@ -87,8 +105,12 @@ class MemoryLifecycle:
             updates["body"] = body
         if status is not None:
             updates["status"] = status
-        if scopes is not None:
-            updates["scopes"] = scopes
+        if access is not None:
+            updates["access"] = access
+        if provenance is not None:
+            updates["provenance"] = provenance
+        if applicability_scope is not None:
+            updates["scope"] = applicability_scope
         draft = record.draft.model_copy(update=updates)
         return self.store.put(memory_id, draft, expected_version=expected_version,
                               idempotency_key=idempotency_key, actor="human", reason=reason)
@@ -103,9 +125,9 @@ class MemoryLifecycle:
         return self.revise(memory_id, status="active", expected_version=expected_version,
                            idempotency_key=idempotency_key, reason=reason)
 
-    def scope(self, memory_id: str, scopes: tuple[Scope, ...], *, expected_version: int,
-              idempotency_key: str, reason: str = "human scope correction"):
-        return self.revise(memory_id, scopes=scopes, expected_version=expected_version,
+    def scope(self, memory_id: str, access: AccessPolicy, *, expected_version: int,
+              idempotency_key: str, reason: str = "human access correction"):
+        return self.revise(memory_id, access=access, expected_version=expected_version,
                            idempotency_key=idempotency_key, reason=reason)
 
     def supersede(self, memory_id: str, replacement: Candidate, *, expected_version: int,

@@ -4,7 +4,9 @@ import types
 
 from context_forge.memory import MemoryStore
 from context_forge.memory_merge import MemoryMerge
-from context_forge.memory_models import Applicability, MemoryDraft, Scope, Source
+from context_forge.memory_models import (
+    Applicability, MemoryDraft, Provenance, Source,
+)
 
 
 def add(store, memory_id, body, *, kind="knowledge", project="demo", applicability=(), user_owned=False):
@@ -12,7 +14,7 @@ def add(store, memory_id, body, *, kind="knowledge", project="demo", applicabili
         memory_id,
         MemoryDraft(
             kind=kind, body=body, status="active", user_owned=user_owned,
-            scopes=(Scope(kind="project", project=project),), applicability=applicability,
+            provenance=Provenance(projects=(project,)), applicability=applicability,
             sources=(Source(identity=f"source:{memory_id}", kind="observation", excerpt=body),),
         ),
         expected_version=0, idempotency_key=f"put:{memory_id}", reason="test",

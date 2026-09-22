@@ -1,6 +1,6 @@
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-SCHEMA = """
+CORE = """
 CREATE TABLE memories (
  id TEXT PRIMARY KEY, kind TEXT NOT NULL,
  current_version INTEGER NOT NULL CHECK(current_version > 0),
@@ -22,15 +22,6 @@ CREATE TABLE memory_sources (
 CREATE TABLE memory_version_sources (
  memory_id TEXT NOT NULL, version INTEGER NOT NULL, source_id TEXT NOT NULL REFERENCES memory_sources(identity),
  PRIMARY KEY(memory_id,version,source_id),
- FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
-);
-CREATE TABLE memory_scopes (
- memory_id TEXT NOT NULL, version INTEGER NOT NULL, ordinal INTEGER NOT NULL,
- kind TEXT NOT NULL CHECK(kind IN ('global','project','unknown')), project TEXT,
- paths_json TEXT NOT NULL CHECK(json_valid(paths_json)),
- CHECK((kind='project' AND project IS NOT NULL AND length(project)>0 AND project<>'unknown')
- OR (kind<>'project' AND project IS NULL)),
- PRIMARY KEY(memory_id,version,ordinal),
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
 CREATE TABLE memory_events (
@@ -80,6 +71,27 @@ CREATE TABLE import_snapshots (
  manifest_hash TEXT NOT NULL
 );
 CREATE VIRTUAL TABLE memory_fts USING fts5(memory_id UNINDEXED, tokens);
-CREATE INDEX memory_scope_lookup ON memory_scopes(kind,project,memory_id,version);
 CREATE INDEX memory_relations_target ON memory_relations(target_id,target_version);
 """
+
+PROJECTIONS = """
+CREATE TABLE IF NOT EXISTS memory_access_projection (
+ memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ owner TEXT NOT NULL,
+ privacy TEXT NOT NULL CHECK(privacy IN ('shared','private')),
+ visibility TEXT NOT NULL CHECK(visibility IN ('owner','selected_projects','shared')),
+ allowed_projects_json TEXT NOT NULL CHECK(json_valid(allowed_projects_json)),
+ PRIMARY KEY(memory_id,version),
+ FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
+);
+CREATE TABLE IF NOT EXISTS memory_applicability_projection (
+ memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ technologies_json TEXT NOT NULL CHECK(json_valid(technologies_json)),
+ domains_json TEXT NOT NULL CHECK(json_valid(domains_json)),
+ exclusions_json TEXT NOT NULL CHECK(json_valid(exclusions_json)),
+ PRIMARY KEY(memory_id,version),
+ FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
+);
+"""
+
+SCHEMA = CORE + PROJECTIONS

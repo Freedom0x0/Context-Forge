@@ -3,17 +3,20 @@ import sys
 import types
 
 from context_forge.memory import IdempotencyConflict, MemoryStore, MemoryStoreError
-from context_forge.memory_models import Applicability, MemoryDraft, Scope, Source
+from context_forge.memory_models import (
+    AccessPolicy, Applicability, MemoryDraft, Provenance, Source,
+)
 from context_forge.memory_recall import MemoryRecall
 
 
-def add(store, memory_id, body, *, project="demo", applicability=()):
+def add(store, memory_id, body, *, project="demo", applicability=(), access=None):
     return store.put(
         memory_id,
         MemoryDraft(
             body=body,
             status="active",
-            scopes=(Scope(kind="project", project=project),),
+            provenance=Provenance(projects=(project,), sessions=(f"session-{memory_id}",)),
+            access=access or AccessPolicy(),
             applicability=applicability,
             sources=(Source(identity=f"source:{memory_id}", kind="observation", excerpt=body),),
         ),
@@ -23,15 +26,17 @@ def add(store, memory_id, body, *, project="demo", applicability=()):
     )
 
 
-def test_recall_filters_project_and_returns_conditions(tmp_path):
+def test_recall_returns_conditions_and_respects_access(tmp_path):
     store = MemoryStore.initialize(tmp_path / "memory.db")
     add(store, "one", "transaction boundary", applicability=(
         Applicability(condition="only for external integrations", result="unknown"),
     ))
     add(store, "two", "transaction boundary", project="other")
+    add(store, "locked", "transaction boundary",
+        access=AccessPolicy(visibility="selected_projects", allowed_projects=("other",)))
     results = MemoryRecall(store).search("transaction", project="demo")
-    assert [result.memory.id for result in results] == ["one"]
-    payload = results[0].as_dict()
+    assert {result.memory.id for result in results} == {"one", "two"}
+    payload = next(result for result in results if result.memory.id == "one").as_dict()
     assert payload["applicability"][0]["result"] == "unknown"
     assert "unresolved conditions" in payload["explanation"]
 

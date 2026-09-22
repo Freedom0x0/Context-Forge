@@ -49,7 +49,7 @@ def test_preview_and_dry_run_leave_source_and_destination_unchanged(tmp_path):
     assert record.draft.user_owned and record.draft.suppressed
     assert record.draft.status == 'disabled'
     assert record.draft.evidence_level == 'unknown'
-    assert record.draft.scopes[0].paths == ('src/**/*.py',)
+    assert record.draft.provenance.paths == ('src/**/*.py',)
     assert record.draft.metadata['legacy_hash'] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert len(store.events(memory_id)) == 4
     assert (source.read_bytes(), source.stat().st_mtime_ns) == original_source
@@ -83,7 +83,7 @@ def test_new_snapshot_updates_only_untouched_records_and_older_is_rejected(tmp_p
     assert store.get(memory_id).draft.body == 'human correction'
 
 
-def test_unknown_scope_excluded_and_duplicate_ids_do_not_merge(tmp_path):
+def test_unknown_scope_is_not_global_and_duplicate_ids_do_not_merge(tmp_path):
     root = tmp_path / 'vault'
     path = write_rule(root)
     unknown = root / 'knowledge' / 'accepted' / 'knowledge.md'
@@ -94,8 +94,11 @@ def test_unknown_scope_excluded_and_duplicate_ids_do_not_merge(tmp_path):
     assert report['created'] == 2
     assert report['feedback_skipped'] == 1
     assert len(set(report['mapping'].values())) == 2
-    assert len(store.search('SQLite', project='demo', changed_path='src/main.py')) == 1
-    assert store.search('SQLite', project=None, changed_path='src/main.py') == []
+    assert len(store.search('SQLite', project='demo', changed_path='src/main.py')) == 2
+    unresolved = store.get(report['mapping']['knowledge/accepted/knowledge.md']).draft
+    assert unresolved.provenance.projects == ()
+    assert unresolved.scope.visibility == 'scoped'
+    assert [condition.result for condition in unresolved.applicability] == ['unknown']
 
 
 def test_import_failure_rolls_back_documents_receipts_and_feedback(tmp_path, monkeypatch):
@@ -157,9 +160,9 @@ def test_import_vault_output_retains_project_and_versioned_derivation(tmp_path):
     report = store.import_vault(root, dry_run=False)
     knowledge_id = report['mapping']['knowledge/accepted/lesson.md']
     rule_id = report['mapping']['rules/proposals/rule-lesson.md']
-    assert store.get(knowledge_id).draft.scopes[0].project == 'demo'
+    assert store.get(knowledge_id).draft.provenance.projects == ('demo',)
     assert knowledge_id in [record.id for record in store.search('SQLite', project='demo')]
-    assert store.search('SQLite', project='other') == []
+    assert knowledge_id in [record.id for record in store.search('SQLite', project='other')]
     relation = store.relations(rule_id)[0]
     assert (relation['target_id'], relation['target_version'], relation['kind']) == (knowledge_id, 1, 'derived_from')
     assert store.import_vault(root, dry_run=False)['unchanged'] == 2
@@ -180,6 +183,8 @@ def test_session_local_evidence_and_multi_project_knowledge(tmp_path):
     first = store.get(report['mapping']['knowledge/accepted/a.md'])
     second = store.get(report['mapping']['knowledge/accepted/b.md'])
     assert first.draft.sources[1].identity != second.draft.sources[1].identity
-    assert {scope.project for scope in first.draft.scopes} == {'project-a', 'project-b'}
-    assert second.draft.scopes[0].kind == 'unknown'
-    assert store.search('SQLite', project='project-c') == []
+    assert set(first.draft.provenance.projects) == {'project-a', 'project-b'}
+    assert second.draft.provenance.projects == ()
+    assert second.draft.scope.visibility == 'scoped'
+    assert [condition.result for condition in second.draft.applicability] == ['unknown']
+    assert len(store.search('SQLite', project='project-c')) == 4

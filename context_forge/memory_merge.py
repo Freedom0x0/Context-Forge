@@ -47,7 +47,9 @@ def _boundary(record: MemoryRecord) -> str:
     return canonical_json({
         'kind': record.draft.kind,
         'role': record.draft.role,
-        'scopes': [scope.model_dump(mode='json') for scope in record.draft.scopes],
+        'access': record.draft.access.model_dump(mode='json'),
+        'provenance': record.draft.provenance.model_dump(mode='json'),
+        'scope': record.draft.scope.model_dump(mode='json'),
         'applicability': [condition.model_dump(mode='json') for condition in record.draft.applicability],
     })
 
@@ -85,7 +87,7 @@ class MemoryMerge:
             if score >= similarity_threshold:
                 overlaps.append(MergeCandidate(left.id, right.id, 'overlaps', round(score, 6),
                                                'token similarity is a review candidate, not proof'))
-        broad = tuple(record.id for record in records if any(scope.kind == 'global' for scope in record.draft.scopes))
+        broad = tuple(record.id for record in records if record.draft.scope.visibility == 'global')
         return MergeReport(len(records), tuple(exact), tuple(overlaps), broad)
 
     def apply_exact(self, candidate: MergeCandidate, *, idempotency_key: str):

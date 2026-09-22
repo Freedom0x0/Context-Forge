@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -46,6 +46,9 @@ class ClaimKind(StrEnum):
     OPEN_QUESTION = "open_question"
 
 
+MemoryRole = Literal["observation", "claim", "hypothesis", "preference", "procedure"]
+
+
 class SessionEvent(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -79,6 +82,13 @@ class Attempt(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+class Condition(BaseModel):
+    """Tri-state applicability: a rule is a hypothesis, not a creed."""
+
+    condition: str = Field(min_length=1)
+    result: Literal["true", "false", "unknown"] = "unknown"
+
+
 class KnowledgeItem(BaseModel):
     """Reusable lesson distilled from one or more reviews.
 
@@ -93,12 +103,22 @@ class KnowledgeItem(BaseModel):
     sources: list[str] = Field(default_factory=list)
     confidence: str = "medium"
     topics: list[str] = Field(default_factory=list)
+    role: MemoryRole = "claim"
+    technologies: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+    applicability: list[Condition] = Field(default_factory=list)
+    counterexamples: list[str] = Field(default_factory=list)
 
 
 class RuleExtraction(BaseModel):
     instruction: str = Field(min_length=1)
     paths: list[str] = Field(default_factory=list)
     confidence: str = "medium"
+    role: MemoryRole = "procedure"
+    technologies: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+    applicability: list[Condition] = Field(default_factory=list)
+    counterexamples: list[str] = Field(default_factory=list)
 
     @field_validator("confidence", mode="before")
     @classmethod

@@ -108,8 +108,10 @@ class RuleMatcher:
         """Rules enabled for `project`, ranked by path hit then confidence.
 
         `limit` caps the result (0 = no cap) so one project's rules can
-        no longer flood the context. `legacy_filter=True` restores the
-        old unranked, uncapped dump for callers that need every rule.
+        no longer flood the context. `legacy_filter=True` reverts sort +
+        cap only (the escape hatch). The visibility fixes are NOT
+        reverted: project-level rules would vanish again, and the empty
+        `paths` value would go back to never matching.
         """
         ranked: list[tuple[tuple[int, int, int, float, str], RuleMatch]] = []
         for path in self.root.glob("rules/**/*.md"):

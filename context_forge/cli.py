@@ -269,6 +269,66 @@ def scan_cmd() -> None:
     typer.echo(f"indexed {result['files']} documents; index.md generated")
 
 
+@app.command("migrate-memory")
+def migrate_memory(apply: bool = typer.Option(False, "--apply")) -> None:
+    """Split legacy `Scope` into the boundary trio (dry-run unless --apply).
+
+    Rewrites what it does NOT revert: the v1 database is left untouched by
+    the dry-run, and `--apply` takes an online backup next to the database
+    first. Roll back by restoring that backup file.
+    """
+    from .config import runtime_dir
+    from .memory import MemoryStore, MemoryStoreError
+
+    path = runtime_dir() / "memory.db"
+    if not path.exists():
+        typer.echo("no memory database; nothing to migrate")
+        return
+    try:
+        report = MemoryStore.migrate(path, dry_run=not apply)
+    except MemoryStoreError as exc:
+        typer.echo(f"failed: {exc}")
+        raise typer.Exit(code=1)
+    typer.echo(f"schema {report['from']} -> {report['to']}; "
+               f"rewritten {report['rewritten']}, projections {report['projections']}")
+    if report['backup']:
+        typer.echo(f"backup: {report['backup']}")
+    for line in report['diagnostics']:
+        typer.echo(f"! {line}")
+
+
+@app.command("retag-vault")
+def retag_vault(apply: bool = typer.Option(False, "--apply"),
+                output: Path = typer.Option(None, "--report")) -> None:
+    """Retag vault documents with role / confidence / applicability tags.
+
+    Dry-run by default and reports the basis for every change. `--apply`
+    copies each changed file to `.retag-backup/` first; restore them with
+    `forge retag-rollback`.
+    """
+    from .vault_retag import retag
+
+    report = retag(_vault().root, dry_run=not apply)
+    typer.echo(f"{report['documents']} documents; changed {report['changed']}, "
+               f"unchanged {report['unchanged']}, paths collapsed {report['paths_collapsed']}")
+    for line in report['diagnostics']:
+        typer.echo(f"! {line}")
+    if report.get('backup'):
+        typer.echo(f"backup: {report['backup']}")
+    if output:
+        import json
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        typer.echo(f"report: {output}")
+
+
+@app.command("retag-rollback")
+def retag_rollback() -> None:
+    """Restore vault files from `.retag-backup/` after `forge retag-vault --apply`."""
+    from .vault_retag import rollback
+
+    typer.echo(f"restored {rollback(_vault().root)} file(s)")
+
+
 @app.command("rule-match")
 def rule_match(project: str,
                changed_path: str = typer.Option("", "--path"),
@@ -276,8 +336,9 @@ def rule_match(project: str,
                legacy_filter: bool = typer.Option(False, "--legacy-filter")) -> None:
     """Show which rules hit a project, ranked and capped at --rule-limit.
 
-    `--rule-limit 0` lifts the cap. `--legacy-filter` restores the old
-    unranked, uncapped dump that used to flood the context.
+    `--rule-limit 0` lifts the cap. `--legacy-filter` reverts sort + cap
+    only: it does not bring back the visibility fixes, so project-level
+    rules stay reachable instead of vanishing again.
     """
     from .rules import RuleMatcher
 
@@ -296,8 +357,9 @@ def search(query: str,
            legacy_filter: bool = typer.Option(False, "--legacy-filter")) -> None:
     """Full-text search over the vault (run `forge scan` first).
 
-    `--project` narrows hits to one project. `--legacy-filter` restores
-    the old unfiltered behaviour.
+    `--project` narrows hits to one project. `--legacy-filter` reverts
+    that narrowing only: it restores the old cross-project result mix,
+    it does not change ranking or the empty-`paths` fix.
     """
     from .index import DocumentIndex
 

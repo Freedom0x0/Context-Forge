@@ -24,7 +24,7 @@ from .domain import (
     RuleExtraction,
     SessionArtifacts,
 )
-from .index import parse_frontmatter
+from .index import parse_frontmatter, yaml_scalar
 
 
 class Vault:
@@ -55,7 +55,7 @@ class Vault:
 
     @staticmethod
     def _frontmatter_lines(values: dict[str, object]) -> str:
-        return "\n".join(f"{k}: {v}" for k, v in values.items())
+        return "\n".join(f"{k}: {yaml_scalar(v)}" for k, v in values.items())
 
     # -- read helpers -----------------------------------------------------
 
@@ -115,6 +115,10 @@ class Vault:
             "status": "accepted",
             "confidence": knowledge.confidence,
             "auto_generated": "true",
+            "role": knowledge.role,
+            "technologies": ",".join(knowledge.technologies),
+            "domains": ",".join(knowledge.domains),
+            "exclusions": ",".join(knowledge.counterexamples),
             "topics": ",".join(knowledge.topics),
             "sources": ",".join(knowledge.sources),
         }
@@ -142,6 +146,10 @@ class Vault:
             "status": "enabled",
             "confidence": rule.confidence,
             "auto_generated": "true",
+            "role": rule.role,
+            "technologies": ",".join(rule.technologies),
+            "domains": ",".join(rule.domains),
+            "exclusions": ",".join(rule.counterexamples),
             "paths": ",".join(rule.paths),
         }
         return self._atomic_write(
@@ -249,4 +257,14 @@ class Vault:
         if artifacts.rule_candidate is not None:
             parts += ["## Rule candidate", "", artifacts.rule_candidate.instruction,
                        ""]
+        item = artifacts.rule_candidate or artifacts.knowledge
+        if item is not None:
+            if item.applicability:
+                parts += ["## 适用条件", ""]
+                parts += [f"- ({condition.result}) {condition.condition}" for condition in item.applicability]
+                parts.append("")
+            if item.counterexamples:
+                parts += ["## 反例", ""]
+                parts += [f"- {text}" for text in item.counterexamples]
+                parts.append("")
         return "\n".join(parts).rstrip() + "\n"

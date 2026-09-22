@@ -8,19 +8,53 @@ from pathlib import Path
 import frontmatter
 
 from .memory import MemoryStore, MemoryStoreError, canonical_json, digest, now
-from .memory_models import MemoryDraft, Relation, Scope, Source
+from .memory_models import DEFAULT_OWNER, MemoryDraft, Relation, Scope, Source, split_legacy_scopes
 
 
 def _strings(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
     if isinstance(value, str):
-        return tuple(part.strip() for part in value.split(',') if part.strip())
-    if isinstance(value, list):
-        return tuple(str(part) for part in value if str(part))
-    return ()
+        values = value.split(',')
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    return tuple(text for text in (str(part).strip() for part in values) if text)
 
 
 def _boolean(value: object) -> bool:
     return value is True or isinstance(value, str) and value.lower() == 'true'
+
+
+_ROLES = {'observation', 'claim', 'hypothesis', 'preference', 'procedure'}
+
+
+def _role(metadata: dict, kind: str) -> str:
+    value = str(metadata.get('role', '')).strip().lower()
+    return value if value in _ROLES else ('procedure' if kind == 'rule' else 'claim')
+
+
+def _privacy(metadata: dict) -> str:
+    return 'private' if str(metadata.get('privacy', '')).strip().lower() == 'private' else 'shared'
+
+
+def _access(metadata: dict, split) -> object:
+    visibility = str(metadata.get('access_visibility', '')).strip().lower()
+    if visibility not in {'owner', 'selected_projects', 'shared'}:
+        return split.access
+    allowed = _strings(metadata.get('allowed_projects')) or split.provenance.projects
+    if visibility == 'selected_projects' and not allowed:
+        return split.access
+    return split.access.model_copy(update={'visibility': visibility, 'allowed_projects': allowed})
+
+
+def _applicability_scope(metadata: dict, split) -> object:
+    return split.scope.model_copy(update={
+        'technologies': _strings(metadata.get('technologies')) or split.scope.technologies,
+        'domains': _strings(metadata.get('domains')) or split.scope.domains,
+        'exclusions': _strings(metadata.get('exclusions')) or split.scope.exclusions,
+    })
 
 
 def _feedback(path: Path | None) -> list[dict]:
@@ -41,7 +75,7 @@ def _feedback(path: Path | None) -> list[dict]:
 
 
 def preview_vault(root: Path, *, feedback_db: Path | None = None,
-                  namespace: str | None = None) -> dict:
+                  namespace: str | None = None, owner: str = DEFAULT_OWNER) -> dict:
     """Read a legacy snapshot without opening or creating any destination."""
     root = Path(root).resolve()
     if not root.is_dir():
@@ -82,11 +116,17 @@ def preview_vault(root: Path, *, feedback_db: Path | None = None,
             origin = ['session', source.session_id] if source.session_id else ['document', relative]
             sources.append(Source(identity='legacy-reference:' + digest(canonical_json([namespace, origin, reference])),
                                   kind='legacy', reference=reference, session_id=source.session_id))
-        draft = MemoryDraft(kind=kind, role='procedure' if kind == 'rule' else 'claim',
+        split = split_legacy_scopes((scope,), owner=owner, privacy=_privacy(metadata))
+        session = str(metadata['session_id']) if metadata.get('session_id') else None
+        provenance = split.provenance.model_copy(
+            update={'sessions': (session,) if session else ()})
+        draft = MemoryDraft(kind=kind, role=_role(metadata, kind),
                             body=parsed.content or '(empty legacy document)', status=status,
                             user_owned=_boolean(metadata.get('user_owned')), suppressed=status == 'disabled',
                             confidence=str(metadata['confidence']) if metadata.get('confidence') is not None else None,
-                            scopes=(scope,), sources=tuple(sources),
+                            space=split.space, access=_access(metadata, split),
+                            provenance=provenance, scope=_applicability_scope(metadata, split),
+                            applicability=split.applicability, sources=tuple(sources),
                             metadata={'legacy': metadata, 'legacy_id': legacy_id, 'legacy_path': relative,
                                       'legacy_hash': content_hash, 'import_namespace': namespace})
         documents.append({'path': relative, 'legacy_id': legacy_id, 'content_hash': content_hash,
@@ -99,21 +139,23 @@ def preview_vault(root: Path, *, feedback_db: Path | None = None,
         knowledge_id = item['draft'].metadata['legacy'].get('source_knowledge_id')
         if knowledge_id:
             projects = referenced_projects.setdefault(str(knowledge_id), set())
-            projects.update(scope.project for scope in item['draft'].scopes if scope.kind == 'project')
+            projects.update(item['draft'].provenance.projects)
     for item in documents:
         draft = item['draft']
-        if draft.kind == 'knowledge' and all(scope.kind == 'unknown' for scope in draft.scopes):
+        if draft.kind == 'knowledge' and not draft.provenance.projects:
             projects = referenced_projects.get(item['legacy_id'], set())
             if projects:
-                item['draft'] = draft.model_copy(update={'scopes': tuple(Scope(kind='project', project=project) for project in sorted(projects))})
+                item['draft'] = draft.model_copy(update={
+                    'provenance': draft.provenance.model_copy(update={'projects': tuple(sorted(projects))})})
     return {'namespace': namespace, 'documents': documents, 'feedback': _feedback(feedback_db)}
 
 
 def import_vault(store: MemoryStore, root: Path, *, feedback_db: Path | None = None,
-                 dry_run: bool = True, namespace: str | None = None, snapshot_order: int = 0) -> dict:
+                 dry_run: bool = True, namespace: str | None = None, snapshot_order: int = 0,
+                 owner: str = DEFAULT_OWNER) -> dict:
     if not isinstance(snapshot_order, int) or snapshot_order < 0:
         raise ValueError('snapshot_order must be a nonnegative integer')
-    snapshot = preview_vault(root, feedback_db=feedback_db, namespace=namespace)
+    snapshot = preview_vault(root, feedback_db=feedback_db, namespace=namespace, owner=owner)
     namespace = snapshot['namespace']
     documents = snapshot['documents']
     manifest_hash = digest(canonical_json({'documents': [(item['path'], item['content_hash']) for item in documents],
