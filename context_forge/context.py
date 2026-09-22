@@ -1,9 +1,8 @@
 """Compose a single-context view for AI or human consumption.
 
-The CLI's `forge context` and the MCP server both need the same shape:
-matched rules, recent accepted knowledge, and recent reviews, scoped by
-project and optional path. This module is the single place that knows
-how to assemble it, so adding or removing a section happens here only.
+This module is the single place that knows the shape — matched rules,
+recent accepted knowledge, and recent reviews, scoped by project and
+optional path — so adding or removing a section happens here only.
 """
 
 from __future__ import annotations
@@ -21,14 +20,19 @@ class ContextSection:
 def build_context(vault_root: Path, project: str,
                    changed_path: str | None = None,
                    knowledge_limit: int = 5,
-                   review_limit: int = 5) -> list[ContextSection]:
-    """Return ordered context sections for a project + optional path."""
+                   review_limit: int = 5,
+                   rule_limit: int = 8) -> list[ContextSection]:
+    """Return ordered context sections for a project + optional path.
+
+    `rule_limit` caps the matched-rule section (0 = no cap).
+    """
     from .index import parse_frontmatter
     from .rules import RuleMatcher
 
     sections: list[ContextSection] = []
     rule_lines = []
-    for match in RuleMatcher(vault_root).match(project, changed_path):
+    for match in RuleMatcher(vault_root).match(project, changed_path,
+                                               limit=rule_limit):
         rule_lines.append(f"- [{match.rule_id}] {match.reason}\n  {match.instruction}")
     if rule_lines:
         sections.append(ContextSection("Matched rules", "\n".join(rule_lines)))

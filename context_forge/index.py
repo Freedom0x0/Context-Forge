@@ -34,10 +34,7 @@ class DocumentIndex:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5("
-            "id UNINDEXED, path UNINDEXED, content)"
-        )
+        self._ensure_documents()
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS rebuild_history ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, "
@@ -45,15 +42,30 @@ class DocumentIndex:
         )
         self.db.commit()
 
+    def _ensure_documents(self) -> None:
+        """Create the FTS table, recreating an older shape if found.
+
+        The index is derived and rebuildable, so dropping an outdated
+        shape is safe: the next `rebuild()` refills it.
+        """
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(documents)")}
+        if columns and "project" not in columns:
+            self.db.execute("DROP TABLE documents")
+        self.db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5("
+            "id UNINDEXED, path UNINDEXED, project UNINDEXED, content)"
+        )
+
     def rebuild(self, root: Path) -> int:
         documents = self._walk(root)
         started = datetime.now(timezone.utc).isoformat()
         with self.db:
             self.db.execute("DELETE FROM documents")
             self.db.executemany(
-                "INSERT INTO documents(id, path, content) VALUES (?, ?, ?)",
+                "INSERT INTO documents(id, path, project, content) VALUES (?, ?, ?, ?)",
                 [
-                    (str(doc.path.relative_to(root)), str(doc.path.relative_to(root)), doc.body)
+                    (str(doc.path.relative_to(root)), str(doc.path.relative_to(root)),
+                     doc.frontmatter.get("project", ""), doc.body)
                     for doc in documents
                 ],
             )
@@ -79,11 +91,24 @@ class DocumentIndex:
             f"rebuild_success_rate_{days}d": ok_count / total if total else 0.0,
         }
 
-    def search(self, query: str, limit: int = 20) -> list[sqlite3.Row]:
-        return list(self.db.execute(
-            "SELECT path, snippet(documents, 2, '[', ']', '...', 24) AS snippet "
-            "FROM documents WHERE documents MATCH ? LIMIT ?", (query, limit)
-        ))
+    def search(self, query: str, limit: int = 20,
+               project: str | None = None) -> list[sqlite3.Row]:
+        """Full-text hits, optionally narrowed to one project.
+
+        `project=None` keeps the old unfiltered behaviour; `limit` <= 0
+        lifts the cap, as in `RuleMatcher.match`.
+        """
+        # snippet() takes a 0-based column index; a name string coerces to 0
+        sql = ("SELECT path, snippet(documents, 3, '[', ']', '...', 24) AS snippet "
+               "FROM documents WHERE documents MATCH ?")
+        params: list[object] = [query]
+        if project is not None:
+            sql += " AND project = ?"
+            params.append(project)
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return list(self.db.execute(sql, params))
 
     @staticmethod
     def _walk(root: Path) -> list[VaultDocument]:

@@ -72,33 +72,66 @@ def _frontmatter(content: str) -> tuple[dict[str, object], str]:
     return values, content[marker + 4:].strip()
 
 
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _sort_key(paths_hit: bool, metadata: dict[str, object], path: Path
+              ) -> tuple[int, int, int, float, str]:
+    """Rank: path hit, confidence, enabled status, newest file, then id.
+
+    Path hit is the only relevance signal available here, so it leads;
+    mtime is a tiebreak and must never look like relevance. An unstated
+    confidence ranks as `medium` (the domain default), never below `low`.
+    """
+    confidence = str(metadata.get("confidence", "")).strip().lower()
+    return (
+        0 if paths_hit else 1,
+        -_CONFIDENCE_RANK.get(confidence, _CONFIDENCE_RANK["medium"]),
+        0 if metadata.get("status") == "enabled" else 1,
+        -path.stat().st_mtime,
+        str(metadata.get("id", path.stem)),
+    )
+
+
+def _path_patterns(metadata: dict[str, object]) -> list[str]:
+    raw = metadata.get("paths", [])
+    values = [raw] if isinstance(raw, str) else list(raw or [])
+    return [text for text in (str(v).strip() for v in values) if text]
+
+
 class RuleMatcher:
     def __init__(self, vault_root: Path):
         self.root = vault_root.resolve()
 
-    def match(self, project: str, changed_path: str | None = None) -> list[RuleMatch]:
-        matches: list[RuleMatch] = []
+    def match(self, project: str, changed_path: str | None = None,
+              limit: int = 8, legacy_filter: bool = False) -> list[RuleMatch]:
+        """Rules enabled for `project`, ranked by path hit then confidence.
+
+        `limit` caps the result (0 = no cap) so one project's rules can
+        no longer flood the context. `legacy_filter=True` restores the
+        old unranked, uncapped dump for callers that need every rule.
+        """
+        ranked: list[tuple[tuple[int, int, int, float, str], RuleMatch]] = []
         for path in self.root.glob("rules/**/*.md"):
             metadata, instruction = _frontmatter(path.read_text(encoding="utf-8"))
             if metadata.get("status") != "enabled":
                 continue
             if metadata.get("project") != project:
                 continue
-            patterns = metadata.get("paths", [])
-            if isinstance(patterns, str):
-                patterns = [patterns]
-            if not patterns:
-                if changed_path is None:
-                    matches.append(RuleMatch(
-                        str(metadata.get("id", path.stem)), path,
-                        f"project={project}", instruction,
-                    ))
+            patterns = _path_patterns(metadata)
+            rule_id = str(metadata.get("id", path.stem))
+            paths_hit = bool(changed_path) and any(
+                glob_match(changed_path, p) for p in patterns)
+            if patterns and not paths_hit:
                 continue
-            if changed_path and any(glob_match(changed_path, p) for p in patterns):
-                matches.append(RuleMatch(
-                    str(metadata.get("id", path.stem)), path,
-                    f"project={project}, path={changed_path} matches "
-                    f"{', '.join(patterns)}",
-                    instruction,
-                ))
-        return matches
+            reason = f"project={project}"
+            if paths_hit:
+                reason = (f"project={project}, path={changed_path} matches "
+                          f"{', '.join(patterns)}")
+            ranked.append((_sort_key(paths_hit, metadata, path),
+                           RuleMatch(rule_id, path, reason, instruction)))
+        if legacy_filter:
+            return [match for _, match in ranked]
+        ranked.sort(key=lambda item: item[0])
+        matches = [match for _, match in ranked]
+        return matches if limit <= 0 else matches[:limit]

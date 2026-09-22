@@ -10,7 +10,7 @@ After the auto-loop refactor, only 6 commands remain for daily use:
   forge retention --apply [--days N]  manual cleanup
 
 Everything else is either:
-- a diagnostic / debug tool (`session-info`, `jobs`, `validate`)
+- a diagnostic / debug tool (`session-info`, `jobs`, `rule-match`, `search`)
 - an escape hatch for power users (`provider-check`, `import-transcript`)
 - removed because user actions live in Obsidian / frontmatter instead
 
@@ -54,13 +54,6 @@ def _vault() -> Vault:
         return Vault(settings.root)
     from .config import runtime_dir
     return Vault(runtime_dir() / "vault")
-
-
-def _index_path(vault_root: Path) -> Path:
-    from .config import runtime_dir
-    import hashlib
-    key = hashlib.sha256(str(vault_root).encode("utf-8")).hexdigest()[:16]
-    return runtime_dir() / f"index-{key}.db"
 
 
 # -- core 6 --------------------------------------------------------------
@@ -274,6 +267,43 @@ def scan_cmd() -> None:
     """Rebuild the FTS index and scan for rule frontmatter feedback."""
     result = _vault().scan()
     typer.echo(f"indexed {result['files']} documents; index.md generated")
+
+
+@app.command("rule-match")
+def rule_match(project: str,
+               changed_path: str = typer.Option("", "--path"),
+               rule_limit: int = typer.Option(8, "--rule-limit", min=0),
+               legacy_filter: bool = typer.Option(False, "--legacy-filter")) -> None:
+    """Show which rules hit a project, ranked and capped at --rule-limit.
+
+    `--rule-limit 0` lifts the cap. `--legacy-filter` restores the old
+    unranked, uncapped dump that used to flood the context.
+    """
+    from .rules import RuleMatcher
+
+    matches = RuleMatcher(_vault().root).match(
+        project, changed_path or None, limit=rule_limit,
+        legacy_filter=legacy_filter)
+    for match in matches:
+        typer.echo(f"- [{match.rule_id}] {match.reason}")
+        typer.echo(f"  {match.instruction}")
+    typer.echo(f"{len(matches)} rule(s)")
+
+
+@app.command()
+def search(query: str,
+           project: str = typer.Option("", "--project"),
+           legacy_filter: bool = typer.Option(False, "--legacy-filter")) -> None:
+    """Full-text search over the vault (run `forge scan` first).
+
+    `--project` narrows hits to one project. `--legacy-filter` restores
+    the old unfiltered behaviour.
+    """
+    from .index import DocumentIndex
+
+    scoped = None if legacy_filter or not project else project
+    for row in DocumentIndex(_vault()._index_path()).search(query, project=scoped):
+        typer.echo(f"{row['path']}\t{row['snippet']}")
 
 
 @app.command("watch-transcripts")

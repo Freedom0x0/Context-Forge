@@ -98,6 +98,12 @@ class KnowledgeItem(BaseModel):
 class RuleExtraction(BaseModel):
     instruction: str = Field(min_length=1)
     paths: list[str] = Field(default_factory=list)
+    confidence: str = "medium"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def blank_confidence_is_medium(cls, value):
+        return value or "medium"
 
 
 class SessionArtifacts(BaseModel):

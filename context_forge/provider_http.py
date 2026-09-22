@@ -48,7 +48,8 @@ _PROMPT = (
     '"sources": [string], '
     '"confidence": "low|medium|high", '
     '"topics": [string]}} | null, '
-    '"rule_candidate": {{"instruction": string, "paths": [string]}} | null'
+    '"rule_candidate": {{"instruction": string, "paths": [string], '
+    '"confidence": "low|medium|high"}} | null'
     "}}\n"
     "Facts MUST cite at least one evidence id. Open questions and "
     "inferences can omit evidence. Set should_save=false if the session "
@@ -213,9 +214,10 @@ class HttpGateway:
     def compile_rule(self, knowledge_id, knowledge_text):
         prompt = (
             "Distill the following knowledge into a single-sentence "
-            "rule instruction and a comma-separated list of glob "
-            "patterns. Reply with strict JSON only: "
-            '{"instruction": string, "paths": [string]}\n\n'
+            "rule instruction, a comma-separated list of glob "
+            "patterns and a confidence. Reply with strict JSON only: "
+            '{"instruction": string, "paths": [string], '
+            '"confidence": "low|medium|high"}\n\n'
             f"Knowledge id: {knowledge_id}\n{knowledge_text}"
         )
         reply = self._call_chat(prompt)

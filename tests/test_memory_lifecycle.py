@@ -9,11 +9,12 @@ def test_zero_and_multiple_candidates(tmp_path):
     empty = service.candidates(SessionArtifacts(title="empty", should_save=False), session_id="s1")
     assert empty == ()
     artifacts = SessionArtifacts(title="lesson", knowledge=KnowledgeItem(id="k", body="use tests"),
-                                 rule_candidate=RuleExtraction(instruction="run tests"))
+                                 rule_candidate=RuleExtraction(instruction="run tests", confidence="high"))
     candidates = service.candidates(artifacts, session_id="s1", project="demo")
     assert {candidate.draft.kind for candidate in candidates} == {"knowledge", "rule"}
     assert all(candidate.draft.model == "deepseek-v4-flash" for candidate in candidates)
     assert all(candidate.draft.evidence_level == "unverified" for candidate in candidates)
+    assert {c.draft.confidence for c in candidates if c.draft.kind == "rule"} == {"high"}
 
 
 def test_publish_is_idempotent_and_human_suppression_wins(tmp_path):

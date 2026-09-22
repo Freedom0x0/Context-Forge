@@ -50,7 +50,8 @@ class MemoryLifecycle:
             draft = MemoryDraft(
                 kind="rule", role="procedure", body=rule.instruction, summary=artifacts.title,
                 status="candidate", evidence_level="unverified" if sources else "unknown",
-                model=self.model, prompt_version=self.prompt_version, scopes=scopes, sources=sources,
+                confidence=rule.confidence, model=self.model,
+                prompt_version=self.prompt_version, scopes=scopes, sources=sources,
             )
             relations = (Relation(target_id=knowledge_id, target_version=1, kind="derived_from"),) if knowledge_id else ()
             result.append(Candidate(_id(f"rule:{session_id}:{rule.instruction}"), draft, relations))

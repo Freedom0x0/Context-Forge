@@ -140,6 +140,7 @@ class Vault:
             "source_knowledge_id": knowledge_id,
             "project": project,
             "status": "enabled",
+            "confidence": rule.confidence,
             "auto_generated": "true",
             "paths": ",".join(rule.paths),
         }

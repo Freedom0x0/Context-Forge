@@ -1,7 +1,7 @@
 """MCP server for Claude Desktop / Claude Code to query the vault.
 
 Tools:
-  context_forge_search(query)        full-text over knowledge + rules
+  context_forge_search(query, project)  full-text over knowledge + rules
   context_forge_get(path)            read a vault file (path-validated)
   context_forge_match_rules(...)     explain rule hits for a project
   context_forge_recent_knowledge(N)  last N auto-published knowledge items
@@ -31,8 +31,8 @@ def _vault():
 
 
 def _index():
-    from .cli import _index as cli_index
-    return cli_index()
+    from .index import DocumentIndex
+    return DocumentIndex(_vault()._index_path())
 
 
 def create_server():
@@ -45,8 +45,10 @@ def create_server():
     server = FastMCP("context-forge")
 
     @server.tool()
-    def context_forge_search(query: str) -> list[dict[str, str]]:
-        return [dict(row) for row in _index().search(query)]
+    def context_forge_search(query: str,
+                             project: str = "") -> list[dict[str, str]]:
+        """Full-text lookup; `project` narrows to one project ("" = all)."""
+        return [dict(row) for row in _index().search(query, project=project or None)]
 
     @server.tool()
     def context_forge_memory_search(query: str, project: str,
@@ -81,11 +83,15 @@ def create_server():
         return target.read_text(encoding="utf-8")
 
     @server.tool()
-    def context_forge_match_rules(project: str,
-                                  changed_path: str = "") -> list[dict[str, str]]:
+    def context_forge_match_rules(project: str, changed_path: str = "",
+                                  limit: int = 8,
+                                  legacy_filter: bool = False) -> list[dict[str, str]]:
+        """Ranked rule hits for a project (0 = no cap; legacy_filter = old dump)."""
         return [
             {"rule_id": m.rule_id, "reason": m.reason, "instruction": m.instruction}
-            for m in RuleMatcher(_vault().root).match(project, changed_path or None)
+            for m in RuleMatcher(_vault().root).match(
+                project, changed_path or None, limit=limit,
+                legacy_filter=legacy_filter)
         ]
 
     @server.tool()
