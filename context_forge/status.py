@@ -32,6 +32,9 @@ def collect(store: JobStore) -> dict[str, int | str]:
                 continue
             if "status: enabled" in text:
                 rules_enabled += 1
+    from . import runtime_sync
+
+    sync = runtime_sync.consistency(vault_root)
     return {
         "sessions": m["sessions"],
         "reviews": m["reviews"],
@@ -39,6 +42,9 @@ def collect(store: JobStore) -> dict[str, int | str]:
         "rules_enabled": rules_enabled,
         "jobs_dead_letter": m["jobs_dead_letter"],
         "jobs_succeeded": m["jobs_succeeded"],
+        "memory_vault_documents": sync["vault_documents"],
+        "memory_db_records": sync["db_records"],
+        "memory_unsynced": max(0, sync["vault_documents"] - sync["db_records"]),
         "last_updated": _now_iso(),
     }
 
@@ -56,6 +62,8 @@ def render_text(status: dict[str, int | str]) -> str:
         parts.append(f"{pending} review(s) pending")
     if dead:
         parts.append(f"{dead} job(s) in dead-letter")
+    if status.get("memory_unsynced"):
+        parts.append(f"{status['memory_unsynced']} vault document(s) not in memory.db (run forge sync)")
     if not parts:
         parts.append("queue clean")
     return f"[context-forge] {'; '.join(parts)} ({status['sessions']} sessions, {status['rules_enabled']} rules)"

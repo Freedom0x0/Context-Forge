@@ -24,7 +24,7 @@ from .domain import (
     RuleExtraction,
     SessionArtifacts,
 )
-from .index import parse_frontmatter, yaml_scalar
+from .index import iter_vault_documents, parse_frontmatter, yaml_scalar
 
 
 class Vault:
@@ -213,7 +213,7 @@ class Vault:
             path.write_text(text, encoding="utf-8", newline="\n")
 
     def _count_markdown(self) -> int:
-        return sum(1 for _ in self.root.rglob("*.md") if _.name != "index.md")
+        return sum(1 for _ in iter_vault_documents(self.root))
 
     def _index_path(self) -> Path:
         from .config import runtime_dir

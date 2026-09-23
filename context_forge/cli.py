@@ -27,6 +27,7 @@ import typer
 
 from .config import load_settings
 from .gateways import select_gateway
+from .index import iter_vault_documents
 from .queue import JobStore
 from .vault import Vault
 from .worker import process_one, run_loop
@@ -91,6 +92,44 @@ def install_hook(target: Path = typer.Option(None, "--target"),
         typer.echo(f"removed {result['removed']} hook entries at {result['path']}")
     else:
         typer.echo(f"added {result['added']} hook entries at {result['path']}")
+
+
+@app.command("sync")
+def sync_cmd(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    """Import vault content into memory.db (incremental, idempotent, one-way).
+
+    Reads the vault and writes only memory.db. Re-running with no vault
+    change imports nothing.
+    """
+    from . import runtime_sync
+
+    report = runtime_sync.sync(_vault().root, dry_run=dry_run)
+    typer.echo(f"created {report.created}, updated {report.updated}, "
+               f"unchanged {report.unchanged}, protected {report.protected}")
+    typer.echo(f"vault has {report.vault_documents} documents; "
+               f"memory.db has {report.db_records}; snapshot_order {report.snapshot_order}")
+    for line in report.diagnostics:
+        typer.echo(f"! {line}")
+
+
+@app.command("mcp-install")
+def mcp_install_cmd(target: Path = typer.Option(None, "--target"),
+                    uninstall: bool = typer.Option(False, "--uninstall")) -> None:
+    """Add or remove the Context Forge MCP server in the host config.
+
+    Backs the file up first and only ever adds/removes its own
+    `mcpServers.context_forge` key; existing entries stay untouched.
+    `--target` points at another settings file (used by tests).
+    """
+    from . import mcp_install
+
+    result = mcp_install.uninstall(target) if uninstall else mcp_install.install(target)
+    if uninstall:
+        typer.echo(f"removed {result['removed']} entry at {result['path']}")
+    else:
+        typer.echo(f"installed context_forge at {result['path']}")
+    if result.get("backup"):
+        typer.echo(f"backup: {result['backup']}")
 
 
 @worker_app.command("run")
@@ -485,8 +524,8 @@ def watch_cmd(daemon: bool = typer.Option(False, "--daemon"),
         return
 
     while True:
-        mtime = max((p.stat().st_mtime for p in vault.root.rglob("*.md")
-                     if p.name != "index.md"), default=0.0)
+        mtime = max((p.stat().st_mtime for p in iter_vault_documents(vault.root)),
+                    default=0.0)
         if mtime > last_mtime:
             vault.scan()
             last_mtime = mtime

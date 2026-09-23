@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,31 @@ class VaultDocument:
     frontmatter: dict[str, str]
     body: str
     content_hash: str
+
+
+VAULT_TOP_LEVEL = frozenset({"knowledge", "rules", "reviews"})
+
+
+def iter_vault_documents(root: Path) -> Iterator[Path]:
+    """Every vault content document, sorted by path.
+
+    **The single definition of "what is a vault document".** Only the known
+    content directories count; anything else under the root is not content
+    and must never reach the index, a count, or an import. Three separate
+    conventions used to disagree here, so `.retag-backup` (migration
+    backups) and `.obsidian` (app state) were indexed alongside real
+    documents.
+
+    A document also has a `.md` suffix and is not the generated `index.md`.
+    """
+    root = Path(root)
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        if not relative.parts or path.name == "index.md":
+            continue
+        if relative.parts[0] not in VAULT_TOP_LEVEL:
+            continue
+        yield path
 
 
 class DocumentIndex:
@@ -114,9 +140,7 @@ class DocumentIndex:
     @staticmethod
     def _walk(root: Path) -> list[VaultDocument]:
         docs: list[VaultDocument] = []
-        for path in root.rglob("*.md"):
-            if path.name == "index.md":
-                continue
+        for path in iter_vault_documents(root):
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:

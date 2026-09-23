@@ -11,7 +11,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from context_forge.index import DocumentIndex
+from context_forge.index import DocumentIndex, iter_vault_documents
 from context_forge.rules import RuleMatcher
 
 
@@ -142,3 +142,30 @@ def test_search_upgrades_old_index_shape(tmp_path: Path) -> None:
     assert [row["path"] for row in index.search("filterOption",
                                                project="context-forge")] == [
         str(Path("knowledge") / "accepted" / "a.md")]
+
+
+def test_non_content_directories_are_never_indexed(tmp_path):
+    """GUARD: only `knowledge/`, `rules/`, `reviews/` are vault content.
+
+    Everything else under the root — `.retag-backup` (migration backups),
+    `.obsidian` (app state), stray dirs — used to be walked as content, so
+    `forge search` returned duplicate hits from the backup copy and the
+    index/markdown counts silently disagreed (480 vs 240).
+    """
+    write_doc(tmp_path, "real", "demo", "needle in the real document")
+    for stray in (".retag-backup/knowledge/accepted/copy.md",
+                  ".obsidian/note.md",
+                  "scratch/note.md"):
+        path = tmp_path / stray
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\nid: stray\n---\n\nneedle in a stray document\n",
+                        encoding="utf-8", newline="\n")
+
+    assert [p.relative_to(tmp_path).as_posix()
+            for p in iter_vault_documents(tmp_path)] == [
+        "knowledge/accepted/real.md"]
+
+    index = DocumentIndex(tmp_path / "index.db")
+    assert index.rebuild(tmp_path) == 1
+    assert [row["path"] for row in index.search("needle")] == [
+        str(Path("knowledge") / "accepted" / "real.md")]

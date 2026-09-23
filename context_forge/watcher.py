@@ -160,6 +160,28 @@ def _beat() -> None:
         pass
 
 
+def _sync_after_pass(vault_root: Path) -> None:
+    """Mirror vault changes into memory.db after a pass that wrote documents.
+
+    A failure is recorded where `forge doctor` can see it and printed — it is
+    never swallowed, and it never stops the watcher loop (the next pass
+    retries).
+    """
+    from . import runtime_sync
+
+    try:
+        report = runtime_sync.sync(vault_root, dry_run=False)
+    except Exception as exc:  # noqa: BLE001
+        message = f"{type(exc).__name__}: {exc}"
+        runtime_sync.record_failure(message)
+        print(f"[watcher] memory sync failed: {message}")
+        return
+    if report.diagnostics:
+        runtime_sync.record_failure("; ".join(report.diagnostics))
+    else:
+        runtime_sync.clear_failure()
+
+
 def run(store: JobStore, vault: Vault, gateway=None, *,
         interval_seconds: float = DEFAULT_INTERVAL,
         settle_seconds: float = DEFAULT_SETTLE,
@@ -186,13 +208,16 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
     try:
         while True:
             _beat()
+            processed = 0
             try:
-                scan_once(store, vault, gateway,
-                          settle_seconds=settle_seconds,
-                          max_attempts=max_attempts,
-                          memory_store=memory_store)
+                processed = scan_once(store, vault, gateway,
+                                      settle_seconds=settle_seconds,
+                                      max_attempts=max_attempts,
+                                      memory_store=memory_store)
             except Exception as exc:  # noqa: BLE001
                 print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+            if processed:
+                _sync_after_pass(vault.root)
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("[watcher] interrupted; exiting")

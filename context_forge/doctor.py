@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Settings, default_settings_path, load_settings
+from .index import iter_vault_documents
 from .queue import JobStore
 
 
@@ -90,7 +91,7 @@ def check_index(vault_root: Path) -> tuple[str, bool, str]:
         rows = list(sqlite3.connect(db_path).execute("SELECT COUNT(*) FROM documents"))
     except sqlite3.Error as exc:
         return ("index", False, f"cannot query: {exc}")
-    on_disk = sum(1 for _ in vault_root.rglob("*.md") if _.name != "index.md")
+    on_disk = sum(1 for _ in iter_vault_documents(vault_root))
     count = rows[0][0] if rows else 0
     return ("index", count == on_disk, f"fts={count} markdown={on_disk}")
 
@@ -152,12 +153,52 @@ def check_memory() -> tuple[str, bool, str]:
             f"整理候选 {len(report.tidy_candidates)}")
 
 
+def check_memory_sync(vault_root: Path | None) -> list[str]:
+    """Warn when the vault has documents that `memory.db` does not.
+
+    A missing database with an empty vault is not an inconsistency (there is
+    nothing to import), so it stays quiet; a real gap must never be silent.
+    """
+    from . import runtime_sync
+
+    state = runtime_sync.consistency(vault_root)
+    warnings: list[str] = []
+    if state["failure"]:
+        warnings.append(f"last sync failed: {state['failure']}")
+    if state["vault_documents"] == 0:
+        return warnings
+    if state["missing"]:
+        warnings.append("memory.db missing; run forge sync")
+    elif state["vault_documents"] > state["db_records"]:
+        missing = state["vault_documents"] - state["db_records"]
+        warnings.append(
+            f"vault has {state['vault_documents']} documents, memory.db has "
+            f"{state['db_records']} ({missing} not imported); run forge sync")
+    return warnings
+
+
+def check_mcp() -> tuple[str, bool, str]:
+    """Report whether the optional `mcp` package is importable.
+
+    Absence is surfaced, not failed: the host entry can exist before the
+    extra is installed, and the rest of Context Forge works without it.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("mcp") is None:
+        return ("mcp", True,
+                "mcp package not installed; host MCP tools unreachable "
+                "(pip install 'context-forge[mcp]')")
+    return ("mcp", True, "mcp package available")
+
+
 def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
     settings = load_settings()
     from .config import runtime_dir
     vault_root = settings.root if settings else runtime_dir() / "vault"
     if settings and settings.retention_days:
         retention_days = settings.retention_days
+    sync_warnings = check_memory_sync(vault_root)
     return [
         check_settings(),
         check_vault_canonical(settings),
@@ -166,6 +207,9 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_provider(settings),
         check_watcher(),
         check_memory(),
+        ("memory-sync", not sync_warnings,
+         "; ".join(sync_warnings) if sync_warnings else "vault and memory.db agree"),
+        check_mcp(),
     ]
 
 

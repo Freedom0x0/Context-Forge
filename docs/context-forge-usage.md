@@ -103,22 +103,34 @@ worker daemon picks job → 调模型
 
 ### MCP（给 AI 用）
 
-5 个工具，让 Claude Code 直接读 vault：
+11 个工具，让 Claude Code 直接读 Gen2 记忆库：
 
 ```bash
-python -m pip install -e ".[mcp]"
-python -m context_forge.mcp_server
+python -m pip install -e ".[mcp]"     # 可选依赖，不装则 server 起不来
+forge sync                            # 建/更新 memory.db（单向：vault → memory.db）
+forge mcp-install                     # 写进 ~/.claude/settings.json（先备份、只增不改）
 ```
 
-工具：`context_forge_search` / `context_forge_get` / `context_forge_match_rules` / `context_forge_recent_knowledge` / `context_forge_recent_rules` / `context_forge_record_feedback`。
-配置见 `docs/mcp-transport.md`。
+工具：召回类 `context_forge_memory_search` / `_memory_get` / `_memory_report` /
+`_memory_effectiveness` / `_memory_hygiene`；Gen1 vault 类 `context_forge_search` /
+`_get` / `_match_rules` / `_recent_knowledge` / `_recent_rules` / `_record_feedback`。
+
+撤销：`forge mcp-install --uninstall`。配置细节与**已证/未证边界**见 `docs/mcp-transport.md`。
+
+> **改了代码要重启 daemon。** `forge watch-transcripts` 是常驻进程，Python 内存里是
+> **启动时**的模块 —— VBS 只在它**退出**时重启。2026-09-23 实测：watcher 跑了 21 小时的
+> 旧代码，期间落下的文档仍带已修复的 YAML 引号缺陷。改完 `context_forge/` 后：
+> `taskkill /F /IM pythonw.exe`，VBS 30 秒内以新代码重启。
+>
+> 同理，`memory.db` 的同步只在该进程处理过会话后触发；**手工编辑 vault 后要跑 `forge sync`**。
 
 ### 跑过几次后
 
 ```bash
-forge metrics      # §11 五项指标
-forge validate     # vault 文件健康
-forge doctor       # 5 项只读诊断
+forge sync             # 同步 vault → memory.db
+forge memory-report    # 应用效果 / 异常审计 / 整理候选 三张报表
+forge hygiene          # 巩固 / 衰减 / 合并候选
+forge doctor           # 9 项只读诊断（含 vault↔memory.db 一致性、mcp 可用性）
 ```
 
 ## 数据契约
