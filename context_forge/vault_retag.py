@@ -1,8 +1,9 @@
 """Retag Gen1 vault documents for the boundary-trio model.
 
 Adds `confidence` / `role` / `technologies` / `domains` and the explicit
-access keys, and collapses rules whose declared `paths` are evidence
-provenance rather than applicability. Never deletes a document and never
+access keys, and moves rules whose declared `paths` are evidence provenance
+rather than applicability into `evidence_paths` (provenance is never dropped).
+Never deletes a document and never
 clears `project` (it becomes provenance). Dry-run is the default; changed
 files are copied to a backup directory first so the run is reversible.
 """
@@ -298,8 +299,11 @@ def plan(root: Path) -> dict:
         patterns = _paths(front)
         if kind == 'rule' and patterns and not names_declared_paths(instruction, patterns):
             removals = ('paths',)
+            retained = tuple(dict.fromkeys(_list(front, 'evidence_paths') + patterns))
+            updates['evidence_paths'] = ','.join(retained)
             report['paths_collapsed'] += 1
-            reasons.append('paths cleared: declared globs are evidence provenance, not applicability')
+            reasons.append('paths moved to evidence_paths: declared globs are evidence provenance, '
+                           'not applicability; provenance is never dropped')
         present, front_block, _rest = _split(text)
         unsafe = tuple(match.group(1) for match in
                        (re.match(r'^([A-Za-z_][\w-]*)\s*:(.*)$', line) for line in front_block.splitlines())

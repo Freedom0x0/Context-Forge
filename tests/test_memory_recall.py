@@ -4,7 +4,7 @@ import types
 
 from context_forge.memory import IdempotencyConflict, MemoryStore, MemoryStoreError
 from context_forge.memory_models import (
-    AccessPolicy, Applicability, MemoryDraft, Provenance, Source,
+    AccessPolicy, Applicability, ApplicabilityScope, MemoryDraft, Provenance, Source,
 )
 from context_forge.memory_recall import MemoryRecall
 
@@ -38,7 +38,9 @@ def test_recall_returns_conditions_and_respects_access(tmp_path):
     assert {result.memory.id for result in results} == {"one", "two"}
     payload = next(result for result in results if result.memory.id == "one").as_dict()
     assert payload["applicability"][0]["result"] == "unknown"
-    assert "unresolved conditions" in payload["explanation"]
+    assert all(label in payload["explanation"]
+               for label in ("为什么命中", "来源与迁移", "适用边界", "风险提示"))
+    assert 'unknown="only for external integrations"' in payload["explanation"]
 
 
 def test_retrieval_stages_are_idempotent_and_do_not_change_memory(tmp_path):
@@ -79,10 +81,7 @@ def test_tracking_failure_does_not_discard_computed_results(tmp_path, monkeypatc
     assert results[0].memory.id == "one"
 
 
-def test_mcp_registers_legacy_and_memory_tools(tmp_path, monkeypatch):
-    store = MemoryStore.initialize(tmp_path / "memory.db")
-    add(store, "one", "mcp memory")
-
+def mcp_tools(store, monkeypatch):
     class FakeMCP:
         def __init__(self, name):
             self.name = name
@@ -101,9 +100,38 @@ def test_mcp_registers_legacy_and_memory_tools(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
     import context_forge.mcp_server as mcp_server
     monkeypatch.setattr(mcp_server, "_memory", lambda: store)
+    return mcp_server.create_server().tools
 
-    server = mcp_server.create_server()
-    assert "context_forge_search" in server.tools
-    payload = server.tools["context_forge_memory_search"]("mcp", "demo")
+
+def test_mcp_registers_legacy_and_memory_tools(tmp_path, monkeypatch):
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    add(store, "one", "mcp memory")
+    tools = mcp_tools(store, monkeypatch)
+    assert "context_forge_search" in tools
+    payload = tools["context_forge_memory_search"]("mcp", "demo", technologies="antd")
     assert payload[0]["id"] == "one"
     assert "applicability" in payload[0]
+
+
+# AC-P2 -- the recall entry point derives its context tags from tech_detect
+def test_memory_search_detects_the_stack_when_no_tags_are_supplied(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text(
+        '{"name": "demo", "dependencies": {"antd": "^5.0.0"}}', encoding="utf-8")
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    store.put(
+        "pattern",
+        MemoryDraft(
+            body="select server search needs a debounce", summary="pattern", role="claim",
+            status="active",
+            scope=ApplicabilityScope(technologies=("antd",), domains=("search",)),
+            sources=(Source(identity="tool:pattern", kind="tool", excerpt="observed"),),
+        ),
+        expected_version=0, idempotency_key="put:pattern", reason="test",
+    )
+    tools = mcp_tools(store, monkeypatch)
+    found = tools["context_forge_memory_search"]("select", "demo", root=str(tmp_path))
+    assert [item["id"] for item in found] == ["pattern"]
+    assert found[0]["score"]["applicability"] > 0
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert tools["context_forge_memory_search"]("select", "demo", root=str(bare)) == []

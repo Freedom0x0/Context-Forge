@@ -1,12 +1,15 @@
 import inspect
 import json
+import re
 import sqlite3
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from context_forge.memory import MemoryStore, MemoryStoreError
+from context_forge.memory import (
+    BoundaryView, MemoryStore, MemoryStoreError, boundary_visible,
+)
 from context_forge.memory_models import (
     DEFAULT_OWNER, AccessPolicy, ApplicabilityScope, MemoryDraft, MemorySpace,
     Provenance, Scope, derive_level,
@@ -193,8 +196,10 @@ def test_retag_dry_run_writes_nothing(tmp_path):
     applied = retag(root, dry_run=False)
     assert applied['applied'] == 1
     assert (root / '.retag-backup' / 'rules' / 'proposals' / 'rule-one.md').read_text(encoding='utf-8') == original
-    assert 'paths' not in target.read_text(encoding='utf-8')
-    assert 'confidence: ' in target.read_text(encoding='utf-8')
+    rewritten = target.read_text(encoding='utf-8')
+    assert re.search(r'^paths:', rewritten, re.M) is None
+    assert re.search(r'^evidence_paths: ', rewritten, re.M)
+    assert 'confidence: ' in rewritten
 
 
 def test_retag_leaves_user_owned_documents_alone(tmp_path):
@@ -218,11 +223,12 @@ def test_search_never_filters_on_provenance_project(tmp_path):
     foreign = put(store, 'foreign', draft(provenance=Provenance(projects=('other',), sessions=('s1',))))
     local = put(store, 'local', draft(provenance=Provenance(projects=('demo',), sessions=('s2',))))
     hits = store.search('事务', project='demo')
-    assert {record.id for record in hits} == {'local', 'foreign'}
-    assert store.search('事务', project=None) == hits
-    source = inspect.getsource(MemoryStore._boundary_visible)
+    assert [record.id for record in hits] == ['local', 'foreign']
+    assert {record.id for record in store.search('事务', project=None)} == {'local', 'foreign'}
+    source = inspect.getsource(boundary_visible)
     assert '.provenance' not in source
     assert 'allowed_projects' in source
+    assert 'provenance' not in BoundaryView._fields
     assert foreign.draft.provenance.projects == ('other',)
 
 
@@ -280,8 +286,8 @@ def test_access_policy_and_privacy_are_distinct_hard_filters(tmp_path):
     # privacy is its own elimination, not a synonym for owner: the owner check
     # already drops every cross-owner record, so only a source pin can catch
     # the privacy rule being deleted
-    source = inspect.getsource(MemoryStore._boundary_visible)
-    assert 'space.privacy' in source and 'allowed_projects' in source
+    source = inspect.getsource(boundary_visible)
+    assert 'view.privacy' in source and 'allowed_projects' in source
 
 
 def test_exclusions_eliminate_before_results_are_returned(tmp_path):

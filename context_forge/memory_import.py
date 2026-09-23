@@ -98,12 +98,16 @@ def preview_vault(root: Path, *, feedback_db: Path | None = None,
         legacy_id = str(metadata.get('id') or path.stem)
         kind = {'knowledge': 'knowledge', 'rules': 'rule', 'reviews': 'review'}[relative.split('/')[0]]
         project = metadata.get('project')
+        # `paths` and `evidence_paths` both name where the evidence lives; Gen1
+        # `paths` doubled as rule applicability and vault_retag moves the
+        # provenance half into `evidence_paths`. Nothing is dropped.
+        declared_paths = _strings(metadata.get('paths')) + _strings(metadata.get('evidence_paths'))
         if metadata.get('scope') == 'global':
-            scope = Scope(kind='global', paths=_strings(metadata.get('paths')))
+            scope = Scope(kind='global', paths=declared_paths)
         elif isinstance(project, str) and project.strip() and project.strip().lower() != 'unknown':
-            scope = Scope(kind='project', project=project.strip(), paths=_strings(metadata.get('paths')))
+            scope = Scope(kind='project', project=project.strip(), paths=declared_paths)
         else:
-            scope = Scope()
+            scope = Scope(paths=declared_paths)
         old_status = str(metadata.get('status', 'proposed')).lower()
         status = {'accepted': 'active', 'enabled': 'active', 'verified': 'active', 'approved': 'active',
                   'revised': 'active', 'disabled': 'disabled', 'archived': 'archived', 'rejected': 'archived',

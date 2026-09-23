@@ -20,6 +20,24 @@ def _memory():
     return MemoryStore(runtime_dir() / "memory.db", readonly=False)
 
 
+def _recall():
+    from .memory_recall import MemoryRecall
+    return MemoryRecall(_memory())
+
+
+def _tags(raw: str) -> tuple[str, ...]:
+    return tuple(tag.strip() for tag in raw.split(",") if tag.strip())
+
+
+def _stack(root: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    from pathlib import Path
+
+    from .tech_detect import detect
+
+    profile = detect(Path(root) if root else Path.cwd())
+    return tuple(sorted(profile.technologies)), tuple(sorted(profile.domains))
+
+
 def _store():
     from .cli import _store as cli_store
     return cli_store()
@@ -53,19 +71,31 @@ def create_server():
     @server.tool()
     def context_forge_memory_search(query: str, project: str,
                                     changed_path: str = "", limit: int = 8,
-                                    request_id: str = "") -> list[dict]:
-        from .memory_recall import MemoryRecall
-        results = MemoryRecall(_memory()).search(
+                                    request_id: str = "", technologies: str = "",
+                                    domains: str = "", root: str = "",
+                                    legacy_filter: bool = False) -> list[dict]:
+        """Scoped recall with a four-part explanation.
+
+        `technologies` / `domains` are comma-separated context tags used for
+        applicability scoring and candidate-pool admission. Leave both empty to
+        auto-detect them from `root` (the project root, default cwd).
+        `legacy_filter` reverts scoring and top-K only (the rollback hatch).
+        """
+        techs, doms = _tags(technologies), _tags(domains)
+        if not techs and not doms:
+            techs, doms = _stack(root)
+        results = _recall().search(
             query, project=project or None, changed_path=changed_path or None,
             limit=None if limit == 0 else limit, request_id=request_id or None,
             stage="tool_returned",
+            technologies=frozenset(techs), domains=frozenset(doms),
+            legacy_filter=legacy_filter,
         )
         return [result.as_dict() for result in results]
 
     @server.tool()
     def context_forge_memory_get(memory_id: str, version: int = 0) -> dict:
-        from .memory_recall import MemoryRecall
-        result = MemoryRecall(_memory()).get(memory_id, version=version or None)
+        result = _recall().get(memory_id, version=version or None)
         if result is None:
             raise KeyError(memory_id)
         return result.as_dict()

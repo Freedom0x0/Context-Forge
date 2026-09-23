@@ -7,13 +7,15 @@ import re
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import exp, log
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, NamedTuple, Sequence
 
 from .memory_models import (
-    DEFAULT_OWNER, Actor, MemoryDraft, MemoryRecord, Relation, Scope,
-    split_legacy_scopes,
+    DEFAULT_OWNER, Actor, Level, MemoryDraft, MemoryRecord, Relation, Scope,
+    derive_level, split_legacy_scopes,
 )
 from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION
 from .rules import glob_match
@@ -58,12 +60,309 @@ def _exec_script(connection: sqlite3.Connection, script: str) -> None:
             connection.execute(statement)
 
 
-def _exclusion_hit(exclusions: tuple[str, ...], changed_path: str | None, query: str) -> bool:
-    if not exclusions:
+GLOB_MARKERS = '*?/\\'
+_SLUG = re.compile(r'^[^\s*?/\\<>=%:]+$')
+EXPANSION_KINDS = ('derived_from', 'supports', 'refines', 'overlaps')
+CONFLICT_KINDS = ('conflicts_with', 'contradicts', 'exception_to')
+
+EVIDENCE_SCORE = {'verified': 1.0, 'supported': 0.7, 'unverified': 0.3,
+                  'unknown': 0.1, 'contradicted': -0.5}
+FRESHNESS_HALF_LIFE_DAYS = 180.0
+FRESHNESS_DECAY = log(2) / FRESHNESS_HALF_LIFE_DAYS
+REUSE_BOOST = 0.3
+CONFLICT_PENALTY = 0.5
+UNRESOLVED_SCORE = 0.3
+UNRESOLVED_PENALTY = 0.4
+SCOPE_GLOBAL_SCORE = 1.0
+SCOPE_TECHNOLOGY_SCORE = 0.8
+SCOPE_DOMAIN_SCORE = 0.7
+PROVENANCE_PROJECT_BONUS = 0.20
+PROVENANCE_PATH_BONUS = 0.15
+
+
+@dataclass(frozen=True)
+class RetrievalContext:
+    query: str = ''
+    project: str | None = None
+    changed_path: str | None = None
+    technologies: frozenset[str] = frozenset()
+    domains: frozenset[str] = frozenset()
+
+    def bag(self) -> frozenset[str]:
+        parts = {value.casefold() for value in self.technologies | self.domains}
+        if self.project:
+            parts.add(self.project.casefold())
+        path = (self.changed_path or '').replace('\\', '/')
+        parts.update(segment.casefold() for segment in path.split('/') if segment)
+        return frozenset(parts)
+
+
+class BoundaryView(NamedTuple):
+    owner: str
+    privacy: str
+    visibility: str
+    allowed_projects: tuple[str, ...]
+    exclusions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ScoreWeights:
+    match: float = 1.0
+    evidence: float = 1.2
+    freshness: float = 0.6
+    feedback: float = 0.8
+    text: float = 1.0
+
+
+DEFAULT_WEIGHTS = ScoreWeights()
+
+
+@dataclass(frozen=True)
+class ScoreBreakdown:
+    total: float
+    match: float
+    applicability: float
+    provenance_bonus: float
+    evidence: float
+    freshness: float
+    feedback: float
+    text: float
+    conflict_penalty: float
+    admitted_by: Level
+    explanation: str
+
+
+def boundary_view(draft: MemoryDraft) -> BoundaryView:
+    return BoundaryView(draft.space.owner, draft.space.privacy, draft.access.visibility,
+                        tuple(draft.access.allowed_projects), tuple(draft.scope.exclusions))
+
+
+def condition_result(condition: str, ctx: RetrievalContext) -> str:
+    """Evaluate one condition phrase against the retrieval context.
+
+    Answers in the three states of `Applicability.result`. Decidable forms are
+    a path glob (needs a changed path) and a bare name with no spaces, glob or
+    operator characters. Everything else answers `unknown`: an undecidable
+    condition is reported as risk and never acts as a silent hard filter.
+    """
+    text = condition.strip()
+    if not text:
+        return 'unknown'
+    if any(marker in text for marker in GLOB_MARKERS):
+        path = (ctx.changed_path or '').replace('\\', '/')
+        return 'unknown' if not path else ('true' if glob_match(path, text) else 'false')
+    if not _SLUG.match(text):
+        return 'unknown'
+    return 'true' if text.casefold() in ctx.bag() else 'false'
+
+
+def paths_hit(paths: Sequence[str], changed_path: str | None) -> bool:
+    if not changed_path or not paths:
         return False
-    path = (changed_path or '').replace('\\', '/')
-    text = (query or '').casefold()
-    return any((path and glob_match(path, item)) or item.casefold() in text for item in exclusions)
+    path = changed_path.replace('\\', '/')
+    return any(glob_match(path, pattern) for pattern in paths)
+
+
+def violated(constraints: Sequence[str], ctx: RetrievalContext) -> bool:
+    return any(condition_result(entry, ctx) == 'false' for entry in constraints)
+
+
+def exclusion_outcome(exclusions: Sequence[str], ctx: RetrievalContext) -> tuple[bool, tuple[str, ...]]:
+    """Counterexamples eliminate only when the context decides they hold."""
+    unresolved: list[str] = []
+    for entry in exclusions:
+        result = condition_result(entry, ctx)
+        if result == 'true':
+            return True, ()
+        if result == 'unknown':
+            unresolved.append(entry)
+    return False, tuple(unresolved)
+
+
+def boundary_visible(view: BoundaryView, *, owner: str, ctx: RetrievalContext) -> bool:
+    """The four boundary eliminations, and nothing else.
+
+    `project` resolves AccessPolicy scope only; it never matches against
+    provenance, so cross-project memories stay reachable. Candidate-pool
+    admission is a separate stage and must not be folded in here.
+    """
+    if view.owner != owner:
+        return False
+    # ponytail: subsumed by the owner check while one subject owns the store;
+    # kept so a future shared space cannot leak private records
+    if view.privacy == 'private' and view.owner != owner:
+        return False
+    if view.visibility == 'selected_projects' and ctx.project not in view.allowed_projects:
+        return False
+    eliminate, _unresolved = exclusion_outcome(view.exclusions, ctx)
+    return not eliminate
+
+
+def admitted(record: MemoryRecord, ctx: RetrievalContext) -> bool:
+    """Candidate-pool admission by derived level. Never an elimination."""
+    draft = record.draft
+    level = derive_level(draft)
+    if level == 'principle':
+        return True
+    if level == 'pattern':
+        return bool(set(draft.scope.technologies) & set(ctx.technologies)
+                    or set(draft.scope.domains) & set(ctx.domains))
+    return bool(set(draft.provenance.projects) & {ctx.project}
+                or paths_hit(draft.provenance.paths, ctx.changed_path))
+
+
+def applicability_score(memory: MemoryRecord, ctx: RetrievalContext) -> float:
+    scope = memory.draft.scope
+    applicability = 0.0
+    applicability += SCOPE_GLOBAL_SCORE if scope.visibility == 'global' else 0.0
+    applicability += SCOPE_TECHNOLOGY_SCORE if set(scope.technologies) & set(ctx.technologies) else 0.0
+    applicability += SCOPE_DOMAIN_SCORE if set(scope.domains) & set(ctx.domains) else 0.0
+    if not (scope.technologies or scope.domains or scope.constraints or scope.visibility == 'global'):
+        applicability = UNRESOLVED_SCORE
+    applicability -= UNRESOLVED_PENALTY if violated(scope.constraints, ctx) else 0.0
+    return applicability
+
+
+def provenance_bonus(memory: MemoryRecord, ctx: RetrievalContext) -> float:
+    bonus = 0.0
+    bonus += PROVENANCE_PROJECT_BONUS if ctx.project in memory.draft.provenance.projects else 0.0
+    bonus += PROVENANCE_PATH_BONUS if paths_hit(memory.draft.provenance.paths, ctx.changed_path) else 0.0
+    return bonus
+
+
+def match_score(memory: MemoryRecord, ctx: RetrievalContext) -> float:
+    """适用条件 + 来源加分. Provenance only ever adds, it never eliminates."""
+    return applicability_score(memory, ctx) + provenance_bonus(memory, ctx)
+
+
+def freshness_score(memory: MemoryRecord, applied: int = 0, at: datetime | None = None) -> float:
+    """Reused memories hold up; `applied` counts attributable adoptions only.
+
+    `applied` is the number of `retrieval_events` at the `applied` stage for
+    this version. Exposure stages and `proof_count` are deliberately not
+    inputs: being shown is not being used.
+    """
+    created = datetime.fromisoformat(memory.created_at)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    moment = at or datetime.now(timezone.utc)
+    days = max(0, int((moment - created).total_seconds() // 86400))
+    return exp(-FRESHNESS_DECAY * days) * (1.0 + REUSE_BOOST * applied)
+
+
+def conflict_penalty(conflicts: int) -> float:
+    return CONFLICT_PENALTY * conflicts
+
+
+def text_scores(ranks: Sequence[float]) -> list[float]:
+    """Scale-free BM25 normalisation; equal ranks stay equal."""
+    if not ranks:
+        return []
+    low, high = min(ranks), max(ranks)
+    if high == low:
+        return [1.0] * len(ranks)
+    return [(value - low) / (high - low) for value in ranks]
+
+
+def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
+             bonus: float, evidence: float, freshness: float, feedback: float,
+             text: float, risks: Sequence[str]) -> str:
+    scope = draft.scope
+    hits = []
+    if scope.visibility == 'global':
+        hits.append(f'全局适用 +{SCOPE_GLOBAL_SCORE}')
+    shared_technologies = sorted(set(scope.technologies) & set(ctx.technologies))
+    shared_domains = sorted(set(scope.domains) & set(ctx.domains))
+    if shared_technologies:
+        hits.append(f"技术:{','.join(shared_technologies)} +{SCOPE_TECHNOLOGY_SCORE}")
+    if shared_domains:
+        hits.append(f"领域:{','.join(shared_domains)} +{SCOPE_DOMAIN_SCORE}")
+    if not hits:
+        hits.append(f'未解析 +{UNRESOLVED_SCORE}' if applicability == UNRESOLVED_SCORE else f'约束惩罚 {applicability:.2f}')
+    provenance = []
+    if ctx.project and ctx.project in draft.provenance.projects:
+        provenance.append(f'同项目 +{PROVENANCE_PROJECT_BONUS:.2f}')
+    if paths_hit(draft.provenance.paths, ctx.changed_path):
+        provenance.append(f'证据路径 +{PROVENANCE_PATH_BONUS:.2f}')
+    line_hit = ('为什么命中: 适用[' + ', '.join(hits) + '] 来源[' + (', '.join(provenance) or '无加分')
+                + f'] 证据[{draft.evidence_level} {evidence:.2f}] 时效[{freshness:.2f}] '
+                + f'反馈[{feedback:.2f}] 文本[{text:.2f}]')
+
+    projects = ', '.join(draft.provenance.projects) or '未声明项目'
+    sessions = draft.provenance.sessions
+    origin = f'来自 {projects}' + (f" / session {', '.join(sessions)}" if sessions else '')
+    migration = []
+    if shared_technologies:
+        migration.append(f"适用技术 [{', '.join(shared_technologies)}] 与当前技术栈重合")
+    if shared_domains:
+        migration.append(f"问题域 [{', '.join(shared_domains)}] 命中")
+    if scope.visibility == 'global':
+        migration.append('声明为全局适用')
+    if not migration:
+        if provenance:
+            migration.append('未匹配任何适用维度（仅来源相关） — 谨慎采用')
+        elif ctx.query:
+            migration.append('仅文本相关, 未匹配任何适用维度 — 谨慎采用')
+        else:
+            migration.append('未匹配任何适用维度 — 谨慎采用')
+    line_origin = f"来源与迁移: {origin}; 迁移理由: {'; '.join(migration)}"
+
+    buckets: dict[str, list[str]] = {'true': [], 'false': [], 'unknown': []}
+    for condition in draft.applicability:
+        buckets[condition.result].append(condition.condition)
+    undecidable = [entry for entry in (*scope.exclusions, *scope.constraints)
+                   if condition_result(entry, ctx) == 'unknown']
+    buckets['unknown'].extend(undecidable)
+    unresolved = len(buckets['unknown'])
+    if not buckets['unknown']:
+        buckets['unknown'].append('未穷举适用条件')
+    line_bounds = '适用边界: ' + '; '.join(
+        f'{name}="' + ' | '.join(values) + '"' if values else f'{name}=（无）'
+        for name, values in (('true', buckets['true']), ('false', buckets['false']),
+                             ('unknown', buckets['unknown'])))
+
+    notes = list(risks)
+    if scope.technologies and not shared_technologies:
+        notes.append(f"技术栈未命中 [{', '.join(sorted(scope.technologies))}]")
+    if scope.domains and not shared_domains:
+        notes.append(f"问题域未命中 [{', '.join(sorted(scope.domains))}]")
+    unmet = [entry for entry in scope.constraints if condition_result(entry, ctx) == 'false']
+    if unmet:
+        notes.append(f"约束未满足 [{', '.join(unmet)}]")
+    if buckets['false']:
+        notes.append('已知反例: ' + ' | '.join(buckets['false']))
+    if unresolved:
+        notes.append(f'未解析 {unresolved} 项')
+    line_risk = '风险提示: ' + ('; '.join(notes) if notes else '无')
+    return '\n'.join((line_hit, line_origin, line_bounds, line_risk))
+
+
+def relevance(memory: MemoryRecord, ctx: RetrievalContext,
+              weights: ScoreWeights = DEFAULT_WEIGHTS, *, text: float = 0.0,
+              applied: int = 0, feedback: float = 0.0, conflicts: int = 0,
+              risks: Sequence[str] = ()) -> ScoreBreakdown:
+    """Five weighted dimensions minus the conflict penalty.
+
+    `feedback` is the w4 calibration hook (P3's `apply_feedback_weight`);
+    there is no attributable application data before P3, so exposure events
+    are never fed in here.
+    """
+    applicability = applicability_score(memory, ctx)
+    bonus = provenance_bonus(memory, ctx)
+    match = applicability + bonus
+    evidence = EVIDENCE_SCORE[memory.draft.evidence_level]
+    freshness = freshness_score(memory, applied=applied)
+    penalty = conflict_penalty(conflicts)
+    total = (weights.match * match + weights.evidence * evidence
+             + weights.freshness * freshness + weights.feedback * feedback
+             + weights.text * text - penalty)
+    return ScoreBreakdown(
+        total=total, match=match, applicability=applicability, provenance_bonus=bonus,
+        evidence=evidence, freshness=freshness, feedback=feedback, text=text,
+        conflict_penalty=penalty, admitted_by=derive_level(memory.draft),
+        explanation=_explain(memory.draft, ctx, applicability=applicability, bonus=bonus,
+                             evidence=evidence, freshness=freshness, feedback=feedback,
+                             text=text, risks=risks))
 
 
 def _split_snapshot(raw: str, *, owner: str, privacy: str) -> tuple[str, MemoryDraft]:
@@ -86,12 +385,13 @@ def _split_snapshot(raw: str, *, owner: str, privacy: str) -> tuple[str, MemoryD
 
 def _insert_projections(connection: sqlite3.Connection, memory_id: str, version: int,
                         draft: MemoryDraft) -> None:
+    view = boundary_view(draft)
     connection.execute('INSERT OR REPLACE INTO memory_access_projection VALUES (?,?,?,?,?,?)',
-                       (memory_id, version, draft.space.owner, draft.space.privacy,
-                        draft.access.visibility, canonical_json(list(draft.access.allowed_projects))))
+                       (memory_id, version, view.owner, view.privacy, view.visibility,
+                        canonical_json(list(view.allowed_projects))))
     connection.execute('INSERT OR REPLACE INTO memory_applicability_projection VALUES (?,?,?,?,?)',
                        (memory_id, version, canonical_json(list(draft.scope.technologies)),
-                        canonical_json(list(draft.scope.domains)), canonical_json(list(draft.scope.exclusions))))
+                        canonical_json(list(draft.scope.domains)), canonical_json(list(view.exclusions))))
 
 
 def tokenize(text: str) -> list[str]:
@@ -481,60 +781,193 @@ class MemoryStore:
             connection.execute('UPDATE memory_relations SET revoked_event=? WHERE id=?', (event.lastrowid, relation_id))
 
     @staticmethod
-    def _boundary_visible(draft: MemoryDraft, *, owner: str, project: str | None,
-                          changed_path: str | None, query: str) -> bool:
-        """The four boundary eliminations, and nothing else.
+    def _boundary_views(connection: sqlite3.Connection, ids: Sequence[str]) -> dict[str, BoundaryView]:
+        if not ids:
+            return {}
+        marks = ','.join('?' * len(ids))
+        rows = connection.execute(
+            'SELECT a.memory_id,a.owner,a.privacy,a.visibility,a.allowed_projects_json,p.exclusions_json '
+            'FROM memory_access_projection a '
+            'JOIN memory_applicability_projection p ON p.memory_id=a.memory_id AND p.version=a.version '
+            'JOIN memories m ON m.id=a.memory_id AND m.current_version=a.version '
+            f'WHERE a.memory_id IN ({marks})', list(ids))
+        views = {row['memory_id']: BoundaryView(
+            row['owner'], row['privacy'], row['visibility'],
+            tuple(json.loads(row['allowed_projects_json'])),
+            tuple(json.loads(row['exclusions_json']))) for row in rows}
+        missing = set(ids) - set(views)
+        if missing:
+            raise MemoryStoreError(
+                f'boundary projection missing for {sorted(missing)}; run rebuild_projections()')
+        return views
 
-        `project` resolves AccessPolicy scope only; it never matches
-        against provenance, so cross-project memories stay reachable.
+    @staticmethod
+    def _applied_counts(connection: sqlite3.Connection, ids: Sequence[str]) -> dict[str, int]:
+        if not ids:
+            return {}
+        marks = ','.join('?' * len(ids))
+        return {f'{row["memory_id"]}@{row["version"]}': row['adoption']
+                for row in connection.execute(
+                    'SELECT memory_id,version,count(*) AS adoption FROM retrieval_events '
+                    f"WHERE stage='applied' AND memory_id IN ({marks}) GROUP BY memory_id,version",
+                    list(ids))}
+
+    @staticmethod
+    def _relation_links(connection: sqlite3.Connection, ids: Sequence[str]) -> dict[str, set[tuple[str, str]]]:
+        if not ids:
+            return {}
+        marks = ','.join('?' * len(ids))
+        links: dict[str, set[tuple[str, str]]] = {memory_id: set() for memory_id in ids}
+        for row in connection.execute(
+                'SELECT memory_id,target_id,kind FROM memory_relations WHERE revoked_event IS NULL AND '
+                f'(memory_id IN ({marks}) OR target_id IN ({marks}))', [*ids, *ids]):
+            if row['memory_id'] in links:
+                links[row['memory_id']].add((row['kind'], row['target_id']))
+            if row['target_id'] in links:
+                links[row['target_id']].add((row['kind'], row['memory_id']))
+        return links
+
+    def expand_relations(self, seed_ids: Sequence[str], hops: int = 1) -> list[str]:
+        """One hop along positive relations; explanation and conflict context only.
+
+        Walks derived_from / supports / refines / overlaps in both directions.
+        Conflict kinds are left to conflict presentation, and duplicate_of /
+        supersedes are version bookkeeping rather than content affinity.
+        Expanded ids never change seed ranking and never feed the feedback
+        weight. Any `hops` other than 1 is refused: multi-hop spreading needs
+        experimental evidence first.
         """
-        if draft.space.owner != owner:
-            return False
-        # ponytail: currently subsumed by the owner check for a single-owner
-        # store; keep it so a future shared space cannot leak private records
-        if draft.space.privacy == 'private' and draft.space.owner != owner:
-            return False
-        if draft.access.visibility == 'selected_projects' and project not in draft.access.allowed_projects:
-            return False
-        return not _exclusion_hit(draft.scope.exclusions, changed_path, query)
+        if hops != 1:
+            raise ValueError('associative expansion is one hop')
+        seeds = tuple(dict.fromkeys(seed_ids))
+        if not seeds:
+            return []
+        with self._connection() as connection:
+            marks = ','.join('?' * len(seeds))
+            kinds = ','.join('?' * len(EXPANSION_KINDS))
+            rows = connection.execute(
+                f'SELECT target_id AS id FROM memory_relations WHERE revoked_event IS NULL '
+                f'AND kind IN ({kinds}) AND memory_id IN ({marks}) '
+                f'UNION SELECT memory_id AS id FROM memory_relations WHERE revoked_event IS NULL '
+                f'AND kind IN ({kinds}) AND target_id IN ({marks})',
+                [*EXPANSION_KINDS, *seeds, *EXPANSION_KINDS, *seeds])
+            found = sorted({row['id'] for row in rows} - set(seeds))
+            if not found:
+                return []
+            alive = ','.join('?' * len(found))
+            return sorted(row['id'] for row in connection.execute(
+                f'SELECT id FROM memories WHERE id IN ({alive})', found))
 
     def search(self, query: str, *, project: str | None, changed_path: str | None = None,
                limit: int | None = 8, byte_budget: int = 65536,
-               owner: str = DEFAULT_OWNER) -> list[MemoryRecord]:
+               owner: str = DEFAULT_OWNER, technologies: frozenset[str] = frozenset(),
+               domains: frozenset[str] = frozenset(), legacy_filter: bool = False) -> list[MemoryRecord]:
+        return [record for record, _ in self.search_scored(
+            query, project=project, changed_path=changed_path, limit=limit,
+            byte_budget=byte_budget, owner=owner, technologies=technologies,
+            domains=domains, legacy_filter=legacy_filter)]
+
+    def search_scored(self, query: str, *, project: str | None, changed_path: str | None = None,
+                      limit: int | None = 8, byte_budget: int = 65536,
+                      owner: str = DEFAULT_OWNER, technologies: frozenset[str] = frozenset(),
+                      domains: frozenset[str] = frozenset(), legacy_filter: bool = False,
+                      extra_risks: dict[str, Sequence[str]] | None = None
+                      ) -> list[tuple[MemoryRecord, ScoreBreakdown]]:
+        """Ranked recall with a five-dimension breakdown per record.
+
+        `legacy_filter=True` is the rollback hatch: it reverts candidate-pool
+        admission, five-dimension scoring and relevance top-K, leaving the
+        BM25 order and the count/byte caps of the earlier binary filter. It
+        does NOT revert the boundary trio, `project` no longer being a default
+        filter, provenance retention, or the tri-state exclusion semantics \u2014
+        those are correctness fixes, and undoing them would hide
+        cross-project memories and silently drop records again.
+        """
         if limit is not None and limit < 1 or byte_budget < 1:
             raise ValueError('positive limit and byte budget required')
+        ctx = RetrievalContext(query=query, project=project, changed_path=changed_path,
+                               technologies=frozenset(technologies), domains=frozenset(domains))
         tokens = list(dict.fromkeys(tokenize(query)))[:128]
         single_han = re.fullmatch(r'[\u3400-\u9fff\U00020000-\U0002fa1f]', query.strip()) is not None
         with self._connection() as connection:
             if single_han:
-                rows = connection.execute('SELECT m.id FROM memories m JOIN memory_versions v '
-                                          'ON v.memory_id=m.id AND v.version=m.current_version '
-                                          "WHERE m.status IN ('active','conflicted') AND m.suppressed=0 "
-                                          "AND instr(json_extract(v.snapshot_json,'$.body') || json_extract(v.snapshot_json,'$.summary'),?)>0 ORDER BY m.id", (query.strip(),))
+                rows = [(row['id'], 1.0) for row in connection.execute(
+                    'SELECT m.id FROM memories m JOIN memory_versions v '
+                    'ON v.memory_id=m.id AND v.version=m.current_version '
+                    "WHERE m.status IN ('active','conflicted') AND m.suppressed=0 "
+                    "AND instr(json_extract(v.snapshot_json,'$.body') || json_extract(v.snapshot_json,'$.summary'),?)>0 "
+                    'ORDER BY m.id', (query.strip(),))]
             elif tokens:
                 match = ' AND '.join('"' + token.replace('"', '""') + '"' for token in tokens)
-                rows = connection.execute('SELECT m.id FROM memory_fts JOIN memories m ON m.id=memory_fts.memory_id '
-                                          "WHERE memory_fts MATCH ? AND m.status IN ('active','conflicted') AND m.suppressed=0 "
-                                          'ORDER BY bm25(memory_fts),m.id', (match,))
+                rows = [(row['id'], float(row['rank'])) for row in connection.execute(
+                    'SELECT m.id,bm25(memory_fts) AS rank FROM memory_fts '
+                    'JOIN memories m ON m.id=memory_fts.memory_id '
+                    "WHERE memory_fts MATCH ? AND m.status IN ('active','conflicted') AND m.suppressed=0 "
+                    'ORDER BY bm25(memory_fts),m.id', (match,))]
             else:
                 return []
-            result = []
-            used_bytes = 0
             effective_limit = min(limit or 100, 100) if single_han else limit
-            for row in rows:
-                record = self._record(connection, row['id'])
-                if record.draft.value == 'discard' or not self._boundary_visible(
-                        record.draft, owner=owner, project=project,
-                        changed_path=changed_path, query=query):
+            ids = [memory_id for memory_id, _ in rows]
+            views = self._boundary_views(connection, ids)
+            applied = self._applied_counts(connection, ids)
+            scores = text_scores([-rank for _, rank in rows])
+            extras = extra_risks or {}
+            candidates: list[tuple[MemoryRecord, float, int]] = []
+            for (memory_id, _rank), text in zip(rows, scores):
+                if not boundary_visible(views[memory_id], owner=owner, ctx=ctx):
                     continue
-                size = len(record.model_dump_json().encode('utf-8'))
-                if used_bytes + size > byte_budget:
+                record = self._record(connection, memory_id)
+                if record.draft.value == 'discard':
                     continue
-                result.append(record)
-                used_bytes += size
-                if effective_limit is not None and len(result) >= effective_limit:
-                    break
-            return result
+                if not legacy_filter and not admitted(record, ctx):
+                    continue
+                candidates.append((record, text, applied.get(f'{memory_id}@{record.version}', 0)))
+            if legacy_filter:
+                return self._fit([(record, relevance(record, ctx, text=text, applied=count,
+                                                     risks=extras.get(record.id, ())))
+                                  for record, text, count in candidates], byte_budget)
+            base = {record.id: (text, count) for record, text, count in candidates}
+            ranked = sorted(
+                ((record, relevance(record, ctx, text=text, applied=count, risks=extras.get(record.id, ())))
+                 for record, text, count in candidates),
+                key=lambda item: (-item[1].total, item[0].id))
+            top = ranked if effective_limit is None else ranked[:effective_limit]
+            links = self._relation_links(connection, [record.id for record, _ in top])
+            order = [record.id for record, _ in top]
+            kinds = {memory_id: {target: kind for kind, target in links[memory_id]
+                                 if kind in CONFLICT_KINDS} for memory_id in order}
+            notes: dict[str, list[str]] = {memory_id: [] for memory_id in order}
+            conflicts: dict[str, int] = {memory_id: 0 for memory_id in order}
+            for position, memory_id in enumerate(order):
+                for other in order[:position]:
+                    kind = kinds[memory_id].get(other) or kinds[other].get(memory_id)
+                    if not kind:
+                        continue
+                    conflicts[memory_id] += 1
+                    notes[memory_id].append(f'\u4e0e {other} \u5b58\u5728 {kind}, \u9700\u6309\u7248\u672c\u5206\u6d41')
+                    notes[other].append(f'\u4e0e {memory_id} \u5b58\u5728 {kind}, \u9700\u6309\u7248\u672c\u5206\u6d41')
+            rescored = []
+            for record, _score in top:
+                text, count = base[record.id]
+                rescored.append((record, relevance(
+                    record, ctx, text=text, applied=count, conflicts=conflicts[record.id],
+                    risks=[*extras.get(record.id, ()), *notes[record.id]])))
+            rescored.sort(key=lambda item: (-item[1].total, item[0].id))
+            return self._fit(rescored if effective_limit is None else rescored[:effective_limit],
+                             byte_budget)
+
+    @staticmethod
+    def _fit(ranked: list[tuple[MemoryRecord, ScoreBreakdown]],
+             byte_budget: int) -> list[tuple[MemoryRecord, ScoreBreakdown]]:
+        result = []
+        used_bytes = 0
+        for entry in ranked:
+            size = len(entry[0].model_dump_json().encode('utf-8'))
+            if used_bytes + size > byte_budget:
+                continue
+            result.append(entry)
+            used_bytes += size
+        return result
 
     def rebuild_projections(self) -> int:
         with self._connection(write=True) as connection:
