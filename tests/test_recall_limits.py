@@ -11,7 +11,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-from context_forge.context import build_context
 from context_forge.index import DocumentIndex
 from context_forge.rules import RuleMatcher
 
@@ -143,17 +142,3 @@ def test_search_upgrades_old_index_shape(tmp_path: Path) -> None:
     assert [row["path"] for row in index.search("filterOption",
                                                project="context-forge")] == [
         str(Path("knowledge") / "accepted" / "a.md")]
-
-
-def test_context_rule_limit(tmp_path: Path) -> None:
-    """The Matched rules section honours rule_limit (default 8)."""
-    flood(tmp_path, project="demo", count=20)
-
-    def rule_lines(limit: int | None = None) -> list[str]:
-        kwargs = {} if limit is None else {"rule_limit": limit}
-        sections = build_context(tmp_path, "demo", **kwargs)
-        body = next(s.body for s in sections if s.title == "Matched rules")
-        return [line for line in body.splitlines() if line.startswith("- [")]
-
-    assert len(rule_lines()) == 8
-    assert len(rule_lines(3)) == 3

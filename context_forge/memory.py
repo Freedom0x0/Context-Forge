@@ -203,6 +203,23 @@ def violated(constraints: Sequence[str], ctx: RetrievalContext) -> bool:
     return any(condition_result(entry, ctx) == 'false' for entry in constraints)
 
 
+_VISIBILITY_RANK = {'owner': 0, 'selected_projects': 1, 'shared': 2}
+
+
+def access_broader(previous: MemoryDraft, current: MemoryDraft) -> bool:
+    """True when `current` reaches a subject or project `previous` did not.
+
+    Automatic writes may only narrow access; widening it is a human-only
+    action (technical design 2.3).
+    """
+    if _VISIBILITY_RANK[current.access.visibility] > _VISIBILITY_RANK[previous.access.visibility]:
+        return True
+    if current.access.visibility == previous.access.visibility == 'selected_projects':
+        if not set(current.access.allowed_projects) <= set(previous.access.allowed_projects):
+            return True
+    return previous.space.privacy == 'private' and current.space.privacy == 'shared'
+
+
 def exclusion_outcome(exclusions: Sequence[str], ctx: RetrievalContext) -> tuple[bool, tuple[str, ...]]:
     """Counterexamples eliminate only when the context decides they hold."""
     unresolved: list[str] = []
@@ -875,6 +892,8 @@ class MemoryStore:
             raise ValueError('memory kind cannot change')
         if previous and actor != 'human' and (previous.draft.suppressed or previous.draft.user_owned or previous.draft.status == 'disabled'):
             raise ProtectedMemory('human-owned or suppressed memory requires a human correction')
+        if previous and actor != 'human' and access_broader(previous.draft, draft):
+            raise ProtectedMemory('automatic writes may not widen access')
         version = expected_version + 1
         timestamp = now()
         for source in draft.sources:

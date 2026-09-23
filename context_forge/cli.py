@@ -311,6 +311,23 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
                            ensure_ascii=False, indent=2))
 
 
+@app.command("hygiene")
+def hygiene(days: int = typer.Option(90, "--days", min=0),
+            min_sources: int = typer.Option(3, "--min-sources", min=1),
+            threshold: float = typer.Option(0.9, "--threshold", min=0.0, max=1.0)) -> None:
+    """Export the P4 hygiene report: consolidation, decay, merge and conflict items."""
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    from .memory_lifecycle import MemoryLifecycle
+    import json as _json
+
+    report = MemoryLifecycle(store).hygiene_report(
+        days=days, min_sources=min_sources, threshold=threshold)
+    typer.echo(_json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+
+
 @app.command("retag-vault")
 def retag_vault(apply: bool = typer.Option(False, "--apply"),
                 output: Path = typer.Option(None, "--report")) -> None:

@@ -39,8 +39,20 @@ class MergeReport:
         }
 
 
-def _normalized(record: MemoryRecord) -> str:
+def normalized_text(record: MemoryRecord) -> str:
     return ' '.join(record.draft.body.casefold().split())
+
+
+def token_similarity(left_text: str, right_text: str) -> float:
+    """Jaccard token overlap; a review signal, never proof of equivalence."""
+    left_tokens = set(tokenize(left_text))
+    right_tokens = set(tokenize(right_text))
+    union = left_tokens | right_tokens
+    return len(left_tokens & right_tokens) / len(union) if union else 0.0
+
+
+def _normalized(record: MemoryRecord) -> str:
+    return normalized_text(record)
 
 
 def _boundary(record: MemoryRecord) -> str:
@@ -55,10 +67,26 @@ def _boundary(record: MemoryRecord) -> str:
 
 
 def _similarity(left: MemoryRecord, right: MemoryRecord) -> float:
-    left_tokens = set(tokenize(_normalized(left)))
-    right_tokens = set(tokenize(_normalized(right)))
-    union = left_tokens | right_tokens
-    return len(left_tokens & right_tokens) / len(union) if union else 0.0
+    return token_similarity(_normalized(left), _normalized(right))
+
+
+def _applicability_conflict(left: MemoryRecord, right: MemoryRecord) -> bool:
+    """Decidable contradiction between two highly similar memories.
+
+    Either they decide the same condition phrase oppositely, or one names as a
+    counterexample what the other claims applies. Sufficient to refuse a merge:
+    high text similarity is not evidence of agreement.
+    """
+    left_decisions = {condition.condition: condition.result for condition in left.draft.applicability}
+    for condition in right.draft.applicability:
+        prior = left_decisions.get(condition.condition)
+        if (prior in ('true', 'false') and condition.result in ('true', 'false')
+                and prior != condition.result):
+            return True
+    excluded = {entry.casefold() for record in (left, right) for entry in record.draft.scope.exclusions}
+    claimed = {entry.casefold() for record in (left, right)
+               for entry in (*record.draft.scope.technologies, *record.draft.scope.domains)}
+    return bool(excluded & claimed)
 
 
 class MemoryMerge:
@@ -89,6 +117,55 @@ class MemoryMerge:
                                                'token similarity is a review candidate, not proof'))
         broad = tuple(record.id for record in records if record.draft.scope.visibility == 'global')
         return MergeReport(len(records), tuple(exact), tuple(overlaps), broad)
+
+    def merge_candidates(self, threshold: float = 0.9) -> tuple[MergeCandidate, ...]:
+        """High-similarity pairs split into merge and conflict proposals.
+
+        Boundary-identical pairs carry `automatic=True` and are the only ones
+        `apply_exact` accepts. A contradictory applicability is labelled
+        `conflicts_with` and is never merged.
+        """
+        if not 0 <= threshold <= 1:
+            raise ValueError('similarity threshold must be between zero and one')
+        records = [record for record in self.store.current_records()
+                   if record.draft.status not in {'archived', 'disabled'} and not record.draft.suppressed]
+        proposals = []
+        for left, right in combinations(records, 2):
+            if left.draft.kind != right.draft.kind:
+                continue
+            score = _similarity(left, right)
+            if score < threshold:
+                continue
+            if _applicability_conflict(left, right):
+                proposals.append(MergeCandidate(
+                    left.id, right.id, 'conflicts_with', round(score, 6),
+                    'high similarity with contradictory applicability; do not merge', False))
+            elif _normalized(left) == _normalized(right) and _boundary(left) == _boundary(right):
+                proposals.append(MergeCandidate(
+                    left.id, right.id, 'duplicate_of', round(score, 6),
+                    'normalized content and decision boundary are identical', True))
+            else:
+                proposals.append(MergeCandidate(
+                    left.id, right.id, 'overlaps', round(score, 6),
+                    'boundary-compatible overlap; review before merging', False))
+        return tuple(proposals)
+
+    def apply_conflict(self, candidate: MergeCandidate, *, idempotency_key: str):
+        """Annotate a contradictory pair with a `conflicts_with` relation.
+
+        Neither side is rewritten or hidden; the relation is revocable.
+        """
+        if candidate.kind != 'conflicts_with':
+            raise ValueError('only conflicts_with candidates may be applied here')
+        left = self.store.get(candidate.left_id)
+        right = self.store.get(candidate.right_id)
+        if left is None or right is None:
+            raise KeyError((candidate.left_id, candidate.right_id))
+        relation = Relation(target_id=right.id, target_version=right.version, kind='conflicts_with')
+        return self.store.put(
+            left.id, left.draft, expected_version=left.version,
+            idempotency_key=idempotency_key, actor='system',
+            reason='high similarity with contradictory applicability', relations=(relation,))
 
     def apply_exact(self, candidate: MergeCandidate, *, idempotency_key: str):
         if not candidate.automatic or candidate.kind != 'duplicate_of':

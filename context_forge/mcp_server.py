@@ -112,6 +112,14 @@ def create_server():
         return MemoryEffectiveness(_memory()).report(days=days).as_dict()
 
     @server.tool()
+    def context_forge_memory_hygiene(days: int = 90, min_sources: int = 3,
+                                     threshold: float = 0.9) -> dict:
+        """The P4 report: consolidation, decay, merge and conflict candidates."""
+        from .memory_lifecycle import MemoryLifecycle
+        return MemoryLifecycle(_memory()).hygiene_report(
+            days=days, min_sources=min_sources, threshold=threshold).as_dict()
+
+    @server.tool()
     def context_forge_get(path: str) -> str:
         target = (_vault().root / path).resolve()
         if target != _vault().root and _vault().root not in target.parents:
