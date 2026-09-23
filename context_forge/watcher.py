@@ -163,23 +163,16 @@ def _beat() -> None:
 def _sync_after_pass(vault_root: Path) -> None:
     """Mirror vault changes into memory.db after a pass that wrote documents.
 
-    A failure is recorded where `forge doctor` can see it and printed — it is
-    never swallowed, and it never stops the watcher loop (the next pass
-    retries).
+    `runtime_sync.sync` owns the failure marker (clear on success, record on
+    failure). Here a raised sync is printed — never swallowed — and never stops
+    the watcher loop (the next pass retries).
     """
     from . import runtime_sync
 
     try:
-        report = runtime_sync.sync(vault_root, dry_run=False)
+        runtime_sync.sync(vault_root, dry_run=False)
     except Exception as exc:  # noqa: BLE001
-        message = f"{type(exc).__name__}: {exc}"
-        runtime_sync.record_failure(message)
-        print(f"[watcher] memory sync failed: {message}")
-        return
-    if report.diagnostics:
-        runtime_sync.record_failure("; ".join(report.diagnostics))
-    else:
-        runtime_sync.clear_failure()
+        print(f"[watcher] memory sync failed: {type(exc).__name__}: {exc}")
 
 
 def run(store: JobStore, vault: Vault, gateway=None, *,

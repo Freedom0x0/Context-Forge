@@ -108,7 +108,7 @@ worker daemon picks job → 调模型
 ```bash
 python -m pip install -e ".[mcp]"     # 可选依赖，不装则 server 起不来
 forge sync                            # 建/更新 memory.db（单向：vault → memory.db）
-forge mcp-install                     # 写进 ~/.claude/settings.json（先备份、只增不改）
+forge mcp-install                     # 交给 claude CLI 注册（user scope，写入 ~/.claude.json）
 ```
 
 工具：召回类 `context_forge_memory_search` / `_memory_get` / `_memory_report` /

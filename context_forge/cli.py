@@ -113,23 +113,32 @@ def sync_cmd(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
 
 
 @app.command("mcp-install")
-def mcp_install_cmd(target: Path = typer.Option(None, "--target"),
-                    uninstall: bool = typer.Option(False, "--uninstall")) -> None:
-    """Add or remove the Context Forge MCP server in the host config.
+def mcp_install_cmd(uninstall: bool = typer.Option(False, "--uninstall")) -> None:
+    """Add or remove the Context Forge MCP server via the host's own CLI.
 
-    Backs the file up first and only ever adds/removes its own
-    `mcpServers.context_forge` key; existing entries stay untouched.
-    `--target` points at another settings file (used by tests).
+    Shells out to `claude mcp add/remove` (user scope) rather than writing the
+    config file ourselves, so Claude Code owns that file's location (including
+    `CLAUDE_CONFIG_DIR`), locking and credential-preservation. Re-running is
+    idempotent. A stale entry in the inert `~/.claude/settings.json` is removed
+    on a real install.
     """
     from . import mcp_install
 
-    result = mcp_install.uninstall(target) if uninstall else mcp_install.install(target)
+    try:
+        result = mcp_install.uninstall() if uninstall else mcp_install.install()
+    except mcp_install.McpInstallError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
     if uninstall:
-        typer.echo(f"removed {result['removed']} entry at {result['path']}")
+        typer.echo(f"removed {result['removed']} entry")
+    elif result.get("already_installed"):
+        typer.echo("context_forge already registered (user scope)")
+    elif result.get("refreshed"):
+        typer.echo("refreshed context_forge registration (stale entry replaced)")
     else:
-        typer.echo(f"installed context_forge at {result['path']}")
-    if result.get("backup"):
-        typer.echo(f"backup: {result['backup']}")
+        typer.echo("installed context_forge (user scope)")
+    if result.get("migrated"):
+        typer.echo(f"migrated stale entry out of {result['migrated']}")
 
 
 @worker_app.command("run")
@@ -234,7 +243,8 @@ def status(as_json: bool = typer.Option(False, "--json")) -> None:
 
 @app.command()
 def doctor(fix: bool = typer.Option(False, "--fix")) -> None:
-    """Run read-only diagnostics for vault, queue, index and provider.
+    """Run read-only diagnostics: config, vault, queue, index, provider,
+    watcher, memory, memory-sync and mcp.
 
     With `--fix`, also apply retention for sessions older than
     `retention_days` from config (default 30).

@@ -35,25 +35,24 @@ that `_store` and `_vault` resolve to the right per-user locations.
 
 ## Claude Code
 
-Add the same entry under `mcpServers` in `~/.claude/settings.json`:
+User-scope servers live in `~/.claude.json` (relocated by `CLAUDE_CONFIG_DIR`).
+Do **not** hand-edit that file: Claude Code owns its location, its lock, and a
+guard (GH #3117) that refuses a write which would drop auth still in its
+in-memory cache. Register through the host's own CLI instead:
 
-```json
-{
-  "mcpServers": {
-    "context_forge": {
-      "command": "python",
-      "args": ["-m", "context_forge.mcp_server"],
-      "cwd": "/path/to/your/repo"
-    }
-  }
-}
+```bash
+claude mcp add --scope user context_forge \
+  -e PYTHONPATH=/path/to/your/repo -- python -m context_forge.mcp_server
 ```
 
-`forge mcp-install` does this for you (default target
-`~/.claude/settings.json`, or `--target PATH`). It copies the file to
-`settings.json.bak-<ts>` first and only **adds** `mcpServers.context_forge`;
-every existing server entry is preserved. It is idempotent, and
-`forge mcp-install --uninstall` removes only that key, restoring the file.
+`forge mcp-install` runs exactly that command for you, and
+`forge mcp-install --uninstall` runs `claude mcp remove context_forge -s user`.
+`PYTHONPATH` rather than `cwd` makes the package importable from any directory;
+`memory.db` resolves from the user runtime dir, not cwd. Both are idempotent: a
+repeat add of an existing name is treated as success, and removing an absent
+one reports `removed: 0` without raising. A stale `context_forge` entry in the
+inert `~/.claude/settings.json` (the host does not read `mcpServers` there) is
+dropped on install, with a backup.
 
 The MCP server shares the application service with the CLI — no
 business logic is duplicated. The five legacy tools are read-mostly: only
@@ -71,7 +70,7 @@ process** and speaks newline-delimited JSON-RPC 2.0 over its stdio.
 | Tools are registered and enumerable | e2e `tools/list` returns the tool names |
 | The real stdio transport works | e2e child-process `initialize` ↔ response round-trip |
 | A real `memory.db` returns real memories | e2e `tools/call` asserts the returned body text written to a temp database |
-| The host config holds the entry without losing existing ones | `forge mcp-install` tests assert `mcpServers` peers survive and uninstall restores the file |
+| The host registers the entry | `forge mcp-install` tests assert the exact `claude mcp add` argv (the host owns the write, so there is no file for us to corrupt); live `claude mcp get context_forge` reports `Status: ✔ Connected` |
 
 | **Not proven** | Why |
 |----------------|-----|

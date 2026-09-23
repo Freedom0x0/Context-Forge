@@ -34,6 +34,7 @@ from context_forge.gateways import (
     select_gateway,
 )
 from context_forge.index import parse_frontmatter
+from context_forge import doctor as doctor_mod
 from context_forge.queue import JobStore
 from context_forge.vault import Vault
 from context_forge.worker import process_one
@@ -489,6 +490,8 @@ def test_doctor_fix_applies_retention(tmp_path: Path, monkeypatch) -> None:
     import context_forge.doctor as doctor_mod
     monkeypatch.setattr(doctor_mod, "check_watcher",
                         lambda: ("watcher", True, "mocked"))
+    monkeypatch.setattr(doctor_mod, "check_mcp",
+                        lambda: ("mcp", True, "mocked"))
     import context_forge.cli as cli
     cli._store = lambda: store
     cli._vault = lambda: Vault(tmp_path / "vault")
@@ -862,6 +865,85 @@ def test_doctor_reports_watcher_state(tmp_path: Path, monkeypatch) -> None:
     assert doctor.check_watcher()[1] is False   # installed but no beat
     (tmp_path / "hb").write_text("now", encoding="utf-8")
     assert doctor.check_watcher()[1] is True    # alive
+
+
+def _fake_repo(tmp_path: Path, monkeypatch) -> None:
+    """Point doctor at a tmp repo so check_mcp's candidates are all tmp files."""
+    monkeypatch.setattr(doctor_mod, "__file__", str(tmp_path / "context_forge" / "doctor.py"))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
+def _write_servers(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_check_mcp_fails_without_registration(tmp_path, monkeypatch):
+    _fake_repo(tmp_path, monkeypatch)
+    name, ok, detail = doctor_mod.check_mcp()
+    assert name == "mcp"
+    assert ok is False
+    assert "no context_forge server registered" in detail
+
+
+def test_check_mcp_ok_when_project_file_registers(tmp_path, monkeypatch):
+    _fake_repo(tmp_path, monkeypatch)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"context_forge": {"command": "python"}}}),
+        encoding="utf-8")
+    name, ok, detail = doctor_mod.check_mcp()
+    assert name == "mcp"
+    assert ok is True
+    assert ".mcp.json" in detail and "project" in detail
+    assert "approval" in detail          # project scope is not an unconditional green
+
+
+def test_check_mcp_ok_when_local_scope_registers(tmp_path, monkeypatch):
+    """`~/.claude.json` `projects[<repo>]` is a location the host reads."""
+    _fake_repo(tmp_path, monkeypatch)
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"mcpServers": {},
+                    "projects": {str(tmp_path): {
+                        "mcpServers": {"context_forge": {"command": "python"}}}}}),
+        encoding="utf-8")
+    name, ok, detail = doctor_mod.check_mcp()
+    assert name == "mcp"
+    assert ok is True
+    assert "local" in detail
+
+
+def test_check_mcp_scope_order_local_beats_project_and_user(tmp_path, monkeypatch):
+    """The host checks local → project → user; the reported scope must match."""
+    _fake_repo(tmp_path, monkeypatch)
+    _write_servers(tmp_path / ".mcp.json",
+                   {"mcpServers": {"context_forge": {"command": "python"}}})
+    _write_servers(tmp_path / ".claude.json", {
+        "mcpServers": {"context_forge": {"command": "python"}},
+        "projects": {str(tmp_path): {
+            "mcpServers": {"context_forge": {"command": "python"}}}},
+    })
+    name, ok, detail = doctor_mod.check_mcp()
+    assert ok is True
+    assert "local" in detail
+
+    # drop the local entry → project wins over user
+    _write_servers(tmp_path / ".claude.json", {
+        "mcpServers": {"context_forge": {"command": "python"}}, "projects": {}})
+    assert "project" in doctor_mod.check_mcp()[2]
+
+
+def test_check_mcp_flags_inert_settings_entry(tmp_path, monkeypatch):
+    _fake_repo(tmp_path, monkeypatch)
+    legacy = tmp_path / ".claude" / "settings.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps({"mcpServers": {"context_forge": {"command": "python"}}}),
+        encoding="utf-8")
+    name, ok, detail = doctor_mod.check_mcp()
+    assert name == "mcp"
+    assert ok is False
+    assert "inert" in detail and "forge mcp-install" in detail
 
 
 def test_scan_once_ignores_history_before_baseline(tmp_path: Path,

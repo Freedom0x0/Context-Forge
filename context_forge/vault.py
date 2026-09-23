@@ -216,10 +216,8 @@ class Vault:
         return sum(1 for _ in iter_vault_documents(self.root))
 
     def _index_path(self) -> Path:
-        from .config import runtime_dir
-        import hashlib
-        key = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:16]
-        return runtime_dir() / f"index-{key}.db"
+        from .index import index_path_for
+        return index_path_for(self.root)
 
     # -- rendering -------------------------------------------------------
 

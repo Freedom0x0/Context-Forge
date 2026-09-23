@@ -145,7 +145,27 @@ def _is_stale(report: dict) -> bool:
 
 
 def sync(root: Path, *, dry_run: bool = True) -> SyncReport:
-    """Import `root` (a Gen1 vault) into `memory.db`; incremental and idempotent."""
+    """Import `root` (a Gen1 vault) into `memory.db`; incremental and idempotent.
+
+    Owns the sync-failure marker so every caller (CLI, watcher) gets the same
+    record-on-failure / clear-on-success policy. `dry_run=True` writes nothing,
+    marker included.
+    """
+    try:
+        report = _sync(root, dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        if not dry_run:
+            record_failure(f"{type(exc).__name__}: {exc}")
+        raise
+    if not dry_run:
+        if report.diagnostics:
+            record_failure("; ".join(report.diagnostics))
+        else:
+            clear_failure()
+    return report
+
+
+def _sync(root: Path, *, dry_run: bool = True) -> SyncReport:
     from .memory import MemoryStore
     from .memory_import import import_vault
 

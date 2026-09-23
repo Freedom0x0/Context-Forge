@@ -7,14 +7,13 @@ is read-only.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Settings, default_settings_path, load_settings
-from .index import iter_vault_documents
+from .index import index_path_for, iter_vault_documents
 from .queue import JobStore
 
 
@@ -81,10 +80,7 @@ def check_queue(stalled_hours: int = 24,
 def check_index(vault_root: Path) -> tuple[str, bool, str]:
     if not vault_root.exists():
         return ("index", True, f"vault missing at {vault_root} — skipped")
-    import hashlib
-    key = hashlib.sha256(str(vault_root).encode("utf-8")).hexdigest()[:16]
-    from .config import runtime_dir
-    db_path = runtime_dir() / f"index-{key}.db"
+    db_path = index_path_for(vault_root)
     if not db_path.exists():
         return ("index", True, f"no index at {db_path}; run forge scan")
     try:
@@ -113,7 +109,7 @@ def check_watcher() -> tuple[str, bool, str]:
     Precipitation no longer depends on Claude Code hooks, so a dead
     watcher means nothing gets saved. This is the check that catches it.
     """
-    from .autostart import heartbeat_path, status
+    from .autostart import status
 
     info = status()
     if not info["installed"]:
@@ -177,19 +173,87 @@ def check_memory_sync(vault_root: Path | None) -> list[str]:
     return warnings
 
 
-def check_mcp() -> tuple[str, bool, str]:
-    """Report whether the optional `mcp` package is importable.
+def _has_context_forge(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    servers = payload.get("mcpServers")
+    return isinstance(servers, dict) and "context_forge" in servers
 
-    Absence is surfaced, not failed: the host entry can exist before the
-    extra is installed, and the rest of Context Forge works without it.
+
+def _same_path(candidate: str, repo: Path) -> bool:
+    try:
+        return Path(candidate).resolve() == repo
+    except (OSError, ValueError):
+        return candidate == str(repo)
+
+
+def _mcp_registration() -> tuple[str, str] | None:
+    """`(file, scope)` where the host actually reads a context_forge server.
+
+    Mirrors Claude Code's own lookup order exactly — **local → project →
+    user** (enterprise is out of scope here). Reporting the wrong scope would
+    name a location the host would not use. Missing/unreadable/malformed JSON
+    counts as absent. The user file's location comes from the host's own
+    resolver (`mcp_install.claude_config_path`), which honours
+    `CLAUDE_CONFIG_DIR` and `.config.json` precedence.
+    """
+    from . import mcp_install
+
+    repo = Path(__file__).resolve().parents[1]
+    config = mcp_install.claude_config_path()
+    payload = mcp_install._load(config)
+    if isinstance(payload, dict):
+        # local scope sits under `projects[<repo>]` and outranks the others.
+        projects = payload.get("projects")
+        if isinstance(projects, dict):
+            for key, project in projects.items():
+                if not isinstance(project, dict) or not _same_path(key, repo):
+                    continue
+                if _has_context_forge(project):
+                    return f"{config} projects[{key}]", "local"
+
+    for candidate in mcp_install.project_config_paths(repo):
+        if _has_context_forge(mcp_install._load(candidate)):
+            return str(candidate), "project"
+
+    if isinstance(payload, dict) and _has_context_forge(payload):
+        return str(config), "user"
+    return None
+
+
+def check_mcp() -> tuple[str, bool, str]:
+    """Report whether the host really registers the Context Forge server.
+
+    Importing the `mcp` package proves nothing: the server can be importable
+    while the host has zero registration. This looks where the host actually
+    reads, so it fails when the server is not wired up — the check that a
+    silent `settings.json` write should have tripped.
     """
     import importlib.util
 
-    if importlib.util.find_spec("mcp") is None:
-        return ("mcp", True,
-                "mcp package not installed; host MCP tools unreachable "
-                "(pip install 'context-forge[mcp]')")
-    return ("mcp", True, "mcp package available")
+    from . import mcp_install
+
+    package = importlib.util.find_spec("mcp") is not None
+    located = _mcp_registration()
+    if located is not None:
+        where, scope = located
+        detail = f"registered in {where} ({scope} scope)"
+        if scope == "project":
+            detail += "; project scope needs approval (enabledMcpjsonServers) to take effect"
+        if not package:
+            detail += "; mcp package missing (pip install 'context-forge[mcp]')"
+        return ("mcp", True, detail)
+
+    legacy = mcp_install._legacy_settings_path()
+    if _has_context_forge(mcp_install._load(legacy)):
+        return ("mcp", False,
+                f"entry only in {legacy}, which the host does not read for "
+                f"mcpServers — inert; run forge mcp-install to migrate it")
+
+    detail = "host has no context_forge server registered (run forge mcp-install)"
+    if not package:
+        detail += "; mcp package also missing (pip install 'context-forge[mcp]')"
+    return ("mcp", False, detail)
 
 
 def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:

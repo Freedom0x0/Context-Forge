@@ -54,6 +54,17 @@ def iter_vault_documents(root: Path) -> Iterator[Path]:
         yield path
 
 
+def index_path_for(root: Path) -> Path:
+    """The one derivation of the FTS index path for a vault root.
+
+    `DocumentIndex` is derived and rebuildable, so every caller must agree on
+    where it lives; a second copy of this recipe silently returns zero rows.
+    """
+    from .config import runtime_dir
+    key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return runtime_dir() / f"index-{key}.db"
+
+
 class DocumentIndex:
     def __init__(self, path: Path):
         self.path = path
