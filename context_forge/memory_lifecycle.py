@@ -143,6 +143,70 @@ class MemoryLifecycle:
                        relations=(relation,))
         return created
 
+    def support(self, memory_id: str, source: Source, *, reason: str, expected_version: int,
+                idempotency_key: str):
+        """Append supporting evidence; the level rises at most to `supported`."""
+        record = self._current(memory_id, expected_version)
+        level = 'supported' if record.draft.evidence_level in {'unknown', 'unverified', 'supported'} \
+            else record.draft.evidence_level
+        draft = record.draft.model_copy(update={
+            'sources': record.draft.sources + (source,),
+            'proof_count': record.draft.proof_count + 1,
+            'evidence_level': level,
+        })
+        return self.store.put(memory_id, draft, expected_version=expected_version,
+                              idempotency_key=idempotency_key, actor='model', reason=reason)
+
+    def weaken(self, memory_id: str, source: Source, condition: str, *, reason: str,
+               expected_version: int, idempotency_key: str):
+        """Narrow the applicability surface with a decided-against condition."""
+        record = self._current(memory_id, expected_version)
+        applicability = record.draft.applicability + (
+            Applicability(condition=condition, result='false', evidence_ids=(source.identity,)),)
+        draft = record.draft.model_copy(update={
+            'sources': record.draft.sources + (source,),
+            'applicability': applicability,
+        })
+        return self.store.put(memory_id, draft, expected_version=expected_version,
+                              idempotency_key=idempotency_key, actor='model', reason=reason)
+
+    def extend(self, memory_id: str, *, target_id: str, kind: str, source: Source,
+               reason: str, expected_version: int, idempotency_key: str):
+        """Record a `refines` / `exception_to` link; the target is not rewritten."""
+        if kind not in {'refines', 'exception_to'}:
+            raise ValueError('extension kind must be refines or exception_to')
+        record = self._current(memory_id, expected_version)
+        target = self.store.get(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        relation = Relation(target_id=target_id, target_version=target.version, kind=kind,
+                            evidence_ids=(source.identity,))
+        draft = record.draft.model_copy(update={'sources': record.draft.sources + (source,)})
+        return self.store.put(memory_id, draft, expected_version=expected_version,
+                              idempotency_key=idempotency_key, actor='model', reason=reason,
+                              relations=(relation,))
+
+    def overturn(self, memory_id: str, replacement: Candidate, source: Source, *,
+                 reason: str, expected_version: int, idempotency_key: str):
+        """Create a contradicting memory; the refuted one is never deleted."""
+        refuted = self._current(memory_id, expected_version)
+        relation = Relation(target_id=memory_id, target_version=refuted.version,
+                            kind='contradicts', evidence_ids=(source.identity,))
+        draft = replacement.draft.model_copy(update={
+            'sources': replacement.draft.sources + (source,),
+        })
+        return self.store.put(replacement.memory_id, draft, expected_version=0,
+                              idempotency_key=idempotency_key, actor='model', reason=reason,
+                              relations=replacement.relations + (relation,))
+
+    def _current(self, memory_id: str, expected_version: int):
+        record = self.store.get(memory_id)
+        if record is None:
+            raise KeyError(memory_id)
+        if record.version != expected_version:
+            raise VersionConflict(memory_id)
+        return record
+
     @staticmethod
     def _sources(artifacts: SessionArtifacts, session_id: str, reference: str) -> tuple[Source, ...]:
         values = [Source(identity=f"session:{session_id}", kind="observation",

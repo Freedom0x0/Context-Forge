@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import exp, log
 from pathlib import Path
-from typing import Iterator, NamedTuple, Sequence
+from typing import Iterator, Literal, NamedTuple, Sequence
 
 from .memory_models import (
-    DEFAULT_OWNER, Actor, Level, MemoryDraft, MemoryRecord, Relation, Scope,
-    derive_level, split_legacy_scopes,
+    DEFAULT_OWNER, Actor, Level, MemoryApplication, MemoryDraft, MemoryRecord,
+    Relation, Scope, derive_level, split_legacy_scopes,
 )
-from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION
+from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3
 from .rules import glob_match
 
 
@@ -78,6 +78,42 @@ SCOPE_TECHNOLOGY_SCORE = 0.8
 SCOPE_DOMAIN_SCORE = 0.7
 PROVENANCE_PROJECT_BONUS = 0.20
 PROVENANCE_PATH_BONUS = 0.15
+
+# P3 feedback weight table (technical design 4.4). Exposure stages carry no
+# entry on purpose: being shown is not being used.
+WEIGHT_TABLE = {'applied': 0.3, 'validated': 0.5, 'revoked': -0.8,
+                'harmful': -1.0, 'irrelevant': -0.2}
+UNUSED_DECAY_DAYS = 90
+UNUSED_DECAY_WEIGHT = -0.1
+FEEDBACK_OUTCOMES = ('revoked', 'harmful', 'irrelevant')
+DEFAULT_WEIGHT = 1.0
+
+
+@dataclass(frozen=True)
+class WeightEvent:
+    """One normalized, attributable signal feeding `apply_feedback_weight`."""
+
+    kind: Literal['applied', 'validated', 'revoked', 'harmful', 'irrelevant']
+    at: str | None = None
+
+
+def apply_feedback_weight(record: MemoryRecord, events: Sequence[WeightEvent],
+                          *, at: datetime | None = None) -> float:
+    """Pure weight over attributable events; exposure never appears here.
+
+    Only the adopted / validated / negative-feedback kinds exist in
+    `WEIGHT_TABLE`. Long-term non-use accrues a small decay unless the memory
+    was ever adopted or validated.
+    """
+    total = sum(WEIGHT_TABLE[event.kind] for event in events)
+    if not any(event.kind in {'applied', 'validated'} for event in events):
+        created = datetime.fromisoformat(record.created_at)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        moment = at or datetime.now(timezone.utc)
+        if (moment - created).days >= UNUSED_DECAY_DAYS:
+            total += UNUSED_DECAY_WEIGHT
+    return total
 
 
 @dataclass(frozen=True)
@@ -205,8 +241,13 @@ def admitted(record: MemoryRecord, ctx: RetrievalContext) -> bool:
     if level == 'principle':
         return True
     if level == 'pattern':
-        return bool(set(draft.scope.technologies) & set(ctx.technologies)
-                    or set(draft.scope.domains) & set(ctx.domains))
+        if set(draft.scope.technologies) & set(ctx.technologies):
+            return True
+        if set(draft.scope.domains) & set(ctx.domains):
+            return True
+        # A constraints-only pattern has no technology or domain to hit; a
+        # decidable, satisfied constraint is its only admission evidence.
+        return any(condition_result(entry, ctx) == 'true' for entry in draft.scope.constraints)
     return bool(set(draft.provenance.projects) & {ctx.project}
                 or paths_hit(draft.provenance.paths, ctx.changed_path))
 
@@ -428,7 +469,7 @@ class MemoryStore:
         try:
             connection.execute('PRAGMA foreign_keys=ON')
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version == 1:
+            if version in (1, 2):
                 connection.close()
                 connection = None
                 cls.migrate(path, dry_run=False)
@@ -454,11 +495,12 @@ class MemoryStore:
     @classmethod
     def migrate(cls, path: Path, *, dry_run: bool = True,
                 owner: str = DEFAULT_OWNER, privacy: str = 'shared') -> dict:
-        """Explicit v1 → v2 migration: Scope splits into the boundary trio.
+        """Explicit migration chain up to the current schema.
 
-        Takes an online backup before touching anything. `dry_run=True`
-        reports the rewrite without writing. To roll back, copy the
-        `.pre-v2-*.db` file over the live database: `restore()` on that file
+        v1 splits legacy `Scope` into the boundary trio; v2 adds the weight
+        cache and `memory_applications`. Takes an online backup before touching
+        anything. `dry_run=True` reports without writing. To roll back, copy the
+        `.pre-v<N>-*.db` file over the live database: `restore()` on that file
         would re-run this migration via `initialize()`, so it is disaster
         recovery, not a rollback. Projections are rebuildable from
         snapshot_json.
@@ -477,38 +519,39 @@ class MemoryStore:
         if version == SCHEMA_VERSION:
             report['unchanged'] = -1
             return report
-        if version != 1:
+        if version not in (1, 2):
             raise MemoryStoreError(f'cannot migrate memory schema {version} to {SCHEMA_VERSION}')
         if not dry_run:
             report['backup'] = str(cls._online_backup(path))
-        rows = []
-        connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
-        try:
-            connection.row_factory = sqlite3.Row
-            rows = [dict(row) for row in connection.execute(
-                'SELECT memory_id,version,snapshot_json FROM memory_versions ORDER BY memory_id,version')]
-        finally:
-            connection.close()
         rewritten = []
-        for row in rows:
+        if version == 1:
+            rows = []
+            connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
             try:
-                snapshot, draft = _split_snapshot(row['snapshot_json'], owner=owner, privacy=privacy)
-            except Exception as error:
-                report['diagnostics'].append(f"{row['memory_id']}@{row['version']}: {error}")
-                continue
-            report['projections'] += 1
-            if snapshot == row['snapshot_json']:
-                report['unchanged'] += 1
-                continue
-            report['rewritten'] += 1
-            report['mapping'][f"{row['memory_id']}@{row['version']}"] = {
-                'projects': list(draft.provenance.projects),
-                'paths': list(draft.provenance.paths),
-                'visibility': draft.access.visibility,
-                'scope_visibility': draft.scope.visibility,
-                'role': draft.role,
-            }
-            rewritten.append((row['memory_id'], row['version'], snapshot, draft))
+                connection.row_factory = sqlite3.Row
+                rows = [dict(row) for row in connection.execute(
+                    'SELECT memory_id,version,snapshot_json FROM memory_versions ORDER BY memory_id,version')]
+            finally:
+                connection.close()
+            for row in rows:
+                try:
+                    snapshot, draft = _split_snapshot(row['snapshot_json'], owner=owner, privacy=privacy)
+                except Exception as error:
+                    report['diagnostics'].append(f"{row['memory_id']}@{row['version']}: {error}")
+                    continue
+                report['projections'] += 1
+                if snapshot == row['snapshot_json']:
+                    report['unchanged'] += 1
+                    continue
+                report['rewritten'] += 1
+                report['mapping'][f"{row['memory_id']}@{row['version']}"] = {
+                    'projects': list(draft.provenance.projects),
+                    'paths': list(draft.provenance.paths),
+                    'visibility': draft.access.visibility,
+                    'scope_visibility': draft.scope.visibility,
+                    'role': draft.role,
+                }
+                rewritten.append((row['memory_id'], row['version'], snapshot, draft))
         if dry_run:
             return report
         connection = sqlite3.connect(path, timeout=5)
@@ -521,6 +564,10 @@ class MemoryStore:
                                    (snapshot, memory_id, version_no))
                 _insert_projections(connection, memory_id, version_no, draft)
             connection.execute('DROP TABLE IF EXISTS memory_scopes')
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(memories)')}
+            if 'weight' not in columns:
+                connection.execute('ALTER TABLE memories ADD COLUMN weight REAL NOT NULL DEFAULT 1.0')
+            _exec_script(connection, V3)
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -637,6 +684,7 @@ class MemoryStore:
             connection.execute('INSERT INTO retrieval_events(idempotency_key,request_id,stage,memory_id,version,session_id,explanation_json,created_at) '
                                'VALUES (?,?,?,?,?,?,?,?)',
                                (idempotency_key, request_id, stage, memory_id, version, session_id, payload, now()))
+            self._recompute_weight(connection, memory_id)
 
     def retrieval_events(self, request_id: str | None = None) -> list[dict]:
         with self._connection() as connection:
@@ -645,6 +693,157 @@ class MemoryStore:
             else:
                 rows = connection.execute('SELECT * FROM retrieval_events WHERE request_id=? ORDER BY id', (request_id,))
             return [dict(row) for row in rows]
+
+    def weight(self, memory_id: str) -> float:
+        with self._connection() as connection:
+            row = connection.execute('SELECT weight FROM memories WHERE id=?', (memory_id,)).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        return row['weight']
+
+    def rebuild_weights(self) -> int:
+        """Recompute the operational weight cache for every memory."""
+        with self._connection(write=True) as connection:
+            ids = [row['id'] for row in connection.execute('SELECT id FROM memories ORDER BY id')]
+            for memory_id in ids:
+                self._recompute_weight(connection, memory_id)
+            return len(ids)
+
+    def _recompute_weight(self, connection: sqlite3.Connection, memory_id: str) -> None:
+        record = self._record(connection, memory_id)
+        if record is None:
+            return
+        weight = DEFAULT_WEIGHT + apply_feedback_weight(
+            record, self._weight_events(connection, memory_id, record.version))
+        connection.execute('UPDATE memories SET weight=? WHERE id=?', (weight, memory_id))
+
+    @staticmethod
+    def _weight_events(connection: sqlite3.Connection, memory_id: str,
+                       version: int) -> list[WeightEvent]:
+        """Attributable signals only; exposure stages are filtered out here.
+
+        Applied / validated stages count once a confirmed application pins the
+        action to an outcome. Negative feedback is recorded explicitly.
+        """
+        events: list[WeightEvent] = []
+        confirmed = connection.execute(
+            "SELECT 1 FROM memory_applications WHERE memory_id=? AND memory_version=? "
+            "AND attribution='confirmed' LIMIT 1", (memory_id, version)).fetchone()
+        if confirmed:
+            events.extend(WeightEvent(row['stage']) for row in connection.execute(
+                "SELECT stage FROM retrieval_events WHERE memory_id=? AND version=? "
+                "AND stage IN ('applied','validated') ORDER BY id", (memory_id, version)))
+        events.extend(WeightEvent(json.loads(row['payload_json'])['outcome']) for row in connection.execute(
+            "SELECT payload_json FROM memory_events WHERE memory_id=? AND version=? AND kind='feedback' "
+            "ORDER BY id", (memory_id, version)))
+        return events
+
+    def record_application(self, application: MemoryApplication) -> None:
+        """Store one attributable application.
+
+        `validation_source_ids` must be a subset of the version's retained
+        sources; anything else is refused rather than silently under-attributed.
+        """
+        application = MemoryApplication.model_validate(application.model_dump())
+        values = (application.application_id, application.task_id, application.memory_id,
+                  application.memory_version, application.action, application.expected_outcome,
+                  application.actual_outcome,
+                  canonical_json(list(application.validation_source_ids)), application.attribution)
+        with self._connection(write=True) as connection:
+            prior = connection.execute('SELECT * FROM memory_applications WHERE application_id=?',
+                                       (application.application_id,)).fetchone()
+            if prior:
+                stored = (prior['application_id'], prior['task_id'], prior['memory_id'],
+                          prior['memory_version'], prior['action'], prior['expected_outcome'],
+                          prior['actual_outcome'], prior['validation_source_ids_json'],
+                          prior['attribution'])
+                if stored != values:
+                    raise IdempotencyConflict('application id was used for a different request')
+                return
+            if self._record(connection, application.memory_id, application.memory_version) is None:
+                raise KeyError((application.memory_id, application.memory_version))
+            sources = {row['source_id'] for row in connection.execute(
+                'SELECT source_id FROM memory_version_sources WHERE memory_id=? AND version=?',
+                (application.memory_id, application.memory_version))}
+            if not set(application.validation_source_ids) <= sources:
+                raise ValueError('validation sources must reference this version sources')
+            connection.execute('INSERT INTO memory_applications VALUES (?,?,?,?,?,?,?,?,?,?)',
+                               (*values, now()))
+            self._recompute_weight(connection, application.memory_id)
+
+    def applications(self, memory_id: str | None = None, version: int | None = None) -> list[dict]:
+        with self._connection() as connection:
+            if memory_id is None:
+                rows = connection.execute('SELECT * FROM memory_applications ORDER BY application_id')
+            elif version is None:
+                rows = connection.execute('SELECT * FROM memory_applications WHERE memory_id=? '
+                                          'ORDER BY application_id', (memory_id,))
+            else:
+                rows = connection.execute('SELECT * FROM memory_applications WHERE memory_id=? AND memory_version=? '
+                                          'ORDER BY application_id', (memory_id, version))
+            return [dict(row) for row in rows]
+
+    def record_feedback(self, memory_id: str, *, outcome: str, idempotency_key: str,
+                        note: str = '', actor: Actor = 'human') -> MemoryRecord:
+        """Record human / attributable negative feedback on a memory.
+
+        `harmful` flips a non-protected active record to `conflicted` (pending
+        review). Revocation never sets `contradicted`: it records a reason and a
+        negative weight, nothing more.
+        """
+        if outcome not in FEEDBACK_OUTCOMES:
+            raise ValueError('unknown feedback outcome')
+        actor = _actor(actor)
+        if not idempotency_key:
+            raise ValueError('idempotency key required')
+        with self._connection(write=True) as connection:
+            record = self._record(connection, memory_id)
+            if record is None:
+                raise KeyError(memory_id)
+            payload = {'outcome': outcome, 'note': note, 'version': record.version}
+            request_hash = digest(canonical_json({**payload, 'actor': actor}))
+            prior = connection.execute('SELECT kind,request_hash FROM memory_events WHERE idempotency_key=?',
+                                       (idempotency_key,)).fetchone()
+            if prior:
+                if prior['kind'] != 'feedback' or prior['request_hash'] != request_hash:
+                    raise IdempotencyConflict(idempotency_key)
+                return record
+            protected = record.draft.user_owned or record.draft.suppressed or record.draft.status == 'disabled'
+            if outcome == 'harmful' and record.draft.status != 'conflicted' and not protected:
+                conflicted = record.draft.model_copy(update={'status': 'conflicted'})
+                record = self._put(connection, memory_id, conflicted, expected_version=record.version,
+                                   idempotency_key=idempotency_key + ':status', actor='system',
+                                   reason='harmful feedback: pending review')
+                payload['version'] = record.version
+                request_hash = digest(canonical_json({**payload, 'actor': actor}))
+            connection.execute('INSERT INTO memory_events(idempotency_key,request_hash,memory_id,version,kind,actor,payload_json,created_at) '
+                               "VALUES (?,?,?,?,'feedback',?,?,?)",
+                               (idempotency_key, request_hash, memory_id, record.version, actor,
+                                canonical_json(payload), now()))
+            self._recompute_weight(connection, memory_id)
+            return record
+
+    def feedback(self, memory_id: str | None = None) -> list[dict]:
+        with self._connection() as connection:
+            sql = "SELECT * FROM memory_events WHERE kind='feedback'"
+            params: tuple = ()
+            if memory_id is not None:
+                sql += ' AND memory_id=?'
+                params = (memory_id,)
+            result = []
+            for row in connection.execute(sql + ' ORDER BY id', params):
+                item = dict(row)
+                item.update(json.loads(item.pop('payload_json')))
+                result.append(item)
+            return result
+
+    @staticmethod
+    def _weights(connection: sqlite3.Connection, ids: Sequence[str]) -> dict[str, float]:
+        if not ids:
+            return {}
+        marks = ','.join('?' * len(ids))
+        return {row['id']: row['weight'] for row in connection.execute(
+            f'SELECT id,weight FROM memories WHERE id IN ({marks})', list(ids))}
 
     def put(self, memory_id: str, draft: MemoryDraft, *, expected_version: int,
             idempotency_key: str, actor: Actor = 'model', reason: str,
@@ -686,7 +885,8 @@ class MemoryStore:
             connection.execute('INSERT OR IGNORE INTO memory_sources VALUES (?,?,?,?)',
                                (source.identity, digest(source.excerpt), source_json, timestamp))
         if previous is None:
-            connection.execute('INSERT INTO memories VALUES (?,?,?,?,?,?)',
+            connection.execute('INSERT INTO memories(id,kind,current_version,status,user_owned,suppressed) '
+                               'VALUES (?,?,?,?,?,?)',
                                (memory_id, draft.kind, version, draft.status, draft.user_owned, draft.suppressed))
         else:
             changed = connection.execute('UPDATE memories SET current_version=?,status=?,user_owned=?,suppressed=? '
@@ -704,6 +904,7 @@ class MemoryStore:
                                    (idempotency_key, request_hash, memory_id, version, actor, canonical_json(payload), timestamp))
         self._add_relations(connection, memory_id, version, draft, relations, idempotency_key, event.lastrowid)
         self._index(connection, memory_id, draft)
+        self._recompute_weight(connection, memory_id)
         return self._record(connection, memory_id, version)
 
     @staticmethod
@@ -910,6 +1111,7 @@ class MemoryStore:
             ids = [memory_id for memory_id, _ in rows]
             views = self._boundary_views(connection, ids)
             applied = self._applied_counts(connection, ids)
+            weights = self._weights(connection, ids)
             scores = text_scores([-rank for _, rank in rows])
             extras = extra_risks or {}
             candidates: list[tuple[MemoryRecord, float, int]] = []
@@ -928,7 +1130,9 @@ class MemoryStore:
                                   for record, text, count in candidates], byte_budget)
             base = {record.id: (text, count) for record, text, count in candidates}
             ranked = sorted(
-                ((record, relevance(record, ctx, text=text, applied=count, risks=extras.get(record.id, ())))
+                ((record, relevance(record, ctx, text=text, applied=count,
+                                    feedback=weights.get(record.id, DEFAULT_WEIGHT) - DEFAULT_WEIGHT,
+                                    risks=extras.get(record.id, ())))
                  for record, text, count in candidates),
                 key=lambda item: (-item[1].total, item[0].id))
             top = ranked if effective_limit is None else ranked[:effective_limit]
@@ -951,6 +1155,7 @@ class MemoryStore:
                 text, count = base[record.id]
                 rescored.append((record, relevance(
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],
+                    feedback=weights.get(record.id, DEFAULT_WEIGHT) - DEFAULT_WEIGHT,
                     risks=[*extras.get(record.id, ()), *notes[record.id]])))
             rescored.sort(key=lambda item: (-item[1].total, item[0].id))
             return self._fit(rescored if effective_limit is None else rescored[:effective_limit],

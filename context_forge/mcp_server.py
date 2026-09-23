@@ -106,6 +106,12 @@ def create_server():
         return MemoryMerge(_memory()).report(similarity_threshold=similarity_threshold).as_dict()
 
     @server.tool()
+    def context_forge_memory_effectiveness(days: int = 90) -> dict:
+        """The three P3 reports: applications, anomaly and tidy candidates."""
+        from .memory_effectiveness import MemoryEffectiveness
+        return MemoryEffectiveness(_memory()).report(days=days).as_dict()
+
+    @server.tool()
     def context_forge_get(path: str) -> str:
         target = (_vault().root / path).resolve()
         if target != _vault().root and _vault().root not in target.parents:

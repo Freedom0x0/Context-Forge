@@ -129,6 +129,29 @@ def check_watcher() -> tuple[str, bool, str]:
     return ("watcher", True, f"alive, last beat {age:.0f}s ago")
 
 
+def check_memory() -> tuple[str, bool, str]:
+    """Weight-cache diagnostics; never invents a verdict from non-use."""
+    from .config import runtime_dir
+    from .memory import MemoryStore, MemoryStoreError
+    from .memory_effectiveness import MemoryEffectiveness
+
+    path = runtime_dir() / "memory.db"
+    if not path.exists():
+        return ("memory", True, "no memory database yet")
+    try:
+        store = MemoryStore(path, readonly=True)
+        report = MemoryEffectiveness(store).report()
+    except MemoryStoreError as error:
+        return ("memory", False, f"unreadable memory database: {error}")
+    adjusted = sum(1 for record in store.current_records() if store.weight(record.id) != 1.0)
+    exposure = report.exposure_vs_adoption
+    return ("memory", True,
+            f"{len(store.current_records())} memories, {adjusted} with non-default weight; "
+            f"曝光 {exposure['exposure']} / 采用 {exposure['adoption']} "
+            f"(ratio {exposure['ratio']}); 未使用待复核 {len(report.anomaly_candidates)}, "
+            f"整理候选 {len(report.tidy_candidates)}")
+
+
 def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
     settings = load_settings()
     from .config import runtime_dir
@@ -142,6 +165,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_index(vault_root),
         check_provider(settings),
         check_watcher(),
+        check_memory(),
     ]
 
 

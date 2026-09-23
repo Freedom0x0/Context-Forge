@@ -137,6 +137,24 @@ class MemoryDraft(MemoryModel):
         return self
 
 
+class MemoryApplication(MemoryModel):
+    """One attributable real-world application of a memory version.
+
+    Version-pinned so attribution cannot drift. `attribution='confirmed'` is
+    the only value that lets an application change weight, evidence or status.
+    """
+
+    application_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    memory_id: str = Field(min_length=1)
+    memory_version: int = Field(ge=1)
+    action: str = Field(min_length=1)
+    expected_outcome: str = Field(min_length=1)
+    actual_outcome: str | None = None
+    validation_source_ids: tuple[str, ...] = ()
+    attribution: Literal['confirmed', 'plausible', 'unknown'] = 'unknown'
+
+
 class Relation(MemoryModel):
     target_id: str = Field(min_length=1)
     target_version: int = Field(ge=1)

@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CORE = """
 CREATE TABLE memories (
@@ -7,6 +7,7 @@ CREATE TABLE memories (
  status TEXT NOT NULL CHECK(status IN ('candidate','active','disabled','archived','conflicted','stale')),
  user_owned INTEGER NOT NULL CHECK(user_owned IN (0,1)),
  suppressed INTEGER NOT NULL CHECK(suppressed IN (0,1)),
+ weight REAL NOT NULL DEFAULT 1.0,
  FOREIGN KEY(id,current_version) REFERENCES memory_versions(memory_id,version)
  DEFERRABLE INITIALLY DEFERRED
 );
@@ -55,6 +56,15 @@ CREATE TABLE retrieval_events (
  explanation_json TEXT NOT NULL CHECK(json_valid(explanation_json)), created_at TEXT NOT NULL,
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
+CREATE TABLE memory_applications (
+ application_id TEXT PRIMARY KEY,
+ task_id TEXT NOT NULL, memory_id TEXT NOT NULL, memory_version INTEGER NOT NULL,
+ action TEXT NOT NULL, expected_outcome TEXT NOT NULL, actual_outcome TEXT,
+ validation_source_ids_json TEXT NOT NULL CHECK(json_valid(validation_source_ids_json)),
+ attribution TEXT NOT NULL CHECK(attribution IN ('confirmed','plausible','unknown')),
+ created_at TEXT NOT NULL,
+ FOREIGN KEY(memory_id,memory_version) REFERENCES memory_versions(memory_id,version)
+);
 CREATE TABLE import_items (
  namespace TEXT NOT NULL, path TEXT NOT NULL, legacy_id TEXT NOT NULL,
  memory_id TEXT NOT NULL REFERENCES memories(id), content_hash TEXT NOT NULL,
@@ -72,6 +82,7 @@ CREATE TABLE import_snapshots (
 );
 CREATE VIRTUAL TABLE memory_fts USING fts5(memory_id UNINDEXED, tokens);
 CREATE INDEX memory_relations_target ON memory_relations(target_id,target_version);
+CREATE INDEX memory_applications_memory ON memory_applications(memory_id,memory_version);
 """
 
 PROJECTIONS = """
@@ -92,6 +103,21 @@ CREATE TABLE IF NOT EXISTS memory_applicability_projection (
  PRIMARY KEY(memory_id,version),
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
+"""
+
+# v2 -> v3 delta, applied by the explicit migrate() step. The weight ALTER is
+# guarded by a table_info probe in migrate(); the rest are IF NOT EXISTS.
+V3 = """
+CREATE TABLE IF NOT EXISTS memory_applications (
+ application_id TEXT PRIMARY KEY,
+ task_id TEXT NOT NULL, memory_id TEXT NOT NULL, memory_version INTEGER NOT NULL,
+ action TEXT NOT NULL, expected_outcome TEXT NOT NULL, actual_outcome TEXT,
+ validation_source_ids_json TEXT NOT NULL CHECK(json_valid(validation_source_ids_json)),
+ attribution TEXT NOT NULL CHECK(attribution IN ('confirmed','plausible','unknown')),
+ created_at TEXT NOT NULL,
+ FOREIGN KEY(memory_id,memory_version) REFERENCES memory_versions(memory_id,version)
+);
+CREATE INDEX IF NOT EXISTS memory_applications_memory ON memory_applications(memory_id,memory_version);
 """
 
 SCHEMA = CORE + PROJECTIONS

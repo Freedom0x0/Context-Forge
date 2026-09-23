@@ -297,6 +297,20 @@ def migrate_memory(apply: bool = typer.Option(False, "--apply")) -> None:
         typer.echo(f"! {line}")
 
 
+@app.command("memory-report")
+def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
+    """Export the three P3 effectiveness reports; read-only, no side effects."""
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    from .memory_effectiveness import MemoryEffectiveness
+    import json as _json
+
+    typer.echo(_json.dumps(MemoryEffectiveness(store).report(days=days).as_dict(),
+                           ensure_ascii=False, indent=2))
+
+
 @app.command("retag-vault")
 def retag_vault(apply: bool = typer.Option(False, "--apply"),
                 output: Path = typer.Option(None, "--report")) -> None:
