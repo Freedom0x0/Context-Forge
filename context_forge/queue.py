@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .domain import EpisodeCheckpoint, EpisodeRecord, SessionEvent, SessionLifecycleEvent
+from .domain import EpisodeCheckpoint, EpisodeRecord, FinalizationReceipt, SessionEvent, SessionLifecycleEvent
 
 
 class EventConflict(RuntimeError):
@@ -83,6 +83,14 @@ class JobStore:
           end_line INTEGER NOT NULL, input_digest TEXT NOT NULL UNIQUE,
           snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS finalization_receipts (
+          finalization_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+          segment INTEGER NOT NULL, episode_digest TEXT NOT NULL,
+          end_kind TEXT NOT NULL, extraction_json TEXT, write_plan_json TEXT,
+          status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(session_id,segment,episode_digest)
+        );
         """)
         self.db.commit()
         # Migrations for tables created before newer columns were added.
@@ -150,6 +158,13 @@ class JobStore:
         ).fetchone()
         return EpisodeRecord(**dict(row)) if row else None
 
+    def latest_episode(self, session_id: str) -> EpisodeRecord | None:
+        row = self.db.execute(
+            "SELECT * FROM session_episodes WHERE session_id=? ORDER BY segment DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return EpisodeRecord(**dict(row)) if row else None
+
     def save_episode(self, episode: EpisodeRecord) -> EpisodeRecord:
         values = episode.model_dump()
         with self.db:
@@ -188,6 +203,48 @@ class JobStore:
             input_digest=row["input_digest"], snapshot=json.loads(row["snapshot_json"]),
             created_at=row["created_at"],
         ) for row in rows]
+
+    def receipt(self, finalization_id: str) -> FinalizationReceipt | None:
+        row = self.db.execute(
+            "SELECT * FROM finalization_receipts WHERE finalization_id=?", (finalization_id,),
+        ).fetchone()
+        return FinalizationReceipt(**dict(row)) if row else None
+
+    def create_receipt(self, receipt: FinalizationReceipt) -> FinalizationReceipt:
+        existing = self.db.execute(
+            "SELECT * FROM finalization_receipts WHERE session_id=? AND segment=? AND episode_digest=?",
+            (receipt.session_id, receipt.segment, receipt.episode_digest),
+        ).fetchone()
+        if existing:
+            return FinalizationReceipt(**dict(existing))
+        with self.db:
+            self.db.execute(
+                "INSERT INTO finalization_receipts VALUES "
+                "(:finalization_id,:session_id,:segment,:episode_digest,:end_kind,"
+                ":extraction_json,:write_plan_json,:status,:error,:created_at,:updated_at)",
+                receipt.model_dump(),
+            )
+        return receipt
+
+    def mark_receipt_committed(self, finalization_id: str) -> FinalizationReceipt:
+        with self.db:
+            row = self.db.execute(
+                "SELECT session_id,segment FROM finalization_receipts WHERE finalization_id=?",
+                (finalization_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(finalization_id)
+            self.db.execute(
+                "UPDATE finalization_receipts SET status='committed',updated_at=? WHERE finalization_id=?",
+                (_now(), finalization_id),
+            )
+            self.db.execute(
+                "UPDATE session_episodes SET state='finalized' WHERE session_id=? AND segment=?",
+                (row["session_id"], row["segment"]),
+            )
+        result = self.receipt(finalization_id)
+        assert result is not None
+        return result
 
     def claim(self, lease_seconds: int = 60) -> sqlite3.Row | None:
         now = datetime.now(timezone.utc)

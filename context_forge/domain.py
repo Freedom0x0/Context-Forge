@@ -192,6 +192,20 @@ class EpisodeCheckpoint(BaseModel):
     created_at: str
 
 
+class FinalizationReceipt(BaseModel):
+    finalization_id: str
+    session_id: str
+    segment: int
+    episode_digest: str
+    end_kind: Literal["explicit", "manual", "inferred"]
+    extraction_json: str | None = None
+    write_plan_json: str | None = None
+    status: Literal["extracting", "planned", "committed", "projected", "failed"]
+    error: str | None = None
+    created_at: str
+    updated_at: str
+
+
 class EventEnvelope(BaseModel):
     event: SessionEvent
     received_at: datetime = Field(default_factory=utc_now)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .domain import EpisodeCheckpoint, EpisodeRecord, SessionLifecycleEvent
+from .domain import EpisodeCheckpoint, EpisodeRecord, FinalizationReceipt, SessionLifecycleEvent
 from .queue import JobStore, _now
 from .transcript import sanitize_text
 
@@ -22,18 +22,23 @@ class EpisodeCollector:
     def collect(self, session_id: str, transcript_path: Path, project: str | None) -> EpisodeRecord:
         text, lines = _complete_text(Path(transcript_path))
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        current = self.store.episode(session_id)
+        current = self.store.latest_episode(session_id)
         if current and current.collected_through_line == lines and current.transcript_digest == digest:
             return current
         moment = _now()
+        segment = current.segment if current else 1
+        start_line = 0
+        if current and current.state == "finalized":
+            segment += 1
+            start_line = current.collected_through_line
+            sliced = "\n".join(text.splitlines()[start_line:])
+            digest = hashlib.sha256(sliced.encode("utf-8")).hexdigest()
         record = EpisodeRecord(
-            session_id=session_id, project=project,
+            session_id=session_id, segment=segment, project=project,
             transcript_path=str(Path(transcript_path).resolve()),
             collected_through_line=lines, transcript_digest=digest,
-            state="reopened" if current and current.state == "finalized" else (current.state if current else "open"),
-            started_at=current.started_at if current else moment,
-            last_activity_at=moment, end_kind=current.end_kind if current else None,
-            retention_deadline=current.retention_deadline if current else None,
+            state="open", started_at=moment if segment != (current.segment if current else 1) else (current.started_at if current else moment),
+            last_activity_at=moment,
         )
         return self.store.save_episode(record)
 
@@ -52,3 +57,19 @@ class EpisodeCollector:
             input_digest=digest, snapshot=snapshot, created_at=_now(),
         )
         return self.store.save_checkpoint(checkpoint)
+
+    def request_finalize(self, session_id: str, *, end_kind: str,
+                         event_id: str) -> FinalizationReceipt:
+        episode = self.store.latest_episode(session_id)
+        if episode is None:
+            raise KeyError(session_id)
+        moment = _now()
+        receipt = self.store.create_receipt(FinalizationReceipt(
+            finalization_id=f"finalize:{event_id}", session_id=session_id,
+            segment=episode.segment, episode_digest=episode.transcript_digest,
+            end_kind=end_kind, status="extracting", created_at=moment, updated_at=moment,
+        ))
+        if receipt.status == "extracting":
+            updated = episode.model_copy(update={"state": "finalizing", "end_kind": end_kind})
+            self.store.save_episode(updated)
+        return receipt
