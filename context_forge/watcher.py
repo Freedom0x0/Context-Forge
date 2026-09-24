@@ -23,7 +23,7 @@ from pathlib import Path
 from .gateways import NoOpGateway, select_gateway
 from .queue import JobStore
 from .vault import Vault
-from .worker import count_complete_lines, process_session
+from .worker import count_complete_lines
 
 DEFAULT_INTERVAL = 15.0
 DEFAULT_SETTLE = 60.0
@@ -123,25 +123,17 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
             continue  # still being written, or user is mid-session
         total = count_complete_lines(transcript)
         session_id = transcript.stem
-        if total <= store.get_lines_processed(session_id):
+        episode = store.latest_episode(session_id)
+        collected = episode.collected_through_line if episode else 0
+        if total <= collected:
             continue
         meta = read_session_meta(transcript)
         if meta is None:
             continue
         _, project = meta
-        result = process_session(
-            store, vault, gateway, session_id, str(transcript),
-            None, project, max_attempts, memory_store,
-        )
-        if result == "processed":
-            processed += 1
-        elif result == "ratelimited":
-            # The proxy is shared with Claude Code; stop this pass
-            # rather than queueing more 429s behind it.
-            print(f"[watcher] rate limited; pausing this pass")
-            break
-        elif result.startswith("failed:"):
-            print(f"[watcher] {session_id[:8]}: {result}")
+        from .episodes import EpisodeCollector
+        EpisodeCollector(store).collect(session_id, transcript, project)
+        processed += 1
     return processed
 
 
@@ -209,8 +201,6 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
                                       memory_store=memory_store)
             except Exception as exc:  # noqa: BLE001
                 print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
-            if processed:
-                _sync_after_pass(vault.root)
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("[watcher] interrupted; exiting")

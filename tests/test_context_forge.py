@@ -729,9 +729,9 @@ def test_read_session_meta_none_when_no_cwd(tmp_path: Path) -> None:
     assert read_session_meta(p) is None
 
 
-def test_scan_once_processes_settled_transcript(tmp_path: Path,
+def test_scan_once_collects_settled_transcript(tmp_path: Path,
                                                  monkeypatch) -> None:
-    """A quiet transcript with new lines gets precipitated."""
+    """A quiet transcript is collected without publishing long-term memory."""
     from context_forge import watcher
 
     projects = tmp_path / "projects" / "C--work-demo"
@@ -751,9 +751,9 @@ def test_scan_once_processes_settled_transcript(tmp_path: Path,
     # settle_seconds=0 so the just-written file counts as settled
     n = watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
     assert n == 1
-    assert "my app 502s" in seen[0]
-    assert store.get_lines_processed("s1") == 2
-    assert (vault.root / "knowledge" / "accepted" / "k-s1.md").exists()
+    assert seen == []
+    assert store.latest_episode("s1").collected_through_line == 2
+    assert not (vault.root / "knowledge" / "accepted" / "k-s1.md").exists()
 
     # Second pass: nothing new
     assert watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0) == 0
@@ -782,8 +782,8 @@ def test_scan_once_skips_fresh_transcript(tmp_path: Path, monkeypatch) -> None:
     assert store.get_lines_processed("s2") == 0  # offset untouched
 
 
-def test_scan_once_incremental_on_append(tmp_path: Path, monkeypatch) -> None:
-    """Appending more lines later precipitates only the new part."""
+def test_scan_once_incremental_episode_on_append(tmp_path: Path, monkeypatch) -> None:
+    """Appending more lines advances Episode collection without model calls."""
     from context_forge import watcher
 
     projects = tmp_path / "projects" / "C--work-demo"
@@ -807,11 +807,8 @@ def test_scan_once_incremental_on_append(tmp_path: Path, monkeypatch) -> None:
         f.write(_json_line("assistant", "answer two"))
 
     watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
-    assert len(seen) == 2
-    assert "first half" in seen[0]
-    assert "first half" not in seen[1]    # only the new slice
-    assert "second half" in seen[1]
-    assert store.get_lines_processed("s3") == 4
+    assert seen == []
+    assert store.latest_episode("s3").collected_through_line == 4
 
 
 def test_autostart_install_uninstall(tmp_path: Path, monkeypatch) -> None:
