@@ -5,7 +5,11 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .domain import SessionEvent
+from .domain import EpisodeCheckpoint, EpisodeRecord, SessionEvent, SessionLifecycleEvent
+
+
+class EventConflict(RuntimeError):
+    pass
 
 
 def _now() -> str:
@@ -58,6 +62,27 @@ class JobStore:
           lines_processed INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS session_lifecycle_events (
+          event_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+          type TEXT NOT NULL, source TEXT NOT NULL, session_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+          error TEXT, created_at TEXT NOT NULL, consumed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS session_episodes (
+          session_id TEXT NOT NULL, segment INTEGER NOT NULL DEFAULT 1,
+          project TEXT, transcript_path TEXT NOT NULL,
+          collected_through_line INTEGER NOT NULL DEFAULT 0,
+          transcript_digest TEXT NOT NULL, state TEXT NOT NULL,
+          started_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
+          end_kind TEXT, retention_deadline TEXT,
+          PRIMARY KEY(session_id, segment)
+        );
+        CREATE TABLE IF NOT EXISTS episode_checkpoints (
+          checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+          segment INTEGER NOT NULL, start_line INTEGER NOT NULL,
+          end_line INTEGER NOT NULL, input_digest TEXT NOT NULL UNIQUE,
+          snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
         """)
         self.db.commit()
         # Migrations for tables created before newer columns were added.
@@ -95,6 +120,74 @@ class JobStore:
             return result.rowcount == 1
         except sqlite3.Error:
             raise
+
+    def ingest_session_event(self, event: SessionLifecycleEvent) -> str:
+        import hashlib
+        payload = event.model_dump_json()
+        request_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        row = self.db.execute(
+            "SELECT request_hash FROM session_lifecycle_events WHERE event_id=?",
+            (event.event_id,),
+        ).fetchone()
+        if row:
+            if row["request_hash"] != request_hash:
+                raise EventConflict(event.event_id)
+            return "existing"
+        with self.db:
+            self.db.execute(
+                "INSERT INTO session_lifecycle_events "
+                "(event_id,request_hash,type,source,session_id,payload_json,status,created_at) "
+                "VALUES (?,?,?,?,?,?,'pending',?)",
+                (event.event_id, request_hash, event.type, event.source,
+                 event.session_id, payload, _now()),
+            )
+        return "created"
+
+    def episode(self, session_id: str, segment: int = 1) -> EpisodeRecord | None:
+        row = self.db.execute(
+            "SELECT * FROM session_episodes WHERE session_id=? AND segment=?",
+            (session_id, segment),
+        ).fetchone()
+        return EpisodeRecord(**dict(row)) if row else None
+
+    def save_episode(self, episode: EpisodeRecord) -> EpisodeRecord:
+        values = episode.model_dump()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO session_episodes VALUES "
+                "(:session_id,:segment,:project,:transcript_path,:collected_through_line,"
+                ":transcript_digest,:state,:started_at,:last_activity_at,:end_kind,:retention_deadline) "
+                "ON CONFLICT(session_id,segment) DO UPDATE SET "
+                "project=excluded.project,transcript_path=excluded.transcript_path,"
+                "collected_through_line=excluded.collected_through_line,"
+                "transcript_digest=excluded.transcript_digest,state=excluded.state,"
+                "last_activity_at=excluded.last_activity_at,end_kind=excluded.end_kind,"
+                "retention_deadline=excluded.retention_deadline",
+                values,
+            )
+        return episode
+
+    def save_checkpoint(self, checkpoint: EpisodeCheckpoint) -> EpisodeCheckpoint:
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO episode_checkpoints VALUES (?,?,?,?,?,?,?,?)",
+                (checkpoint.checkpoint_id, checkpoint.session_id, checkpoint.segment,
+                 checkpoint.start_line, checkpoint.end_line, checkpoint.input_digest,
+                 json.dumps(checkpoint.snapshot, ensure_ascii=False), checkpoint.created_at),
+            )
+        return self.list_checkpoints(checkpoint.session_id)[-1]
+
+    def list_checkpoints(self, session_id: str) -> list[EpisodeCheckpoint]:
+        rows = self.db.execute(
+            "SELECT * FROM episode_checkpoints WHERE session_id=? ORDER BY end_line,checkpoint_id",
+            (session_id,),
+        ).fetchall()
+        return [EpisodeCheckpoint(
+            checkpoint_id=row["checkpoint_id"], session_id=row["session_id"],
+            segment=row["segment"], start_line=row["start_line"], end_line=row["end_line"],
+            input_digest=row["input_digest"], snapshot=json.loads(row["snapshot_json"]),
+            created_at=row["created_at"],
+        ) for row in rows]
 
     def claim(self, lease_seconds: int = 60) -> sqlite3.Row | None:
         now = datetime.now(timezone.utc)

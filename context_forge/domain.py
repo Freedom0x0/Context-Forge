@@ -156,6 +156,42 @@ class SessionArtifacts(BaseModel):
         return claims
 
 
+class SessionLifecycleEvent(BaseModel):
+    event_id: str = Field(min_length=1)
+    type: Literal["session_end", "pre_compact"]
+    source: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    transcript_path: str = Field(min_length=1)
+    observed_at: str = Field(min_length=1)
+    final_line_count: int | None = Field(default=None, ge=0)
+    reason: str = Field(min_length=1)
+
+
+class EpisodeRecord(BaseModel):
+    session_id: str
+    segment: int = 1
+    project: str | None = None
+    transcript_path: str
+    collected_through_line: int = 0
+    transcript_digest: str
+    state: Literal["open", "inferred_pending", "finalizing", "finalized", "reopened"] = "open"
+    started_at: str
+    last_activity_at: str
+    end_kind: Literal["explicit", "manual", "inferred"] | None = None
+    retention_deadline: str | None = None
+
+
+class EpisodeCheckpoint(BaseModel):
+    checkpoint_id: str
+    session_id: str
+    segment: int = 1
+    start_line: int
+    end_line: int
+    input_digest: str
+    snapshot: str
+    created_at: str
+
+
 class EventEnvelope(BaseModel):
     event: SessionEvent
     received_at: datetime = Field(default_factory=utc_now)
