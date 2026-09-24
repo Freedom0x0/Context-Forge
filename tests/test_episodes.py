@@ -98,3 +98,31 @@ def test_collect_after_finalized_episode_opens_new_segment(tmp_path: Path):
     resumed = collector.collect("session-1", transcript, "demo")
     assert resumed.segment == 2
     assert resumed.state == "open"
+
+
+def test_watcher_quiet_period_collects_but_never_publishes(tmp_path: Path, monkeypatch):
+    from context_forge import watcher
+    from context_forge.vault import Vault
+
+    root = tmp_path / "projects" / "demo"
+    root.mkdir(parents=True)
+    transcript = root / "session-1.jsonl"
+    transcript.write_text(
+        json.dumps({"cwd": str(tmp_path / "demo"), "type": "user",
+                    "message": {"content": "work in progress"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    class ForbiddenGateway:
+        def extract_session(self, *args, **kwargs):
+            raise AssertionError("quiet-period collection called the model")
+
+    store = JobStore(tmp_path / "queue.db")
+    collected = watcher.scan_once(
+        store, Vault(tmp_path / "vault"), ForbiddenGateway(),
+        settle_seconds=0, baseline=0,
+    )
+    assert collected == 1
+    assert store.latest_episode("session-1").collected_through_line == 1
+    assert list((tmp_path / "vault").rglob("*.md")) == []
