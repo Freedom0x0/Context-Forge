@@ -1,0 +1,7 @@
+{"file": "docs/technical-design-falsifiable-memory.md", "reason": "完整技术设计：四个竞争优势、边界三分、三层抽象、五维打分、曝光闭环、记忆卫生、效果评估、分期交付。本任务的权威来源"}
+{"file": "docs/research/cross-project-memory-competitor-analysis.md", "reason": "边界拆分（MemorySpace/AccessPolicy/Provenance/ApplicabilityScope）、project 作来源不作默认过滤、曝光≠强化、可归因反馈、G1-G3 评估指标的来源依据。实现 P1/P2/P3 前必读"}
+{"file": "docs/technical-design-context-forge.md", "reason": "母设计文档：产品定义、设计原则（本地优先/Markdown 事实源/人类确认是状态转换/知识与规则分离），新设计不得违背"}
+{"file": "docs/memory-store.md", "reason": "MemoryStore 现有契约：put/search/sources/relations/lifecycle/recall/merge 的既有行为与约束，改造的基线"}
+{"file": "docs/research/competitor-landscape-human-ai-learning.md", "reason": "竞品调研：八家共享的结构性盲区，非目标与双向复利论据的依据"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端编码规范与约定"}
+{"file": ".trellis/spec/guides/index.md", "reason": "共享思考指南与通用约定"}

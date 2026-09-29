@@ -1,0 +1,29 @@
+{
+  "id": "scheduled-run-ledger",
+  "name": "scheduled-run-ledger",
+  "title": "定时轮账本：scheduled_runs + watcher 挂载",
+  "description": "F1 落地：每步独立记账、禁整批事务、幂等键不含日期；首批挂 retention 与 inferred 推进",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-29",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "0"
+  }
+}

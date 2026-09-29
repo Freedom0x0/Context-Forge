@@ -1,0 +1,5 @@
+{"file": "docs/technical-design-falsifiable-memory.md", "reason": "权威契约源。验收对照 AC 与 R1–R6。逐条核对 4 硬约束：①verified 必须有 tool 摘录 ②曝光不产生正权重 ③attribution!='confirmed' 不改状态 ④撤销不自动转 contradicted。另核：space.privacy 与 access.visibility 不得混用（枚举不同）、证据升级无 tool 证据最多到 supported、淘汰路径仅 4 条且与候选池准入不混用、错误迁移率绝对阈值闸门、两条母文档修订声明"}
+{"file": "docs/research/cross-project-memory-competitor-analysis.md", "reason": "回归对照：project 不得回到默认过滤路径（只作 provenance）；曝光≠强化；评估指标以决策质量为准不是召回条数；关联学习不得基于检索器自身输出（无 tool_returned 共现建边）"}
+{"file": "docs/memory-store.md", "reason": "回归基线：既有 MemoryStore 行为（ProtectedMemory/VersionConflict/IdempotencyConflict/迁移显式/普通打开不自动迁移）不得被破坏"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端质量检查项"}
+{"file": ".trellis/spec/guides/index.md", "reason": "通用检查项"}

@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/09-23-forge-gen2-runtime-wiring/prd.md", "reason": "本任务需求与验收：R1 填充 / R2 同步与过期可观测 / R3 宿主接入 / R4 真实传输 e2e / R5 边界声明"}
+{"file": ".trellis/tasks/09-23-forge-gen2-runtime-wiring/design.md", "reason": "落地边界：SyncReport 契约、snapshot_order 用持久化计数器、newline-delimited JSON-RPC 帧格式、回滚表、风险表"}
+{"file": "docs/mcp-transport.md", "reason": "MCP 传输既有文档与配置样例；本任务要补 3.5 的边界声明表"}
+{"file": "docs/memory-store.md", "reason": "MemoryStore 与 import_vault 的既有契约；同步器复用 import_vault 不重写导入"}
+{"file": ".trellis/tasks/archive/2026-09/09-22-falsifiable-memory-recall/prd.md", "reason": "上游任务验收；09-21 那条「宿主检索」验收的上下文与为何不得勾掉"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "迁移/备份/派生索引契约；snapshot_order 与幂等相关"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "实现前必读：闸门判别力、源码钉、DEFAULT+delta 中性值、变异记录须可复现"}

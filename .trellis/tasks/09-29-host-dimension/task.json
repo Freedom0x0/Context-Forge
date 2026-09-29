@@ -1,0 +1,29 @@
+{
+  "id": "host-dimension",
+  "name": "host-dimension",
+  "title": "host 维度打通：EpisodeRecord 与 session_episodes 加列",
+  "description": "把写死的 claude_code 透传为可统计维度；问题1分桶与8a沉默报警的前置",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-29",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "0"
+  }
+}

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/memory-store.md","reason":"当前实现的存储、幂等、检索及恢复契约"}

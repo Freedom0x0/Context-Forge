@@ -1,0 +1,34 @@
+{
+  "id": "forge-recall-rank-and-merge",
+  "name": "forge-recall-rank-and-merge",
+  "title": "面向 Agent 的持续学习记忆系统",
+  "description": "从经历中形成有依据的理解，在新任务中应用，并根据结果修正",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-21",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-21-forge-memory-store",
+    "09-21-forge-memory-lifecycle",
+    "09-21-forge-recall-hit-tracking",
+    "09-21-forge-knowledge-merge-report",
+    "09-23-forge-precipitation-dedup"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "本次仅规划落盘，数据库先行。新范围替代旧排序与只读报告范围。",
+  "meta": {
+    "description": "从经历中形成有依据的理解，在新任务中应用，并根据结果修正"
+  }
+}

@@ -1,5 +1,8 @@
 # Trellis project state（用户机器上的工作流状态，不应进 skill 仓库）
-.trellis/
+# tasks/ 是例外：决策记录与任务 PRD 属于项目历史。父目录一旦被整条忽略，
+# 里面的子目录无法用 ! 重新纳入，所以这里忽略 .trellis 的内容项而非目录本身。
+.trellis/*
+!.trellis/tasks/
 .trellis.todo
 
 # Trellis merge union 标记文件（不属于 skill 本身）

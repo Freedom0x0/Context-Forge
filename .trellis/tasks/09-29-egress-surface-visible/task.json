@@ -1,0 +1,29 @@
+{
+  "id": "egress-surface-visible",
+  "name": "egress-surface-visible",
+  "title": "出境面可见：doctor 明示正文发往哪个 provider",
+  "description": "问题9威胁模型的可验证前提；remote/none/offline 三态输出正确",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-29",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "0"
+  }
+}

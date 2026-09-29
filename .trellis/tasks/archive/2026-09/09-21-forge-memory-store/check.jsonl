@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"长期记忆的后端、事务和质量约定"}
+{"file":".trellis/spec/backend/memory-store.md","reason":"逐项验证新存储的接口和错误边界"}

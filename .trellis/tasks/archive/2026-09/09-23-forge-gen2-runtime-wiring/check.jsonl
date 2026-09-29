@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/09-23-forge-gen2-runtime-wiring/prd.md", "reason": "验收对照：AC1-AC6 逐条核。重点 AC4（e2e 必须断言真实数据而非「返回了 JSON」）与 AC2（不一致状态必须可被构造出来）"}
+{"file": ".trellis/tasks/09-23-forge-gen2-runtime-wiring/design.md", "reason": "回归对照：回滚表四条、风险表六条；snapshot_order 不得用时间戳；配置只增不改")
+{"file": ".trellis/tasks/09-23-forge-gen2-runtime-wiring/implement.md", "reason": "实现清单与测试清单；重点「评审门」的五条与「边界」段"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查项：闸门判别力（e2e 是否退化成恒真）、变异记录须可复现、静默 skip 即假绿"}
+{"file": "docs/mcp-transport.md", "reason": "边界声明表是否写入，已证/未证是否分开"}
