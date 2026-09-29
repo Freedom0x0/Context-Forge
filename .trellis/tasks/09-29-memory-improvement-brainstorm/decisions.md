@@ -394,9 +394,10 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
 - ✅ 审阅二次修正（F1/F2/F3/F4）→ 定时轮改"每步独立记账 + `purge_cutoff` 派生不变式"（并写死 `idempotency_key` 不得含日期）；聚合表撤七维交叉、改单条粒度 `signal_counts` + 查询时 join + 样本 <20 不出比率；`confirm_token` 定为服务端随机句柄 + 库内一次性表；**F4 选定异步旁路批准**（`forge approve` + isatty 拒绝非终端 + 挑战码 + 审计；代价=高危规则延迟生效；同步桌面通知方案不采纳）。另更正 A①：`MemoryDraft.risk` 已存在但是休眠字段
 - ✅ 第 0 层已建 4 个 Trellis 任务（见 G 节）：`09-29-risk-field-classifier`（含审阅⑧的 prompt 哈希测试）、`09-29-scheduled-run-ledger`（首批只接 retention）、`09-29-host-dimension`、`09-29-egress-surface-visible`；T0.4b（embedding 出境纪律）转为约束条款
 - **下一步**：各任务补 design/implement 后开工；第 1 层（8b.2 `claim` 竞态、8b.1 按库锁、8c 推断接上）尚未建任务
-- ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫做过变异验证 14 failed）；
-      `09-29-risk-field-classifier` 完成（全量 255 passed，kind 门与 migrate 回填各做过变异验证）。**均未提交**，
-      叠加在工作区既有未提交改动之上。
+- ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
+      `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
+      `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、
+      `2c27dcd` + `590255f`（`.trellis/tasks`、`.trellis/spec` 进版本控制）。
 - ⚠️ risk 落地时对原方案有三处主动偏离（详见该任务 PRD 的实现记录）：枚举去掉 `low`（无人赋值的档级就是下一个休眠字段）；
       模型自报冲突**改为降级 + 报表看分布**（记录自报值需要新增原始 payload 留存结构，不属第 0 层）；
       **未改发布行为**——risk=high 今天仍自动 publish，让高危停在 candidate 必须与 F4 批准通道同时上，

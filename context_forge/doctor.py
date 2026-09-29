@@ -127,6 +127,39 @@ def check_watcher() -> tuple[str, bool, str]:
     return ("watcher", True, f"alive, last beat {age:.0f}s ago")
 
 
+def check_scheduled(period_seconds: int = 86400) -> tuple[str, bool, str]:
+    """Daily maintenance ledger — a failing step and a silent step both fail."""
+    from .config import runtime_dir
+
+    path = runtime_dir() / "queue.db"
+    if not path.exists():
+        return ("scheduled", True, "queue not initialised")
+    store = JobStore(path)
+    runs = store.scheduled_runs()
+    if not runs:
+        return ("scheduled", False,
+                "no maintenance step has ever run (is `forge watch-transcripts` up?)")
+    now = _now()
+    problems: list[str] = []
+    details: list[str] = []
+    for row in runs:
+        step = row["step"]
+        if row["last_error"]:
+            problems.append(f"{step} failing: {row['last_error']} ({row['attempts']} consecutive)")
+            continue
+        try:
+            age = (now - datetime.fromisoformat(row["last_success_at"])).total_seconds()
+        except (TypeError, ValueError):
+            problems.append(f"{step} has an unreadable success stamp")
+            continue
+        details.append(f"{step} ok {age / 3600:.0f}h ago")
+        if age > 2 * period_seconds:
+            problems.append(f"{step} silent for {age / 3600:.0f}h (> 2 periods)")
+    if problems:
+        return ("scheduled", False, "; ".join(problems))
+    return ("scheduled", True, "; ".join(details))
+
+
 def check_lifecycle_hooks() -> tuple[str, bool, str]:
     from .install_hook import status
     info = status()
@@ -313,6 +346,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_provider(settings),
         check_lifecycle_hooks(),
         check_watcher(),
+        check_scheduled(),
         check_memory(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,

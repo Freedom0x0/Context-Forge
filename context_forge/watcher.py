@@ -214,6 +214,12 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
                     )
             except Exception as exc:  # noqa: BLE001
                 print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+            try:
+                from . import scheduled
+                for name in scheduled.run_due(store):
+                    print(f"[scheduled] {name} ran")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[scheduled] ledger error: {type(exc).__name__}: {exc}")
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("[watcher] interrupted; exiting")

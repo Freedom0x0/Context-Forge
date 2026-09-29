@@ -78,6 +78,10 @@ class JobStore:
           host TEXT NOT NULL DEFAULT 'claude_code',
           PRIMARY KEY(session_id, segment)
         );
+        CREATE TABLE IF NOT EXISTS scheduled_runs (
+          step TEXT PRIMARY KEY, last_success_at TEXT, last_error TEXT,
+          last_error_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS episode_checkpoints (
           checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
           segment INTEGER NOT NULL, start_line INTEGER NOT NULL,
@@ -200,6 +204,41 @@ class JobStore:
         """Episodes per host agent — the bucket 8a's silence alarm and P1's report read."""
         return {row["host"]: row["n"] for row in self.db.execute(
             "SELECT host, COUNT(*) AS n FROM session_episodes GROUP BY host ORDER BY host")}
+
+    def scheduled_due(self, step: str, now: datetime, period_seconds: int) -> bool:
+        row = self.db.execute(
+            "SELECT last_success_at FROM scheduled_runs WHERE step=?", (step,)).fetchone()
+        if row is None or not row["last_success_at"]:
+            return True
+        try:
+            last = datetime.fromisoformat(row["last_success_at"])
+        except ValueError:
+            return True
+        return now - last >= timedelta(seconds=period_seconds)
+
+    def record_scheduled_success(self, step: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO scheduled_runs(step,last_success_at) VALUES (?,?) "
+                "ON CONFLICT(step) DO UPDATE SET last_success_at=excluded.last_success_at, "
+                "last_error=NULL, last_error_at=NULL, attempts=0",
+                (step, now.isoformat()),
+            )
+
+    def record_scheduled_failure(self, step: str, now: datetime, error: str) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO scheduled_runs(step,last_error,last_error_at,attempts) "
+                "VALUES (?,?,?,1) "
+                "ON CONFLICT(step) DO UPDATE SET last_error=excluded.last_error, "
+                "last_error_at=excluded.last_error_at, "
+                "attempts=scheduled_runs.attempts+1",
+                (step, error, now.isoformat()),
+            )
+
+    def scheduled_runs(self) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM scheduled_runs ORDER BY step")]
 
     def save_episode(self, episode: EpisodeRecord) -> EpisodeRecord:
         values = episode.model_dump()

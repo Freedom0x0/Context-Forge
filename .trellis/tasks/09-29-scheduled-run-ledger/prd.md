@@ -65,4 +65,36 @@
 
 ## Notes
 
-- 决策依据以 `decisions.md` 的 **F1** 为准（A② 的原始表述已被取代）
+- 决策依据以 `decisions.md` 的 **F1** 为准（A② 的原始表述已被取代）。
+
+## 实现记录（2026-09-29）
+
+**落地形状**
+- `queue.py` 新表 `scheduled_runs(step PK, last_success_at, last_error, last_error_at, attempts)`。
+  它是**派生库 queue.db 里的新表**，靠 `CREATE TABLE IF NOT EXISTS` 在打开时出现，不需要 `_migrate()` 分支。
+- `JobStore.scheduled_due(step, now, period)` / `record_scheduled_success` / `record_scheduled_failure` /
+  `scheduled_runs()`。成功写回时把 `last_error`、`last_error_at`、`attempts` 一并清零。
+- 新模块 `context_forge/scheduled.py`：`DAILY_SECONDS=86400`、`STEPS` 注册表、`run_due(store, now, period, steps)`。
+  **每个 step 独立 try/except**：失败只记自己的账并打印，继续下一个 step；成功才记账。
+- `watcher.run()` 每轮 pass 末尾调 `scheduled.run_due(store)`（守护进程路径）；
+  `--once` 不跑维护，避免手动扫描带来意外删除。
+- `doctor.check_scheduled()`：无账 → 失败（"从没跑过"）；某 step 有 `last_error` → 失败并带错误与连续次数；
+  `last_success` 超过 2 个周期 → 失败"silent for Nh"；否则 OK。已挂进 `run_all`。
+
+**与 PRD 的两处偏差（有意）**
+1. **不做 dead-letter**：连续失败只累积 `attempts` 并继续按周期重试。维护步骤一旦自动停摆就变成"沉默失败"，
+   正是 F1 要消灭的东西；停摆的决定权交给看得见错误的`doctor`/人。
+2. **幂等键派生纪律暂时没有对应测试**：今天唯一上线的 step 是 retention，它不写候选、不产生幂等键。
+   该约束先写成 `scheduled.py` 的模块文档（key 必须由候选身份派生，绝不含日期/轮次），
+   等 G1/G2 接线（第 5 层）时补成断言测试。
+
+**首批只挂一步**：`retention`（原 `forge retention --apply`，`cli.py:385`，默认 30 天）。
+`inferred_advance` 留给 8c 任务自行注册（PRD 的 Requirements 4 已写明）。
+
+**证据**
+- 新增 `tests/test_scheduled.py` 7 例：按周期节流（同周期只跑一次、满周期再跑）、失败不阻塞后续 step、
+  成功清除旧错误、连续失败累积 attempts 但不静默、retention 真删过期 session 且保留新 session、
+  doctor 的三种状态、ledger 表在旧库上打开即存在。
+- 全量 `pytest`：**258 passed**。
+- 变异验证：去掉节流判断 → `1 failed`；把 step 失败改为向上抛 → `3 failed`；恢复后 `7 passed`。
+- 单独成一个提交（`feat: ...scheduled ledger...`，见 `git log`），与 `9b66941`（host + risk）分开。
