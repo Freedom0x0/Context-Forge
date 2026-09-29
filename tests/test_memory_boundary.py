@@ -142,6 +142,19 @@ def test_migration_backup_is_restorable(tmp_path):
     assert restored.get('m').draft.provenance.projects == ('keep-me',)
 
 
+def test_v3_migration_backup_is_restorable(tmp_path):
+    path = tmp_path / 'memory.db'
+    store = MemoryStore.initialize(path)
+    put(store, 'm', draft())
+    with sqlite3.connect(path) as connection:
+        connection.execute('PRAGMA user_version=3')
+    report = MemoryStore.migrate(path, dry_run=False)
+    restored = MemoryStore.restore(Path(report['backup']), tmp_path / 'restored-v3.db')
+    assert restored.get('m').draft.body == 'SQLite 事务回滚'
+    with sqlite3.connect(restored.path) as connection:
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+
+
 # a plain scalar silently breaks the whole frontmatter block
 def test_yaml_scalar_quotes_every_dangerous_scalar():
     from context_forge.index import yaml_scalar

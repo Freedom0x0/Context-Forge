@@ -127,8 +127,9 @@ def process_session(store: JobStore, vault: Vault,
             _write_session_artifacts(vault, session_id, project, artifacts)
             if memory_store is not None:
                 from .memory_lifecycle import MemoryLifecycle
+                from .provider_http import PROMPT_VERSION
                 model = getattr(gateway, "model", None) or getattr(gateway, "name", None)
-                MemoryLifecycle(memory_store, model=model, prompt_version="session-artifacts-v1").publish_session(
+                MemoryLifecycle(memory_store, model=model, prompt_version=PROMPT_VERSION).publish_session(
                     artifacts, session_id=session_id, project=project,
                     source_reference=transcript_path or "",
                 )
@@ -187,6 +188,36 @@ def process_one(store: JobStore, vault: Vault,
     return True
 
 
+def process_pending_finalizations(store: JobStore, gateway, memory_store,
+                                  projector=None) -> int:
+    if memory_store is None:
+        return 0
+    from .finalization import FinalizationService
+    processed = 0
+    service = FinalizationService(store, memory_store, gateway)
+    for receipt in store.pending_receipts():
+        try:
+            memory_ids = service.finalize(receipt.finalization_id)
+        except Exception as exc:
+            with store.db:
+                store.db.execute(
+                    "UPDATE finalization_receipts SET status='failed',error=?,updated_at=? "
+                    "WHERE finalization_id=?", (f"{type(exc).__name__}: {exc}",
+                                                datetime.now(timezone.utc).isoformat(),
+                                                receipt.finalization_id))
+            continue
+        if projector is not None:
+            try:
+                for memory_id in memory_ids:
+                    projector.project(memory_id)
+                store.mark_receipt_projected(receipt.finalization_id)
+            except Exception as exc:
+                store.record_projection_error(
+                    receipt.finalization_id, f"projection: {type(exc).__name__}: {exc}")
+        processed += 1
+    return processed
+
+
 def _write_session_artifacts(vault: Vault, session_id: str, project: str,
                               artifacts: SessionArtifacts) -> None:
     """Write knowledge + rule candidate.
@@ -234,6 +265,7 @@ def run_loop(store: JobStore, vault: Vault,
         while True:
             try:
                 processed = process_one(store, vault, gateway, max_attempts, memory_store)
+                process_pending_finalizations(store, gateway or NoOpGateway(), memory_store)
             except Exception as exc:  # noqa: BLE001
                 print(f"[worker] loop error: {type(exc).__name__}: {exc}")
                 processed = False

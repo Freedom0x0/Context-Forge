@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 CORE = """
 CREATE TABLE memories (
@@ -13,7 +13,9 @@ CREATE TABLE memories (
 );
 CREATE TABLE memory_versions (
  memory_id TEXT NOT NULL REFERENCES memories(id), version INTEGER NOT NULL CHECK(version > 0),
- snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)), created_at TEXT NOT NULL,
+ snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)), canonical_fingerprint TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ risk TEXT NOT NULL DEFAULT 'normal',
  PRIMARY KEY(memory_id,version)
 );
 CREATE TABLE memory_sources (
@@ -83,6 +85,25 @@ CREATE TABLE import_snapshots (
 CREATE VIRTUAL TABLE memory_fts USING fts5(memory_id UNINDEXED, tokens);
 CREATE INDEX memory_relations_target ON memory_relations(target_id,target_version);
 CREATE INDEX memory_applications_memory ON memory_applications(memory_id,memory_version);
+CREATE INDEX memory_versions_fingerprint ON memory_versions(canonical_fingerprint);
+CREATE TABLE memory_projections (
+ memory_id TEXT PRIMARY KEY REFERENCES memories(id), version INTEGER NOT NULL,
+ path TEXT NOT NULL UNIQUE, content_hash TEXT NOT NULL, status TEXT NOT NULL,
+ error TEXT, updated_at TEXT NOT NULL
+);
+CREATE TABLE projection_conflicts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT NOT NULL REFERENCES memories(id),
+ path TEXT NOT NULL, expected_version INTEGER NOT NULL, disk_hash TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, resolved_at TEXT
+);
+CREATE TABLE source_tombstones (
+ source_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, deleted_at TEXT NOT NULL,
+ reason TEXT NOT NULL
+);
+CREATE TABLE precipitation_migrations (
+ batch_id TEXT PRIMARY KEY, status TEXT NOT NULL, plan_json TEXT NOT NULL,
+ created_at TEXT NOT NULL, rolled_back_at TEXT
+);
 """
 
 PROJECTIONS = """
@@ -118,6 +139,28 @@ CREATE TABLE IF NOT EXISTS memory_applications (
  FOREIGN KEY(memory_id,memory_version) REFERENCES memory_versions(memory_id,version)
 );
 CREATE INDEX IF NOT EXISTS memory_applications_memory ON memory_applications(memory_id,memory_version);
+"""
+
+V4 = """
+CREATE INDEX IF NOT EXISTS memory_versions_fingerprint ON memory_versions(canonical_fingerprint);
+CREATE TABLE IF NOT EXISTS memory_projections (
+ memory_id TEXT PRIMARY KEY REFERENCES memories(id), version INTEGER NOT NULL,
+ path TEXT NOT NULL UNIQUE, content_hash TEXT NOT NULL, status TEXT NOT NULL,
+ error TEXT, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projection_conflicts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT NOT NULL REFERENCES memories(id),
+ path TEXT NOT NULL, expected_version INTEGER NOT NULL, disk_hash TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS source_tombstones (
+ source_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, deleted_at TEXT NOT NULL,
+ reason TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS precipitation_migrations (
+ batch_id TEXT PRIMARY KEY, status TEXT NOT NULL, plan_json TEXT NOT NULL,
+ created_at TEXT NOT NULL, rolled_back_at TEXT
+);
 """
 
 SCHEMA = CORE + PROJECTIONS

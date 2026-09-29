@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -124,6 +125,47 @@ def check_watcher() -> tuple[str, bool, str]:
                 f"last beat {age:.0f}s ago (launcher is installed; "
                 f"it restarts at next logon)")
     return ("watcher", True, f"alive, last beat {age:.0f}s ago")
+
+
+def check_lifecycle_hooks() -> tuple[str, bool, str]:
+    from .install_hook import status
+    info = status()
+    missing = [name for name, present in info["events"].items() if not present]
+    if missing:
+        return ("lifecycle-hooks", False,
+                f"missing {', '.join(missing)} at {info['path']}; run forge install-hook")
+    return ("lifecycle-hooks", True, f"installed at {info['path']}")
+
+
+def check_precipitation_state() -> tuple[str, bool, str]:
+    from .config import runtime_dir
+    queue_path = runtime_dir() / "queue.db"
+    memory_path = runtime_dir() / "memory.db"
+    issues = []
+    if queue_path.exists():
+        store = JobStore(queue_path)
+        failed = store.db.execute(
+            "SELECT COUNT(*) FROM finalization_receipts WHERE status='failed'").fetchone()[0]
+        pending = store.db.execute(
+            "SELECT COUNT(*) FROM finalization_receipts WHERE status IN ('extracting','planned')").fetchone()[0]
+        if failed:
+            issues.append(f"{failed} failed receipt(s)")
+        if pending:
+            issues.append(f"{pending} unfinished receipt(s)")
+    if memory_path.exists():
+        try:
+            with closing(sqlite3.connect(memory_path.as_uri() + "?mode=ro", uri=True)) as db:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                conflicts = db.execute(
+                    "SELECT COUNT(*) FROM projection_conflicts WHERE status='open'").fetchone()[0]
+            from .memory_schema import SCHEMA_VERSION
+            if version != SCHEMA_VERSION:
+                issues.append(f"memory schema {version}, expected {SCHEMA_VERSION}")
+            if conflicts:
+                issues.append(f"{conflicts} projection conflict(s)")
+        except sqlite3.Error as exc:
+            issues.append(f"memory diagnostics unavailable: {exc}")
+    return ("precipitation", not issues, "; ".join(issues) if issues else "receipts, schema and projections healthy")
 
 
 def check_memory() -> tuple[str, bool, str]:
@@ -269,8 +311,10 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_queue(retention_days=retention_days),
         check_index(vault_root),
         check_provider(settings),
+        check_lifecycle_hooks(),
         check_watcher(),
         check_memory(),
+        check_precipitation_state(),
         ("memory-sync", not sync_warnings,
          "; ".join(sync_warnings) if sync_warnings else "vault and memory.db agree"),
         check_mcp(),

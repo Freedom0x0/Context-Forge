@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from context_forge.memory import (
     IdempotencyConflict, MemoryStore, MemoryStoreError, ProtectedMemory,
+    canonical_fingerprint,
     SourceConflict, VersionConflict,
 )
 from context_forge.memory_models import (
@@ -345,3 +346,13 @@ def test_model_cannot_revoke_relation_from_disabled_memory(store):
 def test_discard_is_not_recalled(store):
     put(store, value=draft(value='discard'))
     assert store.search('SQLite', project='demo') == []
+
+
+def test_put_preserves_created_at_and_fingerprint_column_order(store):
+    record = put(store, 'column-order')
+
+    loaded = store.get(record.id)
+    assert loaded is not None
+    assert loaded.created_at == record.created_at
+    assert loaded.created_at[:4].isdigit()
+    assert store.find_exact(canonical_fingerprint(record.draft)).id == record.id

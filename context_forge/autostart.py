@@ -86,6 +86,8 @@ def uninstall() -> dict[str, str]:
 
 def status() -> dict[str, object]:
     """Report whether the launcher exists and when the watcher last ran."""
+    import json
+    import os
     import time
     vbs = _vbs_path()
     heartbeat = heartbeat_path()
@@ -95,12 +97,30 @@ def status() -> dict[str, object]:
         "heartbeat": str(heartbeat),
         "alive": False,
         "age_seconds": None,
+        "pid": None,
     }
     if heartbeat.exists():
         try:
             age = time.time() - heartbeat.stat().st_mtime
             result["age_seconds"] = round(age, 1)
-            result["alive"] = age < _HEARTBEAT_STALE_SECONDS
-        except OSError:
+            payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+            pid = int(payload["pid"])
+            result["pid"] = pid
+            if os.name == "nt":
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+                process_alive = bool(handle)
+                if handle:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            else:
+                try:
+                    os.kill(pid, 0)
+                    process_alive = True
+                except PermissionError:
+                    process_alive = True
+                except OSError:
+                    process_alive = False
+            result["alive"] = age < _HEARTBEAT_STALE_SECONDS and process_alive
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             pass
     return result

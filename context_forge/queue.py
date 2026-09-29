@@ -75,6 +75,7 @@ class JobStore:
           transcript_digest TEXT NOT NULL, state TEXT NOT NULL,
           started_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
           end_kind TEXT, retention_deadline TEXT,
+          host TEXT NOT NULL DEFAULT 'claude_code',
           PRIMARY KEY(session_id, segment)
         );
         CREATE TABLE IF NOT EXISTS episode_checkpoints (
@@ -88,8 +89,16 @@ class JobStore:
           segment INTEGER NOT NULL, episode_digest TEXT NOT NULL,
           end_kind TEXT NOT NULL, extraction_json TEXT, write_plan_json TEXT,
           status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL, extraction_owner TEXT, extraction_lease_until TEXT,
           UNIQUE(session_id,segment,episode_digest)
+        );
+        CREATE TABLE IF NOT EXISTS finalization_operations (
+          operation_key TEXT PRIMARY KEY, finalization_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL, request_hash TEXT NOT NULL,
+          memory_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+          status TEXT NOT NULL, result_json TEXT, error TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(finalization_id,ordinal)
         );
         """)
         self.db.commit()
@@ -105,6 +114,17 @@ class JobStore:
                 self.db.commit()
             except sqlite3.Error:
                 pass
+        receipt_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(finalization_receipts)").fetchall()}
+        for name in ("extraction_owner", "extraction_lease_until"):
+            if name not in receipt_columns:
+                self.db.execute(f"ALTER TABLE finalization_receipts ADD COLUMN {name} TEXT")
+        episode_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(session_episodes)").fetchall()}
+        if "host" not in episode_columns:
+            self.db.execute(
+                "ALTER TABLE session_episodes ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'")
+        self.db.commit()
 
     def enqueue_event(self, event: SessionEvent) -> bool:
         payload = event.model_dump_json()
@@ -165,19 +185,36 @@ class JobStore:
         ).fetchone()
         return EpisodeRecord(**dict(row)) if row else None
 
+    def active_episodes(self) -> list[EpisodeRecord]:
+        rows = self.db.execute(
+            "SELECT * FROM session_episodes WHERE state IN ('open','inferred_pending') "
+            "ORDER BY last_activity_at,session_id,segment"
+        ).fetchall()
+        return [EpisodeRecord(**dict(row)) for row in rows]
+
+    def list_episodes(self) -> list[EpisodeRecord]:
+        return [EpisodeRecord(**dict(row)) for row in self.db.execute(
+            "SELECT * FROM session_episodes ORDER BY last_activity_at DESC,session_id,segment")]
+
+    def host_counts(self) -> dict[str, int]:
+        """Episodes per host agent — the bucket 8a's silence alarm and P1's report read."""
+        return {row["host"]: row["n"] for row in self.db.execute(
+            "SELECT host, COUNT(*) AS n FROM session_episodes GROUP BY host ORDER BY host")}
+
     def save_episode(self, episode: EpisodeRecord) -> EpisodeRecord:
         values = episode.model_dump()
         with self.db:
             self.db.execute(
                 "INSERT INTO session_episodes VALUES "
                 "(:session_id,:segment,:project,:transcript_path,:collected_through_line,"
-                ":transcript_digest,:state,:started_at,:last_activity_at,:end_kind,:retention_deadline) "
+                ":transcript_digest,:state,:started_at,:last_activity_at,:end_kind,:retention_deadline,"
+                ":host) "
                 "ON CONFLICT(session_id,segment) DO UPDATE SET "
                 "project=excluded.project,transcript_path=excluded.transcript_path,"
                 "collected_through_line=excluded.collected_through_line,"
                 "transcript_digest=excluded.transcript_digest,state=excluded.state,"
                 "last_activity_at=excluded.last_activity_at,end_kind=excluded.end_kind,"
-                "retention_deadline=excluded.retention_deadline",
+                "retention_deadline=excluded.retention_deadline,host=excluded.host",
                 values,
             )
         return episode
@@ -211,6 +248,16 @@ class JobStore:
         return FinalizationReceipt(**dict(row)) if row else None
 
     def create_receipt(self, receipt: FinalizationReceipt) -> FinalizationReceipt:
+        by_id = self.db.execute(
+            "SELECT * FROM finalization_receipts WHERE finalization_id=?",
+            (receipt.finalization_id,),
+        ).fetchone()
+        if by_id:
+            existing = FinalizationReceipt(**dict(by_id))
+            if (existing.session_id, existing.segment, existing.episode_digest) != (
+                    receipt.session_id, receipt.segment, receipt.episode_digest):
+                raise EventConflict(receipt.finalization_id)
+            return existing
         existing = self.db.execute(
             "SELECT * FROM finalization_receipts WHERE session_id=? AND segment=? AND episode_digest=?",
             (receipt.session_id, receipt.segment, receipt.episode_digest),
@@ -219,12 +266,75 @@ class JobStore:
             return FinalizationReceipt(**dict(existing))
         with self.db:
             self.db.execute(
-                "INSERT INTO finalization_receipts VALUES "
-                "(:finalization_id,:session_id,:segment,:episode_digest,:end_kind,"
-                ":extraction_json,:write_plan_json,:status,:error,:created_at,:updated_at)",
-                receipt.model_dump(),
-            )
+                "INSERT INTO finalization_receipts "
+                "(finalization_id,session_id,segment,episode_digest,end_kind,extraction_json,"
+                "write_plan_json,status,error,created_at,updated_at,extraction_owner,extraction_lease_until) "
+                "VALUES (:finalization_id,:session_id,:segment,:episode_digest,:end_kind,"
+                ":extraction_json,:write_plan_json,:status,:error,:created_at,:updated_at,"
+                ":extraction_owner,:extraction_lease_until)", receipt.model_dump())
         return receipt
+
+    def claim_extraction(self, finalization_id: str, owner: str,
+                         lease_seconds: int = 300) -> bool:
+        now = datetime.now(timezone.utc)
+        lease = (now + timedelta(seconds=lease_seconds)).isoformat()
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE finalization_receipts SET extraction_owner=?,extraction_lease_until=?,updated_at=? "
+                "WHERE finalization_id=? AND extraction_json IS NULL AND "
+                "(extraction_owner IS NULL OR extraction_lease_until<? OR extraction_owner=?)",
+                (owner, lease, now.isoformat(), finalization_id, now.isoformat(), owner),
+            )
+        return changed.rowcount == 1
+
+    def freeze_finalization(self, finalization_id: str, extraction_json: str,
+                            operations: list[dict]) -> FinalizationReceipt:
+        with self.db:
+            row = self.db.execute(
+                "SELECT extraction_json FROM finalization_receipts WHERE finalization_id=?",
+                (finalization_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(finalization_id)
+            if row["extraction_json"] is not None and row["extraction_json"] != extraction_json:
+                raise EventConflict(finalization_id)
+            plan_json = json.dumps(operations, sort_keys=True, separators=(",", ":"))
+            self.db.execute(
+                "UPDATE finalization_receipts SET extraction_json=?,write_plan_json=?,status='planned',updated_at=?,"
+                "extraction_owner=NULL,extraction_lease_until=NULL "
+                "WHERE finalization_id=? AND status IN ('extracting','planned','failed')",
+                (extraction_json, plan_json, _now(), finalization_id),
+            )
+            for operation in operations:
+                payload = json.dumps(operation["payload"], sort_keys=True, separators=(",", ":"))
+                self.db.execute(
+                    "INSERT OR IGNORE INTO finalization_operations VALUES (?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
+                    (operation["operation_key"], finalization_id, operation["ordinal"],
+                     operation["request_hash"], operation["memory_id"], payload, _now(), _now()),
+                )
+        result = self.receipt(finalization_id)
+        assert result is not None
+        return result
+
+    def finalization_operations(self, finalization_id: str) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM finalization_operations WHERE finalization_id=? ORDER BY ordinal",
+            (finalization_id,),
+        )]
+
+    def pending_receipts(self) -> list[FinalizationReceipt]:
+        return [FinalizationReceipt(**dict(row)) for row in self.db.execute(
+            "SELECT * FROM finalization_receipts WHERE status IN ('extracting','planned') "
+            "OR (status='committed' AND error IS NOT NULL) "
+            "ORDER BY created_at,finalization_id")]
+
+    def complete_finalization_operation(self, operation_key: str, result: dict) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE finalization_operations SET status='committed',result_json=?,error=NULL,updated_at=? "
+                "WHERE operation_key=?",
+                (json.dumps(result, sort_keys=True), _now(), operation_key),
+            )
 
     def mark_receipt_committed(self, finalization_id: str) -> FinalizationReceipt:
         with self.db:
@@ -245,6 +355,24 @@ class JobStore:
         result = self.receipt(finalization_id)
         assert result is not None
         return result
+
+    def mark_receipt_projected(self, finalization_id: str) -> FinalizationReceipt:
+        with self.db:
+            self.db.execute(
+                "UPDATE finalization_receipts SET status='projected',error=NULL,updated_at=? "
+                "WHERE finalization_id=? AND status IN ('committed','projected')",
+                (_now(), finalization_id),
+            )
+        result = self.receipt(finalization_id)
+        if result is None:
+            raise KeyError(finalization_id)
+        return result
+
+    def record_projection_error(self, finalization_id: str, error: str) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE finalization_receipts SET error=?,updated_at=? "
+                "WHERE finalization_id=? AND status='committed'", (error, _now(), finalization_id))
 
     def claim(self, lease_seconds: int = 60) -> sqlite3.Row | None:
         now = datetime.now(timezone.utc)
@@ -430,8 +558,21 @@ class JobStore:
         should rebuild the FTS index after this returns.
         """
         counts = {"sessions": 0, "events": 0, "jobs": 0, "reviews": 0,
-                  "rule_feedback": 0, "rule_hit_events": 0}
+                  "rule_feedback": 0, "rule_hit_events": 0,
+                  "session_lifecycle_events": 0, "session_episodes": 0,
+                  "episode_checkpoints": 0, "finalization_receipts": 0,
+                  "finalization_operations": 0}
         with self.db:
+            receipt_ids = [row[0] for row in self.db.execute(
+                "SELECT finalization_id FROM finalization_receipts WHERE session_id=?", (session_id,))]
+            for finalization_id in receipt_ids:
+                cur = self.db.execute("DELETE FROM finalization_operations WHERE finalization_id=?",
+                                      (finalization_id,))
+                counts["finalization_operations"] += cur.rowcount
+            for table in ("episode_checkpoints", "finalization_receipts",
+                          "session_lifecycle_events", "session_episodes"):
+                cur = self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                counts[table] = cur.rowcount
             # sessions / events / reviews / rule_* all carry session_id
             for table in ("events", "reviews", "rule_feedback", "rule_hit_events"):
                 cur = self.db.execute(
@@ -447,6 +588,17 @@ class JobStore:
             )
             counts["jobs"] = cur.rowcount
         return counts
+
+    def episode_retention_preview(self, days: int, *, at: datetime | None = None) -> list[str]:
+        moment = at or datetime.now(timezone.utc)
+        cutoff = (moment - timedelta(days=days)).isoformat()
+        rows = self.db.execute(
+            "SELECT DISTINCT e.session_id FROM session_episodes e "
+            "WHERE e.state='finalized' AND e.last_activity_at<=? "
+            "AND NOT EXISTS (SELECT 1 FROM finalization_receipts r WHERE r.session_id=e.session_id "
+            "AND r.status IN ('extracting','planned','failed')) ORDER BY e.session_id", (cutoff,),
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def retention_preview(self, days: int) -> list[dict[str, str]]:
         """List sessions older than `days` that retention would delete.

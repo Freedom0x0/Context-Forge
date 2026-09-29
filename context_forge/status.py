@@ -37,6 +37,7 @@ def collect(store: JobStore) -> dict[str, int | str]:
     sync = runtime_sync.consistency(vault_root)
     return {
         "sessions": m["sessions"],
+        "episodes_by_host": ", ".join(f"{host}={count}" for host, count in store.host_counts().items()),
         "reviews": m["reviews"],
         "reviews_pending": m["reviews_draft"],
         "rules_enabled": rules_enabled,

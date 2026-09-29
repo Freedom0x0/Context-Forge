@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
 
 from .memory import (
     DEFAULT_OWNER, MemoryStore, MemoryStoreError, RetrievalContext, ScoreBreakdown,
@@ -49,6 +50,60 @@ class RecallResult:
         return payload
 
 
+@dataclass(frozen=True)
+class MemoryFamily:
+    representative: tuple[MemoryRecord, ScoreBreakdown]
+    members: tuple[tuple[MemoryRecord, ScoreBreakdown], ...]
+
+
+@dataclass(frozen=True)
+class RecallResponse(Sequence[RecallResult]):
+    results: tuple[RecallResult, ...]
+    candidate_truncated: bool = False
+    families: tuple[tuple[str, ...], ...] = ()
+
+    def __iter__(self) -> Iterator[RecallResult]:
+        return iter(self.results)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __getitem__(self, index):
+        return self.results[index]
+
+    def __eq__(self, other):
+        if isinstance(other, RecallResponse):
+            return (self.results, self.candidate_truncated, self.families) == (
+                other.results, other.candidate_truncated, other.families)
+        return self.results == other
+
+
+def _tokens(text: str) -> set[str]:
+    from .memory import tokenize
+    return set(tokenize(text))
+
+
+def group_for_presentation(scored, threshold: float = 0.90) -> tuple[MemoryFamily, ...]:
+    """Anchor-based (non-transitive) near-duplicate presentation grouping."""
+    families: list[list] = []
+    for item in scored:
+        record = item[0]
+        placed = False
+        for family in families:
+            anchor = family[0][0]
+            if boundary_view(record.draft) != boundary_view(anchor.draft):
+                continue
+            left, right = _tokens(record.draft.body), _tokens(anchor.draft.body)
+            similarity = len(left & right) / max(1, len(left | right))
+            if similarity >= threshold:
+                family.append(item)
+                placed = True
+                break
+        if not placed:
+            families.append([item])
+    return tuple(MemoryFamily(group[0], tuple(group)) for group in families)
+
+
 class MemoryRecall:
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
@@ -58,7 +113,7 @@ class MemoryRecall:
                request_id: str | None = None, session_id: str | None = None,
                stage: str = 'retrieved', technologies: frozenset[str] = frozenset(),
                domains: frozenset[str] = frozenset(), legacy_filter: bool = False
-               ) -> tuple[RecallResult, ...]:
+               ) -> RecallResponse:
         """Scoped recall units with a four-part explanation.
 
         `legacy_filter=True` is the rollback hatch: it reverts candidate-pool
@@ -68,10 +123,15 @@ class MemoryRecall:
         """
         ctx = RetrievalContext(query=query, project=project, changed_path=changed_path,
                                technologies=frozenset(technologies), domains=frozenset(domains))
-        scored = self.store.search_scored(
-            query, project=project, changed_path=changed_path, limit=limit,
-            byte_budget=byte_budget, technologies=ctx.technologies, domains=ctx.domains,
+        pool = self.store.search_candidates(
+            query, project=project, changed_path=changed_path, candidate_limit=100,
+            technologies=ctx.technologies, domains=ctx.domains,
             legacy_filter=legacy_filter)
+        families = group_for_presentation(pool.items)
+        selected = [item for family in families for item in family.members]
+        if limit is not None:
+            selected = selected[:limit]
+        scored = self.store._fit(selected, byte_budget)
         expanded = self._expanded([record.id for record, _ in scored], ctx)
         results = tuple(self._result(record, score, expanded) for record, score in scored)
         if request_id:
@@ -85,7 +145,9 @@ class MemoryRecall:
                     )
                 except MemoryStoreError:
                     pass
-        return results
+        return RecallResponse(results, pool.truncated,
+                              tuple(tuple(item[0].id for item in family.members)
+                                    for family in families))
 
     def get(self, memory_id: str, *, version: int | None = None) -> RecallResult | None:
         record = self.store.get(memory_id, version)

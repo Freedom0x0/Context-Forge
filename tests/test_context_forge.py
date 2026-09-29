@@ -490,11 +490,13 @@ def test_doctor_fix_applies_retention(tmp_path: Path, monkeypatch) -> None:
     import context_forge.doctor as doctor_mod
     monkeypatch.setattr(doctor_mod, "check_watcher",
                         lambda: ("watcher", True, "mocked"))
+    monkeypatch.setattr(doctor_mod, "check_lifecycle_hooks",
+                        lambda: ("lifecycle-hooks", True, "mocked"))
     monkeypatch.setattr(doctor_mod, "check_mcp",
                         lambda: ("mcp", True, "mocked"))
     import context_forge.cli as cli
-    cli._store = lambda: store
-    cli._vault = lambda: Vault(tmp_path / "vault")
+    monkeypatch.setattr(cli, "_store", lambda: store)
+    monkeypatch.setattr(cli, "_vault", lambda: Vault(tmp_path / "vault"))
     from typer.testing import CliRunner
     result = CliRunner().invoke(cli.app, ["doctor", "--fix"])
     assert result.exit_code == 0, result.output
@@ -837,6 +839,9 @@ def test_autostart_replaces_legacy_bat(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_autostart_status_reports_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+    import time
     from context_forge import autostart
     monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
     monkeypatch.setattr(autostart, "heartbeat_path",
@@ -844,13 +849,35 @@ def test_autostart_status_reports_heartbeat(tmp_path: Path, monkeypatch) -> None
     autostart.install()
     stale = autostart.status()
     assert stale["alive"] is False       # no heartbeat file yet
-    (tmp_path / "heartbeat").write_text("now", encoding="utf-8")
+    (tmp_path / "heartbeat").write_text(
+        json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8")
     fresh = autostart.status()
     assert fresh["alive"] is True
     assert fresh["age_seconds"] is not None
+    (tmp_path / "heartbeat").write_text(
+        json.dumps({"pid": 99999999, "at": time.time()}), encoding="utf-8")
+    assert autostart.status()["alive"] is False
+
+
+def test_autostart_status_accepts_live_windows_pid(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+    import time
+    from context_forge import autostart
+
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    monkeypatch.setattr(autostart, "heartbeat_path", lambda: tmp_path / "heartbeat")
+    autostart.install()
+    (tmp_path / "heartbeat").write_text(
+        json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8")
+
+    assert autostart.status()["alive"] is True
 
 
 def test_doctor_reports_watcher_state(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+    import time
     from context_forge import autostart, doctor
     monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
     monkeypatch.setattr(autostart, "heartbeat_path",
@@ -860,7 +887,8 @@ def test_doctor_reports_watcher_state(tmp_path: Path, monkeypatch) -> None:
     assert ok is False                   # nothing installed in tmp
     autostart.install()
     assert doctor.check_watcher()[1] is False   # installed but no beat
-    (tmp_path / "hb").write_text("now", encoding="utf-8")
+    (tmp_path / "hb").write_text(
+        json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8")
     assert doctor.check_watcher()[1] is True    # alive
 
 

@@ -17,7 +17,8 @@ from .memory_models import (
     DEFAULT_OWNER, Actor, Level, MemoryApplication, MemoryDraft, MemoryRecord,
     Relation, Scope, derive_level, split_legacy_scopes,
 )
-from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3
+from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4
+from .risk import risk_of
 from .rules import glob_match
 
 
@@ -47,6 +48,19 @@ def canonical_json(value: object) -> str:
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def canonical_fingerprint(draft: MemoryDraft) -> str:
+    """Exact assertion + decision-boundary fingerprint; never an entity ID."""
+    body = re.sub(r'\s+', ' ', draft.body.strip())
+    value = {
+        'kind': draft.kind, 'role': draft.role, 'body': body,
+        'applicability': [item.model_dump(mode='json') for item in draft.applicability],
+        'scope': draft.scope.model_dump(mode='json'),
+        'space': draft.space.model_dump(mode='json'),
+        'access': draft.access.model_dump(mode='json'),
+    }
+    return digest(canonical_json(value))
 
 
 def now() -> str:
@@ -166,6 +180,12 @@ class ScoreBreakdown:
     conflict_penalty: float
     admitted_by: Level
     explanation: str
+
+
+@dataclass(frozen=True)
+class CandidatePool:
+    items: tuple[tuple[MemoryRecord, ScoreBreakdown], ...]
+    truncated: bool
 
 
 def boundary_view(draft: MemoryDraft) -> BoundaryView:
@@ -484,9 +504,10 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=5)
         try:
+            connection.row_factory = sqlite3.Row
             connection.execute('PRAGMA foreign_keys=ON')
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version in (1, 2):
+            if version in (1, 2, 3):
                 connection.close()
                 connection = None
                 cls.migrate(path, dry_run=False)
@@ -536,7 +557,7 @@ class MemoryStore:
         if version == SCHEMA_VERSION:
             report['unchanged'] = -1
             return report
-        if version not in (1, 2):
+        if version not in (1, 2, 3, 4):
             raise MemoryStoreError(f'cannot migrate memory schema {version} to {SCHEMA_VERSION}')
         if not dry_run:
             report['backup'] = str(cls._online_backup(path))
@@ -573,6 +594,7 @@ class MemoryStore:
             return report
         connection = sqlite3.connect(path, timeout=5)
         try:
+            connection.row_factory = sqlite3.Row
             connection.execute('PRAGMA foreign_keys=ON')
             connection.execute('BEGIN IMMEDIATE')
             _exec_script(connection, PROJECTIONS)
@@ -585,6 +607,18 @@ class MemoryStore:
             if 'weight' not in columns:
                 connection.execute('ALTER TABLE memories ADD COLUMN weight REAL NOT NULL DEFAULT 1.0')
             _exec_script(connection, V3)
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(memory_versions)')}
+            if 'canonical_fingerprint' not in columns:
+                connection.execute("ALTER TABLE memory_versions ADD COLUMN canonical_fingerprint TEXT NOT NULL DEFAULT ''")
+            if 'risk' not in columns:
+                connection.execute("ALTER TABLE memory_versions ADD COLUMN risk TEXT NOT NULL DEFAULT 'normal'")
+            for row in connection.execute('SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall():
+                value = MemoryDraft.model_validate_json(row['snapshot_json'])
+                connection.execute('UPDATE memory_versions SET canonical_fingerprint=?,risk=? '
+                                   'WHERE memory_id=? AND version=?',
+                                   (canonical_fingerprint(value), risk_of(value),
+                                    row['memory_id'], row['version']))
+            _exec_script(connection, V4)
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -675,6 +709,49 @@ class MemoryStore:
         with self._connection() as connection:
             return [self._record(connection, row['id'])
                     for row in connection.execute('SELECT id FROM memories ORDER BY id')]
+
+    def find_exact(self, fingerprint: str) -> MemoryRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                'SELECT v.memory_id,v.version FROM memory_versions v JOIN memories m ON m.id=v.memory_id '
+                'WHERE v.canonical_fingerprint=? AND v.version=m.current_version ORDER BY v.memory_id LIMIT 1',
+                (fingerprint,),
+            ).fetchone()
+            return self._record(connection, row['memory_id'], row['version']) if row else None
+
+    def tombstone_session_sources(self, session_id: str, *, reason: str = 'session deleted') -> int:
+        """Remove retained excerpts for a deleted session while preserving identities."""
+        changed = 0
+        with self._connection(write=True) as connection:
+            rows = connection.execute('SELECT identity,source_json FROM memory_sources').fetchall()
+            for row in rows:
+                source = json.loads(row['source_json'])
+                if source.get('session_id') != session_id:
+                    continue
+                source['excerpt'] = ''
+                source['reference'] = 'source_deleted'
+                rendered = canonical_json(source)
+                connection.execute('UPDATE memory_sources SET source_json=?,content_hash=? WHERE identity=?',
+                                   (rendered, digest(''), row['identity']))
+                connection.execute('INSERT OR REPLACE INTO source_tombstones VALUES (?,?,?,?)',
+                                   (row['identity'], session_id, now(), reason))
+                changed += 1
+            if changed:
+                versions = connection.execute(
+                    'SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall()
+                for version in versions:
+                    snapshot = json.loads(version['snapshot_json'])
+                    touched = False
+                    for source in snapshot.get('sources', []):
+                        if source.get('session_id') == session_id:
+                            source['excerpt'] = ''
+                            source['reference'] = 'source_deleted'
+                            touched = True
+                    if touched:
+                        connection.execute(
+                            'UPDATE memory_versions SET snapshot_json=? WHERE memory_id=? AND version=?',
+                            (canonical_json(snapshot), version['memory_id'], version['version']))
+        return changed
 
     def events(self, memory_id: str) -> list[dict]:
         with self._connection() as connection:
@@ -875,6 +952,9 @@ class MemoryStore:
         if not memory_id or not idempotency_key or not reason or expected_version < 0:
             raise ValueError('id, idempotency key, reason and nonnegative expected_version required')
         draft = MemoryDraft.model_validate(draft.model_dump())
+        derived_risk = risk_of(draft)
+        if draft.risk != derived_risk:
+            draft = draft.model_copy(update={'risk': derived_risk})
         relations = tuple(Relation.model_validate(relation.model_dump()) for relation in relations)
         actor = _actor(actor)
         payload = {'draft': draft.model_dump(mode='json'), 'relations': [relation.model_dump(mode='json') for relation in relations],
@@ -913,8 +993,13 @@ class MemoryStore:
                                          (version, draft.status, draft.user_owned, draft.suppressed, memory_id, expected_version))
             if changed.rowcount != 1:
                 raise VersionConflict(memory_id)
-        connection.execute('INSERT INTO memory_versions VALUES (?,?,?,?)',
-                           (memory_id, version, canonical_json(draft.model_dump(mode='json')), timestamp))
+        connection.execute(
+            'INSERT INTO memory_versions '
+            '(memory_id,version,snapshot_json,created_at,canonical_fingerprint,risk) '
+            'VALUES (?,?,?,?,?,?)',
+            (memory_id, version, canonical_json(draft.model_dump(mode='json')),
+             timestamp, canonical_fingerprint(draft), draft.risk),
+        )
         for source_id in sorted({source.identity for source in draft.sources}):
             connection.execute('INSERT INTO memory_version_sources VALUES (?,?,?)', (memory_id, version, source_id))
         _insert_projections(connection, memory_id, version, draft)
@@ -1087,6 +1172,14 @@ class MemoryStore:
             byte_budget=byte_budget, owner=owner, technologies=technologies,
             domains=domains, legacy_filter=legacy_filter)]
 
+    def search_candidates(self, query: str, *, project: str | None,
+                          candidate_limit: int = 100, **kwargs) -> CandidatePool:
+        if candidate_limit < 1 or candidate_limit > 100:
+            raise ValueError('candidate_limit must be between 1 and 100')
+        items = self.search_scored(query, project=project, limit=candidate_limit + 1,
+                                   byte_budget=2**31 - 1, **kwargs)
+        return CandidatePool(tuple(items[:candidate_limit]), len(items) > candidate_limit)
+
     def search_scored(self, query: str, *, project: str | None, changed_path: str | None = None,
                       limit: int | None = 8, byte_budget: int = 65536,
                       owner: str = DEFAULT_OWNER, technologies: frozenset[str] = frozenset(),
@@ -1171,6 +1264,8 @@ class MemoryStore:
                     notes[other].append(f'\u4e0e {memory_id} \u5b58\u5728 {kind}, \u9700\u6309\u7248\u672c\u5206\u6d41')
             rescored = []
             for record, _score in top:
+                if risk_of(record.draft) == 'high':
+                    notes[record.id].append('高危指令：先向人确认，未确认不得执行')
                 text, count = base[record.id]
                 rescored.append((record, relevance(
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],

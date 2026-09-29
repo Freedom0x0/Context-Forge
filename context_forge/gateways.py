@@ -70,6 +70,10 @@ class OfflineGateway:
     def compile_rule(self, knowledge_id, knowledge_text) -> RuleExtraction:
         return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
 
+    def finalize_episode(self, payload):
+        return {"schema_version": 1, "candidates": [], "deferred_topics": [],
+                "no_memory_reason": "offline provider cannot derive long-term memory"}
+
 
 class NoOpGateway:
     """Default when no provider is configured.
@@ -89,6 +93,10 @@ class NoOpGateway:
 
     def compile_rule(self, knowledge_id, knowledge_text) -> RuleExtraction:
         return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
+
+    def finalize_episode(self, payload):
+        return {"schema_version": 1, "candidates": [], "deferred_topics": [],
+                "no_memory_reason": "model provider not configured"}
 
 
 def _fixture_artifacts() -> SessionArtifacts:
@@ -117,6 +125,10 @@ class FixtureGateway:
 
     def compile_rule(self, knowledge_id, knowledge_text):
         return RuleExtraction(instruction=knowledge_text.strip()[:400], confidence="low")
+
+    def finalize_episode(self, payload):
+        return {"schema_version": 1, "candidates": [], "deferred_topics": [],
+                "no_memory_reason": "fixture has no finalization output"}
 
 
 def select_gateway(provider: str, settings=None) -> LlmGateway:

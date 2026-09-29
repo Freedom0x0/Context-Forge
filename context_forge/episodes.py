@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .domain import EpisodeCheckpoint, EpisodeRecord, FinalizationReceipt, SessionLifecycleEvent
@@ -19,11 +20,13 @@ class EpisodeCollector:
     def __init__(self, store: JobStore) -> None:
         self.store = store
 
-    def collect(self, session_id: str, transcript_path: Path, project: str | None) -> EpisodeRecord:
+    def collect(self, session_id: str, transcript_path: Path, project: str | None,
+                host: str) -> EpisodeRecord:
         text, lines = _complete_text(Path(transcript_path))
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         current = self.store.latest_episode(session_id)
-        if current and current.collected_through_line == lines and current.transcript_digest == digest:
+        if (current and current.collected_through_line == lines
+                and current.transcript_digest == digest):
             return current
         moment = _now()
         segment = current.segment if current else 1
@@ -34,13 +37,34 @@ class EpisodeCollector:
             sliced = "\n".join(text.splitlines()[start_line:])
             digest = hashlib.sha256(sliced.encode("utf-8")).hexdigest()
         record = EpisodeRecord(
-            session_id=session_id, segment=segment, project=project,
+            session_id=session_id, segment=segment, project=project, host=host,
             transcript_path=str(Path(transcript_path).resolve()),
             collected_through_line=lines, transcript_digest=digest,
             state="open", started_at=moment if segment != (current.segment if current else 1) else (current.started_at if current else moment),
             last_activity_at=moment,
         )
         return self.store.save_episode(record)
+
+    def advance_inferred(self, now: datetime | None = None, *, process_alive: bool,
+                         active_tools: bool, pending_after: timedelta = timedelta(minutes=30),
+                         grace: timedelta = timedelta(minutes=30)) -> list[FinalizationReceipt]:
+        """Advance conservative abnormal-end detection by one state transition."""
+        if process_alive or active_tools:
+            return []
+        now = now or datetime.now(timezone.utc)
+        receipts: list[FinalizationReceipt] = []
+        for episode in self.store.active_episodes():
+            last = datetime.fromisoformat(episode.last_activity_at)
+            if episode.state == "open" and now - last >= pending_after:
+                self.store.save_episode(episode.model_copy(update={
+                    "state": "inferred_pending", "last_activity_at": now.isoformat(),
+                }))
+            elif episode.state == "inferred_pending" and now - last >= grace:
+                event_id = f"inferred:{episode.session_id}:{episode.segment}:{episode.transcript_digest}"
+                receipts.append(self.request_finalize(
+                    episode.session_id, end_kind="inferred", event_id=event_id,
+                ))
+        return receipts
 
     def checkpoint(self, event: SessionLifecycleEvent) -> EpisodeCheckpoint:
         episode = self.store.episode(event.session_id)
@@ -73,3 +97,16 @@ class EpisodeCollector:
             updated = episode.model_copy(update={"state": "finalizing", "end_kind": end_kind})
             self.store.save_episode(updated)
         return receipt
+
+    def delete(self, session_id: str, memory_store=None) -> dict[str, int]:
+        tombstones = memory_store.tombstone_session_sources(session_id) if memory_store else 0
+        counts = self.store.delete_session(session_id)
+        counts["source_tombstones"] = tombstones
+        return counts
+
+    def apply_retention(self, days: int, *, memory_store=None,
+                        now: datetime | None = None) -> list[str]:
+        targets = self.store.episode_retention_preview(days, at=now)
+        for session_id in targets:
+            self.delete(session_id, memory_store)
+        return targets

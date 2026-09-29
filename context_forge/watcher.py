@@ -34,6 +34,11 @@ def transcript_root() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
+# A host adapter is this pair: the root to scan and the name to record. Adding a
+# host must not mean adding another collection pipeline.
+HOST = "claude_code"
+
+
 def baseline_path() -> Path:
     from .config import runtime_dir
     return runtime_dir() / "watcher-baseline"
@@ -132,7 +137,7 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
             continue
         _, project = meta
         from .episodes import EpisodeCollector
-        EpisodeCollector(store).collect(session_id, transcript, project)
+        EpisodeCollector(store).collect(session_id, transcript, project, HOST)
         processed += 1
     return processed
 
@@ -144,10 +149,11 @@ def heartbeat_path() -> Path:
 
 def _beat() -> None:
     """Touch the heartbeat so `forge doctor` can tell we're alive."""
+    import os
     try:
         p = heartbeat_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(str(time.time()), encoding="utf-8")
+        p.write_text(json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8")
     except OSError:
         pass
 
@@ -199,6 +205,13 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
                                       settle_seconds=settle_seconds,
                                       max_attempts=max_attempts,
                                       memory_store=memory_store)
+                if memory_store is not None:
+                    from .memory_projection import MemoryProjector
+                    from .worker import process_pending_finalizations
+                    process_pending_finalizations(
+                        store, gateway or NoOpGateway(), memory_store,
+                        MemoryProjector(memory_store, vault.root),
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
             time.sleep(interval_seconds)

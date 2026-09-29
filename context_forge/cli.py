@@ -34,6 +34,10 @@ from .worker import process_one, run_loop
 
 app = typer.Typer(no_args_is_help=True)
 worker_app = typer.Typer(no_args_is_help=True)
+event_app = typer.Typer(no_args_is_help=True)
+session_app = typer.Typer(no_args_is_help=True)
+app.add_typer(event_app, name="event")
+app.add_typer(session_app, name="session")
 app.add_typer(worker_app, name="worker")
 
 
@@ -55,6 +59,90 @@ def _vault() -> Vault:
         return Vault(settings.root)
     from .config import runtime_dir
     return Vault(runtime_dir() / "vault")
+
+
+@event_app.command("ingest")
+def event_ingest() -> None:
+    """Ingest one generic lifecycle event as JSON from stdin."""
+    import json
+    import sys
+    from .domain import SessionLifecycleEvent
+    from .episodes import EpisodeCollector
+
+    event = SessionLifecycleEvent.model_validate(json.load(sys.stdin))
+    store = _store()
+    result = store.ingest_session_event(event)
+    collector = EpisodeCollector(store)
+    collector.collect(event.session_id, Path(event.transcript_path), None, event.source)
+    if event.type == "pre_compact":
+        collector.checkpoint(event)
+    else:
+        collector.request_finalize(event.session_id, end_kind="explicit", event_id=event.event_id)
+    typer.echo(result)
+
+
+@session_app.command("finalize")
+def session_finalize(session_id: str) -> None:
+    """Explicitly close the latest collected segment for a session."""
+    import uuid
+    from .episodes import EpisodeCollector
+
+    receipt = EpisodeCollector(_store()).request_finalize(
+        session_id, end_kind="manual", event_id=f"manual:{uuid.uuid4()}",
+    )
+    typer.echo(receipt.finalization_id)
+
+
+@session_app.command("list")
+def session_list() -> None:
+    for episode in _store().list_episodes():
+        typer.echo(f"{episode.session_id}\t{episode.segment}\t{episode.state}\t{episode.last_activity_at}")
+
+
+@session_app.command("inspect")
+def session_inspect(session_id: str) -> None:
+    import json
+    store = _store()
+    episodes = [item.model_dump(mode="json") for item in store.list_episodes()
+                if item.session_id == session_id]
+    if not episodes:
+        raise typer.BadParameter(f"session not found: {session_id}")
+    typer.echo(json.dumps({"episodes": episodes,
+                          "checkpoints": [item.model_dump(mode="json") for item in
+                                          store.list_checkpoints(session_id)]},
+                         indent=2, ensure_ascii=False))
+
+
+@session_app.command("delete")
+def session_delete(session_id: str) -> None:
+    from .episodes import EpisodeCollector
+    counts = EpisodeCollector(_store()).delete(session_id, _memory())
+    typer.echo(" ".join(f"{key}={value}" for key, value in counts.items() if value))
+
+
+@app.command("project-memories")
+def project_memories() -> None:
+    from .memory_projection import MemoryProjector
+    memory = _memory()
+    if memory is None:
+        raise typer.BadParameter("memory.db not initialized")
+    results = MemoryProjector(memory, _vault().root).project_pending()
+    typer.echo(f"projected {len(results)}")
+
+
+@app.command("precipitation-migrate")
+def precipitation_migrate(apply: bool = typer.Option(False, "--apply"),
+                          rollback: str = typer.Option("", "--rollback")) -> None:
+    import json
+    from .precipitation_migration import PrecipitationMigration
+    memory = _memory()
+    if memory is None:
+        raise typer.BadParameter("memory.db not initialized")
+    migration = PrecipitationMigration(memory)
+    report = ({"restored": migration.rollback(rollback)} if rollback else
+              (migration.apply() if apply else migration.plan()))
+    payload = report if isinstance(report, dict) else report.__dict__
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 # -- core 6 --------------------------------------------------------------
@@ -83,10 +171,35 @@ def init(vault_path: Path) -> None:
 
 @app.command("install-hook")
 def install_hook(target: Path = typer.Option(None, "--target"),
-                  uninstall: bool = typer.Option(False, "--uninstall")) -> None:
+                  uninstall: bool = typer.Option(False, "--uninstall"),
+                  status: bool = typer.Option(False, "--status"),
+                  self_test: bool = typer.Option(False, "--self-test")) -> None:
     """Install or remove the Claude Code SessionEnd/PreCompact/SessionStart hooks."""
     from . import install_hook as installer
 
+    if status:
+        import json
+        typer.echo(json.dumps(installer.status(target), indent=2))
+        return
+    if self_test:
+        import tempfile
+        from .hooks.claude_code import handle_payload
+        from .queue import JobStore
+        with tempfile.TemporaryDirectory(prefix="forge-hook-test-") as folder:
+            root = Path(folder)
+            transcript = root / "self-test.jsonl"
+            transcript.write_text('{}\n', encoding="utf-8")
+            store = JobStore(root / "queue.db")
+            try:
+                event = handle_payload({"hook_event_name": "PreCompact", "session_id": "self-test",
+                                        "transcript_path": str(transcript)}, store=store)
+                ok = event is not None and len(store.list_checkpoints("self-test")) == 1
+            finally:
+                store.db.close()
+        typer.echo("hook self-test passed" if ok else "hook self-test failed")
+        if not ok:
+            raise typer.Exit(1)
+        return
     result = installer.uninstall(target) if uninstall else installer.install(target)
     if uninstall:
         typer.echo(f"removed {result['removed']} hook entries at {result['path']}")

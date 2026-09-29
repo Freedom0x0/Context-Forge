@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import (
+    FinalizationOutput,
     LlmGateway,
     RuleExtraction,
     SessionArtifacts,
@@ -82,6 +83,10 @@ _PROMPT = (
     "private URLs in any field.\n\n"
     "Transcript (sanitized):\n{transcript}\n"
 )
+
+# Records which prompt shape produced a draft. tests/test_prompt_version.py pins
+# the digest of _PROMPT, so editing the prompt without bumping this fails.
+PROMPT_VERSION = 'session-artifacts-v1'
 
 
 @dataclass
@@ -257,6 +262,25 @@ class HttpGateway:
         reply = self._call_chat(prompt)
         data = self._parse_json_object(reply)
         return RuleExtraction.model_validate(data)
+
+    def finalize_episode(self, payload):
+        schema = json.dumps(FinalizationOutput.model_json_schema(), ensure_ascii=False)
+        prompt = (
+            "Consolidate this complete sanitized episode into 0 to 5 independent long-term "
+            "memories. Similar wording is not equivalence. Counterexamples normally belong in "
+            "scope constraints/exclusions. Every evidence_refs value must name a source identity "
+            "inside that candidate draft. Do not invent existing memory IDs or relations. "
+            "Return strict JSON only matching this schema:\n" + schema + "\nEpisode:\n" +
+            json.dumps(payload, ensure_ascii=False)
+        )
+        data = self._parse_json_object(self._call_chat(prompt))
+        try:
+            return FinalizationOutput.model_validate(data).model_dump(mode="json")
+        except Exception as exc:
+            repair = ("The JSON failed schema validation: " + str(exc) +
+                      "\nReturn corrected strict JSON only.\n" + prompt)
+            return FinalizationOutput.model_validate(
+                self._parse_json_object(self._call_chat(repair))).model_dump(mode="json")
 
     # subclasses override
     def _call_chat(self, prompt: str) -> str:

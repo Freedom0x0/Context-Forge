@@ -951,6 +951,16 @@ P0 是唯一必须立刻做的——它修的是当前真实存在的上下文�
 
 ## 11. 参考
 
+## 12. Episode 巩固实现状态（2026-09-24）
+
+沉淀洪泛治理已按 `.trellis/tasks/09-23-forge-precipitation-dedup/design.md` 落地：静默只采集 Episode，`PreCompact` 只写 checkpoint，明确结束创建 finalization receipt。模型结果先经过版本化 schema 校验并冻结，随后以稳定 operation key 写入 schema v4 的 `memory.db`；稳定实体 ID 与精确内容/边界指纹分离。
+
+跨 `queue.db` 和 `memory.db` 的一致性采用可恢复 operation log，不宣称跨库原子事务。模型抽取采用带租约的 CAS 所有权，两个 worker 竞争时只有一个调用模型；投影失败保留 committed 状态并可重试，不回滚可召回的权威记录。
+
+召回顺序为候选池（最多 100，返回截断标志）、边界准入、评分、非传递 presentation family、条数/字节预算。family 不改变 identity、不自动建关系，也不产生反馈强化。Episode 和 Checkpoint 不进入默认长期召回。
+
+自动 retention 只处理已 finalized 且没有 extracting/planned/failed receipt 的 Episode。会话删除会清除 queue 上下文并将长期来源摘录改为 `source_deleted` 最小墓碑；长期断言和稳定 ID 不级联删除。生产 watcher 不随 hook 安装自动启用。
+
 - [cross-project-memory-competitor-analysis.md](research/cross-project-memory-competitor-analysis.md) — **边界三分模型、project 软排序、曝光≠强化、评估指标**的主要来源
 - [competitor-landscape-human-ai-learning.md](research/competitor-landscape-human-ai-learning.md) — 八家竞品的结构性盲区、双向复利论据
 - [technical-design-context-forge.md](technical-design-context-forge.md) — 母设计。本文件遵循其定位与治理原则；其中 §2.3 已**显式修订**母文档 §3「Markdown 是事实源」一条（见 §2.3），该处冲突以本文件为准

@@ -363,12 +363,10 @@ def test_mcp_uninstall_leaves_legacy_alone(tmp_path, monkeypatch):
     assert legacy.read_bytes() == stale          # uninstall never touches legacy
 
 
-def test_worker_vault_write_logic_and_dependencies_untouched():
-    diff = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD", "--", "context_forge/worker.py"],
-        cwd=REPO, capture_output=True, text=True, check=True,
-    )
-    assert diff.stdout.strip() == ""
+def test_worker_uses_receipt_finalization_without_legacy_runtime_sync():
+    worker_source = (REPO / "context_forge" / "worker.py").read_text(encoding="utf-8")
+    assert "process_pending_finalizations" in worker_source
+    assert "runtime_sync" not in worker_source
 
     project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["dependencies"] == [

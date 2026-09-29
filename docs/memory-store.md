@@ -160,3 +160,31 @@ Adding `memories.weight` and `memory_applications` bumps `SCHEMA_VERSION` to 3. 
 `merge_candidates(threshold=0.9)` splits highly-similar same-kind pairs three ways: boundary-identical → `duplicate_of` (`automatic=True`, the only input `apply_exact` accepts); compatible but not identical → `overlaps` (review); contradictory applicability (opposite decisions on the same condition, or an exclusion naming what the other claims applies) → `conflicts_with`. `apply_conflict(candidate, idempotency_key=...)` writes a revocable `conflicts_with` relation without rewriting or hiding either side.
 
 `hygiene_report(days=90, min_sources=3, threshold=0.9)` bundles all four lists for batch review — no per-record interruption — and is exposed via `forge hygiene` and the MCP tool `context_forge_memory_hygiene`. Automatic writes may only **narrow** access: `MemoryStore._put` raises `ProtectedMemory('automatic writes may not widen access')` when a non-human actor would broaden `visibility`, add `allowed_projects`, or relax `privacy` from `private` to `shared`. There is no hard-delete API — archival (reversible) is the only removal.
+
+## Episode consolidation (schema v4)
+
+The production write path is DB-authoritative:
+
+1. `forge watch-transcripts` reads only newline-complete transcript data into `queue.db` Episodes. A 60-second quiet period never publishes long-term memory.
+2. Claude Code `SessionEnd`, `forge session finalize`, or the conservative inferred state machine creates one idempotent finalization receipt.
+3. The finalizer freezes validated extraction JSON and a deterministic per-memory write plan before writing `memory.db`. A retry replays operation keys and never calls the model again after extraction succeeds.
+4. `memory.db` schema v4 stores stable memory IDs and a separate exact `canonical_fingerprint` for the assertion plus its full decision boundary.
+5. Markdown under `memories/` is a projection. A changed or `user_owned` file creates a conflict; use an explicit correction import or keep-DB resolution.
+
+Operational commands:
+
+```text
+forge install-hook
+forge install-hook --status
+forge install-hook --self-test
+forge session list
+forge session inspect SESSION_ID
+forge session finalize SESSION_ID
+forge session delete SESSION_ID
+forge project-memories
+forge precipitation-migrate
+forge precipitation-migrate --apply
+forge precipitation-migrate --rollback BATCH_ID
+```
+
+`forge install-hook` installs lifecycle hooks only. It intentionally does not enable watcher autostart. Enable the watcher separately only after `forge doctor` and the launch-gate tests pass.

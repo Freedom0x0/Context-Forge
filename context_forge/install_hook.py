@@ -35,7 +35,7 @@ def _absolute_forge_command() -> str:
 # above the input box. Precipitation is the watcher's job, so
 # SessionEnd / PreCompact hooks would be dead weight.
 HOOK_COMMAND = "python -m context_forge.hooks.claude_code"
-HOOK_EVENTS: tuple[str, ...] = ()
+HOOK_EVENTS: tuple[str, ...] = ("SessionEnd", "PreCompact")
 SESSION_START_COMMAND = _absolute_forge_command()
 
 
@@ -94,17 +94,6 @@ def install(target: Path | None = None) -> dict[str, int]:
                   SESSION_START_COMMAND)
     _save(path, payload)
 
-    # The reliable half: a logon launcher for the transcript watcher.
-    # The hooks above are a latency optimisation only — the watcher
-    # reads transcripts straight from disk and cannot be disabled by
-    # another tool rewriting ~/.claude/settings.json.
-    try:
-        from . import autostart
-        result = autostart.install()
-        print(f"[install-hook] watcher autostart at {result['launcher']}")
-    except Exception as exc:
-        print(f"[install-hook] warning: autostart not installed ({exc})")
-
     return {"added": added, "updated": updated, "path": str(path)}
 
 
@@ -126,10 +115,12 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
         payload.pop("hooks", None)
     _save(path, payload)
 
-    try:
-        from . import autostart
-        autostart.uninstall()
-    except Exception as exc:
-        print(f"[install-hook] warning: autostart not removed ({exc})")
-
     return {"removed": removed, "path": str(path)}
+
+
+def status(target: Path | None = None) -> dict[str, object]:
+    path = _settings_path(target)
+    hooks = _load(path).get("hooks", {})
+    installed = {event: bool(_owned_entries(hooks.get(event, [])))
+                 for event in (*HOOK_EVENTS, "SessionStart")}
+    return {"path": str(path), "events": installed, "ok": all(installed.values())}

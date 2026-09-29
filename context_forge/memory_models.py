@@ -99,7 +99,7 @@ class MemoryDraft(MemoryModel):
     evidence_level: Literal['unknown', 'unverified', 'supported', 'verified', 'contradicted'] = 'unknown'
     value: str | None = None
     confidence: str | None = None
-    risk: str | None = None
+    risk: Literal['normal', 'high'] = 'normal'
     model: str | None = None
     prompt_version: str | None = None
     space: MemorySpace = MemorySpace()
@@ -111,6 +111,13 @@ class MemoryDraft(MemoryModel):
     proof_count: int = 0
     last_confirmed_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator('risk', mode='before')
+    @classmethod
+    def known_risk_only(cls, risk: Any) -> Any:
+        # Risk is decided by `risk.classify_risk` on the write path, not by the
+        # producer, so an unexpected self-report must degrade instead of failing.
+        return risk if risk in ('normal', 'high') else 'normal'
 
     @field_validator('sources')
     @classmethod

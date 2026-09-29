@@ -171,6 +171,7 @@ class EpisodeRecord(BaseModel):
     session_id: str
     segment: int = 1
     project: str | None = None
+    host: str = Field(min_length=1)
     transcript_path: str
     collected_through_line: int = 0
     transcript_digest: str
@@ -204,6 +205,56 @@ class FinalizationReceipt(BaseModel):
     error: str | None = None
     created_at: str
     updated_at: str
+    extraction_owner: str | None = None
+    extraction_lease_until: str | None = None
+
+
+class DeferredTopic(BaseModel):
+    topic: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class FinalMemoryCandidate(BaseModel):
+    candidate_id: str = Field(min_length=1)
+    draft: "MemoryDraft"
+    evidence_refs: tuple[str, ...] = ()
+    relations: tuple["Relation", ...] = ()
+
+
+class FinalizationOutput(BaseModel):
+    schema_version: Literal[1] = 1
+    candidates: tuple[FinalMemoryCandidate, ...] = ()
+    deferred_topics: tuple[DeferredTopic, ...] = ()
+    no_memory_reason: str | None = None
+
+    @field_validator("candidates")
+    @classmethod
+    def bounded_candidates(cls, values):
+        if len(values) > 5:
+            raise ValueError("finalization produces at most 5 candidates")
+        return values
+
+    @field_validator("no_memory_reason")
+    @classmethod
+    def nonblank_reason(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("no_memory_reason cannot be blank")
+        return value
+
+    @field_validator("deferred_topics")
+    @classmethod
+    def unique_deferred(cls, values):
+        if len({item.topic for item in values}) != len(values):
+            raise ValueError("deferred topics must be unique")
+        return values
+
+    def model_post_init(self, __context) -> None:
+        if not self.candidates and not self.no_memory_reason:
+            raise ValueError("zero candidates require no_memory_reason")
+
+
+from .memory_models import MemoryDraft, Relation
+FinalMemoryCandidate.model_rebuild()
 
 
 class EventEnvelope(BaseModel):
