@@ -414,25 +414,31 @@ class JobStore:
                 "WHERE finalization_id=? AND status='committed'", (error, _now(), finalization_id))
 
     def claim(self, lease_seconds: int = 60) -> sqlite3.Row | None:
+        """Take the next queued job, or None when nothing is due.
+
+        Pick and write are one statement — the same shape as `claim_extraction`,
+        which already checks `rowcount`. The old two-step form was safe only
+        because the lease reaper in front of it happens to open a write
+        transaction; a single statement removes that undeclared premise.
+        """
         now = datetime.now(timezone.utc)
+        moment = now.isoformat()
+        expires = (now + timedelta(seconds=lease_seconds)).isoformat()
         with self.db:
             self.db.execute(
                 "UPDATE jobs SET status='queued', locked_at=NULL, lease_expires_at=NULL "
-                "WHERE status='running' AND lease_expires_at < ?", (now.isoformat(),)
+                "WHERE status='running' AND lease_expires_at < ?", (moment,)
             )
-            row = self.db.execute(
-                "SELECT * FROM jobs WHERE status='queued' AND available_at <= ? "
-                "ORDER BY created_at LIMIT 1", (now.isoformat(),)
-            ).fetchone()
-            if row is None:
-                return None
-            expires = (now + timedelta(seconds=lease_seconds)).isoformat()
-            self.db.execute(
+            claimed = self.db.execute(
                 "UPDATE jobs SET status='running', attempts=attempts+1, locked_at=?, "
-                "lease_expires_at=?, updated_at=? WHERE id=? AND status='queued'",
-                (now.isoformat(), expires, now.isoformat(), row["id"]),
-            )
-            return self.db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+                "lease_expires_at=?, updated_at=? "
+                "WHERE id = (SELECT id FROM jobs WHERE status='queued' AND available_at <= ? "
+                "            ORDER BY created_at LIMIT 1) AND status='queued' RETURNING id",
+                (moment, expires, moment, moment),
+            ).fetchone()
+            if claimed is None:
+                return None
+            return self.db.execute("SELECT * FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
 
     def finish(self, job_id: str, error: str | None = None,
                max_attempts: int = 3) -> None:

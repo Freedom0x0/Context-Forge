@@ -1,0 +1,29 @@
+{
+  "id": "claim-race-fix",
+  "name": "claim-race-fix",
+  "title": "修复 claim 竞态：rowcount 检查 + BEGIN IMMEDIATE",
+  "description": "同一 job 被两个进程各处理一次 = 双份模型调用与重复候选；与进程锁无关，单实例也能触发",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-30",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "1"
+  }
+}

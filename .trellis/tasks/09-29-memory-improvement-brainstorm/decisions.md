@@ -215,6 +215,7 @@
 - **常驻循环只有一个**（初判"两个独立轮询循环"不准确）：`forge watch-transcripts` → `watcher.run()`（watcher.py:171）内部既采集 episode 也驱动终结（watcher.py:205 调 `process_pending_finalizations`）；worker 侧是 SessionEnd 瞬发一次的 `forge process-now`。真实并发风险 = 常驻 watcher + 瞬发 process-now 同时干活。
 - **heartbeat 只是报警器**：`_beat()`（watcher.py:145）写 `{"pid","at"}`，`doctor.check_watcher()`（doctor.py:107）读它判活；启动路径**从不做互斥判断**。第二个实例照样能起，并覆盖 heartbeat 的 pid → doctor 报"alive"报的是最后写的那个，另一路静默并行。
 - **`queue.claim()` 有真竞态**（queue.py:365-385）：先 SELECT 一条 queued job，再 `UPDATE ... WHERE id=? AND status='queued'`，随后**不检查 `rowcount`** 就把该行返回给调用方。两进程同时 SELECT 到同一条时，第二个的 UPDATE 影响 0 行却仍领取成功 → **同一 job 处理两遍 = 双份模型调用、双份候选**。此问题与进程锁无关，单实例下瞬发进程也能触发。`claim_extraction`（queue.py:265）的 owner lock 需按同一标准一并核查。
+  - **【实测推翻 2026-09-30，任务 `09-30-claim-race-fix`】** 6 进程抢 400 条 queued job：`claimed_total=240 / unique=240 / double_claims=0`。**双重领取不可复现，上面这段的因果判断是错的**：`with self.db:` 块首条语句是租约回收的 UPDATE，SQLite 写锁因此把整段（含读）串行化。仍然成立的只剩"该保证无处声明"——回收语句一旦被改成条件执行或移到 SELECT 之后，保证静默消失且无测试变红。修复方向相应改变，见下面 8b 决策 2 的更正。
 - **`forge install-daemon` 是死命令**：cli.py:413 `from .worker_service import install`，但 `context_forge/worker_service.py` **不存在**，按文档执行必 ImportError。实际开机自启由 `autostart.install()` 写 VBS 到 Windows Startup 目录，且由 `forge install-hook` 顺带安装——**常驻目前只有 Windows 有；macOS/Linux 无任何入口**（`_startup_dir()` autostart.py:23 是 Windows 硬路径）。
 - 第三个无限循环 `forge watch`（cli.py:612）管 vault 变更→重建索引，与沉淀无关，但命名与 `watch-transcripts` 只差一词，易被误当成同一件事重复启动。
 
@@ -222,6 +223,12 @@
 
 1. **互斥用文件句柄锁，不用 pid 文件查存活**：进程启动时锁住锁文件并持有句柄直至退出，进程死则系统自动释放；POSIX 走 `fcntl.flock`，Windows 走 `msvcrt.locking`。抢不到即明确报错"已有实例在运行（pid=X），本次退出"。弃用 pid 文件的理由：崩溃后残留与 pid 复用都需要额外"猜对方是否已死"的逻辑。**硬约束：锁文件放在 `config.runtime_dir()` 下、按库加锁，绝不全局**——否则 `CONTEXT_FORGE_HOME` 隔离场景与测试套件会被自己锁死。
 2. **`claim()` 竞态单独修，优先级高于第 1 条**：UPDATE 后检查 `cursor.rowcount`，为 0 则返回 None 让出；该段包进 `BEGIN IMMEDIATE`（SQLite 立即取写锁，消除"读完未写"交错窗口）。理由：第 1 条只防手滑起两个实例，第 2 条修的是**当下正在发生**的重复消耗。
+   - **【实施更正 2026-09-30】** 前提被实测推翻（见上面 8b 事实节的更正），两条具体做法也随之作废：
+     (a) **不引入 `BEGIN IMMEDIATE`**——当前事务形状已串行化，显式改锁要动 `isolation_level`，会连带影响同文件所有
+     `with self.db:` 块的语义，风险大于收益；(b) 优先级从"最高"降为"纪律性加固"，因为**没有正在发生的重复消耗**。
+     实际落地：选中与占用合并成**一条** `UPDATE ... WHERE id=(SELECT ...) RETURNING id`，形状对齐同文件已有的
+     `claim_extraction`（`queue.py:316-327` 的单语句 + rowcount）；并发守卫固化成 `tests/test_queue_concurrency.py`
+     （把 claim 改成只读不占用时该测试会失败，证明守卫有牙齿）。第 1 条（实例锁）与本条是不同问题，仍然有效。
 3. **跨平台常驻本轮只止血**：处理掉死命令 `install-daemon`（删除，或把职责并入 `install-hook`——它现在承诺的能力代码里不存在）；macOS/Linux 自启以**文档 + 可直接抄的 launchd plist / systemd user unit 示例**交付。不新建服务管理器的理由：产品是 local-first CLI，使用者即开发者，会自己挂服务；等 8a 的多宿主适配器立项、真出现"必须后台常驻"的产品要求时再立项写三家 `install-daemon` 实现。此处 CLI/文档作为开发者基础设施保留，不属于"用户写数据走脚本"的范畴。
 4. **命名去歧义**：`forge watch` → `forge watch-vault`，与 `watch-transcripts` 对称，成本极低。
 
@@ -393,7 +400,10 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
 - ✅ 整体审阅 → 追加"跨题关联与实施分层"一节：3 个未认领基础件（risk 字段、定时载体、host 维度）、1 个决策互撞（聚合表饿死投票报表）、1 条新出境路径（embedding）、2 处措辞纠正（fingerprint 索引已存在、CC 的 T2 已实现）、7 层实施顺序（**不等于题号**）
 - ✅ 审阅二次修正（F1/F2/F3/F4）→ 定时轮改"每步独立记账 + `purge_cutoff` 派生不变式"（并写死 `idempotency_key` 不得含日期）；聚合表撤七维交叉、改单条粒度 `signal_counts` + 查询时 join + 样本 <20 不出比率；`confirm_token` 定为服务端随机句柄 + 库内一次性表；**F4 选定异步旁路批准**（`forge approve` + isatty 拒绝非终端 + 挑战码 + 审计；代价=高危规则延迟生效；同步桌面通知方案不采纳）。另更正 A①：`MemoryDraft.risk` 已存在但是休眠字段
 - ✅ 第 0 层已建 4 个 Trellis 任务（见 G 节）：`09-29-risk-field-classifier`（含审阅⑧的 prompt 哈希测试）、`09-29-scheduled-run-ledger`（首批只接 retention）、`09-29-host-dimension`、`09-29-egress-surface-visible`；T0.4b（embedding 出境纪律）转为约束条款
-- **下一步**：各任务补 design/implement 后开工；第 1 层（8b.2 `claim` 竞态、8b.1 按库锁、8c 推断接上）尚未建任务
+- **下一步**：第 1 层任务已建（`09-30-claim-race-fix`、`09-30-per-db-instance-lock`、`09-30-inferred-finalization-wiring`）；
+      其中 **8b.2 的前提被 `09-30-claim-race-fix` 的实测推翻**（6 进程抢 400 job，`double_claims=0`）：
+      原代码没有可复现的双重领取，真实缺陷是"保证无处声明"。已改为单语句领取（对齐 `claim_extraction` 的形状）
+      + `tests/test_queue_concurrency.py` 并发守卫，作废 `BEGIN IMMEDIATE` 与"最高优先级"两条；全量 270 passed
 - ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
       `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
       `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、

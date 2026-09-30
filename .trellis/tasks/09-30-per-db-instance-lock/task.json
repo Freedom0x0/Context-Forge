@@ -1,0 +1,29 @@
+{
+  "id": "per-db-instance-lock",
+  "name": "per-db-instance-lock",
+  "title": "按库的文件句柄锁：watcher 单实例互斥",
+  "description": "runtime_dir() 下按库加锁（fcntl/msvcrt），抢不到即退出；heartbeat 报出实例数",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-30",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "1"
+  }
+}
