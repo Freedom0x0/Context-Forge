@@ -131,6 +131,25 @@ class FixtureGateway:
                 "no_memory_reason": "fixture has no finalization output"}
 
 
+PROVIDER_NAMES = ('none', 'offline', 'fake', 'local', 'remote')
+
+
+def egress_surface(settings=None) -> tuple[str, str]:
+    """Classify where sanitized transcript text goes: `('remote'|'local'|'none', destination)`.
+
+    This is the single derivation diagnostics use; a second copy of the
+    provider vocabulary elsewhere would drift the moment a provider is added.
+    """
+    provider = ((settings.model_provider if settings else '') or 'none').strip().lower()
+    if provider == 'remote':
+        from .provider_http import resolve_remote_url
+
+        return ('remote', resolve_remote_url(settings))
+    if provider == 'local':
+        return ('local', getattr(settings, 'local_api_url', '') or 'http://localhost:11434')
+    return ('none', 'nothing leaves this machine')
+
+
 def select_gateway(provider: str, settings=None) -> LlmGateway:
     """Map a settings-level provider name to a gateway implementation.
 

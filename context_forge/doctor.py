@@ -160,6 +160,24 @@ def check_scheduled(period_seconds: int = 86400) -> tuple[str, bool, str]:
     return ("scheduled", True, "; ".join(details))
 
 
+def check_egress() -> tuple[str, bool, str]:
+    """Where sanitized memory text leaves to. The privacy story is only true if it is visible."""
+    from .gateways import PROVIDER_NAMES, egress_surface
+
+    settings = load_settings()
+    provider = ((settings.model_provider if settings else '') or 'none').strip().lower()
+    kind, destination = egress_surface(settings)
+    if provider not in PROVIDER_NAMES:
+        return ('egress', False,
+                f"provider '{provider}' is not recognised; no model runs and nothing "
+                "leaves this machine — fix model_provider in the config")
+    if kind == 'remote':
+        return ('egress', True, f'sanitized memory text IS SENT OUT to {destination}')
+    if kind == 'local':
+        return ('egress', True, f'local model only ({destination}); nothing leaves the machine')
+    return ('egress', True, 'no model transport; transcripts never leave this machine')
+
+
 def check_lifecycle_hooks() -> tuple[str, bool, str]:
     from .install_hook import status
     info = status()
@@ -347,6 +365,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_lifecycle_hooks(),
         check_watcher(),
         check_scheduled(),
+        check_egress(),
         check_memory(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,

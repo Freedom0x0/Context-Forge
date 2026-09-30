@@ -397,7 +397,10 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
 - ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
       `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
       `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、
-      `2c27dcd` + `590255f`（`.trellis/tasks`、`.trellis/spec` 进版本控制）。
+      `2c27dcd` + `590255f`（`.trellis/tasks`、`.trellis/spec` 进版本控制）、`9028628`（ledger）。
+- ✅ `09-29-egress-surface-visible` 完成（全量 269 passed，三处变异验证）：`gateways.egress_surface` 单点派生、
+      `doctor` 的 `egress` 行在 provider 拼错时**会失败**、`forge status --json` 带 `egress` 字段、
+      README 写清"出境面由 model_provider 决定"。**第 0 层四件事全部完成**（尚未提交的只有 egress 这一件）。
 - ⚠️ risk 落地时对原方案有三处主动偏离（详见该任务 PRD 的实现记录）：枚举去掉 `low`（无人赋值的档级就是下一个休眠字段）；
       模型自报冲突**改为降级 + 报表看分布**（记录自报值需要新增原始 payload 留存结构，不属第 0 层）；
       **未改发布行为**——risk=high 今天仍自动 publish，让高危停在 candidate 必须与 F4 批准通道同时上，

@@ -35,8 +35,11 @@ def collect(store: JobStore) -> dict[str, int | str]:
     from . import runtime_sync
 
     sync = runtime_sync.consistency(vault_root)
+    from .gateways import egress_surface
+    egress_kind, egress_destination = egress_surface(settings)
     return {
         "sessions": m["sessions"],
+        "egress": egress_destination if egress_kind != 'none' else "none",
         "episodes_by_host": ", ".join(f"{host}={count}" for host, count in store.host_counts().items()),
         "reviews": m["reviews"],
         "reviews_pending": m["reviews_draft"],

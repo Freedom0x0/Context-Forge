@@ -392,6 +392,18 @@ def _settings_env(name: str) -> str:
     return ""
 
 
+def resolve_remote_url(settings=None) -> str:
+    """Where remote text actually goes: settings value > env > host settings file > default."""
+    return (
+        (getattr(settings, "remote_api_url", "") or "")
+        or os.environ.get("ANTHROPIC_API_URL")
+        or os.environ.get("ANTHROPIC_BASE_URL")
+        or _settings_env("ANTHROPIC_BASE_URL")
+        or _settings_env("ANTHROPIC_API_URL")
+        or "https://api.anthropic.com"
+    )
+
+
 def build_remote(api_key: str | None = None, model: str | None = None,
                  api_url: str | None = None) -> LlmGateway:
     """Factory honouring environment overrides for the remote gateway.
@@ -406,14 +418,7 @@ def build_remote(api_key: str | None = None, model: str | None = None,
         or _settings_env("ANTHROPIC_API_KEY")
         or ""
     )
-    url = (
-        api_url
-        or os.environ.get("ANTHROPIC_API_URL")
-        or os.environ.get("ANTHROPIC_BASE_URL")
-        or _settings_env("ANTHROPIC_BASE_URL")
-        or _settings_env("ANTHROPIC_API_URL")
-        or "https://api.anthropic.com"
-    )
+    url = api_url or resolve_remote_url()
     chosen = (
         model
         or os.environ.get("ANTHROPIC_MODEL")

@@ -49,3 +49,29 @@
 
 - 判断标准来自 8a 与问题 4 的同一条取向：**能观测的才算安全**。这一项不提升脱敏强度，
   只让既有的风险等级变得可见（它由 provider 配置决定，而不是由正则强弱决定）。
+
+## 实现记录（2026-09-29）
+
+**落地形状**
+- `gateways.egress_surface(settings) -> ('remote'|'local'|'none', destination)` 与
+  `gateways.PROVIDER_NAMES`：provider 词汇表**只有一个出处**，doctor 与 status 都调它。
+  这是 `spec/backend/database-guidelines.md` 里"派生只能有一份实现"教训的直接应用。
+- `provider_http.resolve_remote_url(settings)`：把原先内联在 `build_remote` 里的 endpoint 优先级
+  （settings 值 > 环境变量 > 宿主 settings.json > 默认）**提出来复用**，`build_remote` 改为调用它。
+- `doctor.check_egress()`：remote → OK 但明说"IS SENT OUT to <endpoint>"；local → OK 且"不出机器"；
+  none/offline/fake → OK"从不出境"；**provider 拼错（不在 PROVIDER_NAMES 里）→ 该行失败**，
+  因为此时既不沉淀也不出境，而用户以为配好了。这条是"不可能失败的检查不是检查"的正面回答。
+- `forge status` JSON 增加 `egress` 字段（同值）。**没有进 `render_text`**：那一行是 SessionStart 时打在
+  输入框上方的，把 endpoint 常驻在状态行里是噪音；要看细节用 `--json` 或 `forge doctor`。
+- README 配置段补一段威胁模型：出境面由 `model_provider` 决定，`none/offline/fake` 无出境，
+  未来 embedding 若启用受同一约束（即 B⑤ / F 段⑤ 的那条）。
+
+**证据**
+- 新增 `tests/test_egress.py` 11 例：无配置=无出境、local 不出机器、remote 打印真实 endpoint、
+  环境变量覆盖默认、settings 值优先于环境变量、默认 endpoint、**provider 拼错必须失败**、
+  `build_remote` 仍尊重显式 url（重构回归）、status 字段、`run_all` 里两行都在。
+  测试隔离 `CONTEXT_FORGE_HOME`、清空 `ANTHROPIC_*` 环境变量，并把 `Path.home` 与
+  `_settings_env` 重定向到临时目录——不读真实的 `~/.claude/settings.json`（host-integration 的硬性要求）。
+- 全量 `pytest`：**269 passed**。
+- 变异验证三处：让 `check_egress` 不可能失败 → `1 failed`；status 去掉 `egress` 字段 → `1 failed`；
+  把 endpoint 优先级反过来（环境变量盖过配置）→ `1 failed`；恢复后 `11 passed`。

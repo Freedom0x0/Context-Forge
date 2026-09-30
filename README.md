@@ -89,6 +89,8 @@ remote_model = "deepseek-v4-flash"
 
 API key 应通过本地安全配置或环境变量提供，不要提交到 Git。
 
+**出境面只有一条，由这条配置决定**：`model_provider = "remote"` 时，脱敏后的会话正文会发往该 endpoint（将来若启用 embedding，也走同一条约束）；`none` / `offline` / `fake` 不产生任何出境，`local` 只到本机的 Ollama。`forge doctor` 的 `egress` 行打印正文实际去向，`forge status --json` 的 `egress` 字段同值。也就是说：风险等级取决于你选了哪个 provider，而不是取决于脱敏规则有多强。
+
 ### 运行 worker
 
 ```bash
