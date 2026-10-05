@@ -761,6 +761,30 @@ def test_scan_once_collects_settled_transcript(tmp_path: Path,
     assert watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0) == 0
 
 
+def test_scan_once_advances_inferred_ends(tmp_path: Path, monkeypatch) -> None:
+    """A session nobody reported the end of still moves through the watcher loop."""
+    from datetime import datetime, timedelta, timezone
+
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-demo"
+    _write_cc_transcript(projects / "s9.jsonl", r"C:\work\demo", "cache miss", "check logs")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    assert watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0) == 1
+    assert store.latest_episode("s9").state == "open"
+
+    # Age the episode past the pending window, then let an idle pass run.
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    store.save_episode(store.latest_episode("s9").model_copy(
+        update={"last_activity_at": old.isoformat()}))
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0)
+
+    assert store.latest_episode("s9").state == "inferred_pending"
+
+
 def test_scan_once_skips_fresh_transcript(tmp_path: Path, monkeypatch) -> None:
     """A transcript still being written is left alone."""
     from context_forge import watcher

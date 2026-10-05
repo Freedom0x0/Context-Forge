@@ -750,8 +750,12 @@ class JobStore:
             except ValueError:
                 continue
         avg_delay = sum(deltas) / len(deltas) if deltas else 0.0
+        episodes_inferred = self.db.execute(
+            "SELECT COUNT(*) AS n FROM session_episodes WHERE end_kind='inferred'"
+        ).fetchone()["n"]
         return {
             "sessions": sessions,
+            "episodes_inferred": episodes_inferred,
             "reviews": reviews_total,
             "reviews_draft": reviews_draft,
             "reviews_approved": reviews_approved,

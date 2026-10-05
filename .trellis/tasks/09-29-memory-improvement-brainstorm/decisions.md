@@ -404,6 +404,14 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
       其中 **8b.2 的前提被 `09-30-claim-race-fix` 的实测推翻**（6 进程抢 400 job，`double_claims=0`）：
       原代码没有可复现的双重领取，真实缺陷是"保证无处声明"。已改为单语句领取（对齐 `claim_extraction` 的形状）
       + `tests/test_queue_concurrency.py` 并发守卫，作废 `BEGIN IMMEDIATE` 与"最高优先级"两条；全量 270 passed
+- ✅ 8c 已实施（`09-30-inferred-finalization-wiring`）：`advance_inferred` 删掉 `process_alive`/`active_tools`，
+      改为纯文件判据（时间戳 + 末行未应答 `tool_use` 抑制 + "出现新 transcript 即视为人在活动"短路 grace），
+      缺失/不可读 transcript 按"仍在飞行"跳过。`metrics()['episodes_inferred']` 单独可数。全量 **274 passed**，
+      三处变异验证都变红。
+      **有意的节奏偏离**：执行点从"每日 scheduled step"改为"**每轮 watcher pass**"——30 分钟阈值配每日轮会让规则延迟到一天，
+      而这段逻辑先比时间戳、几乎不花钱；真正花钱的模型调用仍由同一条 pass 里既有的 `process_pending_finalizations` 驱动。
+      附带修正：`--once` 现在会推进 inferred（非删除类维护），但**仍不跑 retention**。
+- **剩余第 1 层**：`09-30-per-db-instance-lock`（因 8b.2 实测更正，已从"正确性问题"降级为"卫生问题"）
 - ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
       `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
       `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、

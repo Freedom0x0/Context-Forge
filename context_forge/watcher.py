@@ -117,6 +117,7 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
     current = time.time() if now is None else now
     floor = ensure_baseline() if baseline is None else baseline
     processed = 0
+    new_activity = False
     for transcript in sorted(root.glob("*/*.jsonl")):
         try:
             mtime = transcript.stat().st_mtime
@@ -129,6 +130,8 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         total = count_complete_lines(transcript)
         session_id = transcript.stem
         episode = store.latest_episode(session_id)
+        if episode is None:
+            new_activity = True
         collected = episode.collected_through_line if episode else 0
         if total <= collected:
             continue
@@ -139,6 +142,10 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         from .episodes import EpisodeCollector
         EpisodeCollector(store).collect(session_id, transcript, project, HOST)
         processed += 1
+    # Sessions nobody reported the end of only close here; every pass is cheap
+    # because the timestamp gate runs before any file is read.
+    from .episodes import EpisodeCollector
+    EpisodeCollector(store).advance_inferred(new_activity=new_activity)
     return processed
 
 

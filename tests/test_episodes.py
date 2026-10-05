@@ -173,15 +173,63 @@ def test_inferred_end_requires_pending_and_grace_period(tmp_path: Path):
     old = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
 
-    first = collector.advance_inferred(old + timedelta(minutes=30), process_alive=False,
-                                       active_tools=False)
+    first = collector.advance_inferred(old + timedelta(minutes=30))
     assert first == []
     assert store.latest_episode("s1").state == "inferred_pending"
 
-    second = collector.advance_inferred(old + timedelta(minutes=60), process_alive=False,
-                                        active_tools=False)
+    second = collector.advance_inferred(old + timedelta(minutes=60))
     assert len(second) == 1
     assert second[0].end_kind == "inferred"
+    # Inferred closes are counted separately so the guess stays visible (8c).
+    assert store.metrics()["episodes_inferred"] == 1
+
+
+def test_inferred_close_is_suppressed_while_a_tool_is_outstanding(tmp_path: Path):
+    """A session that stopped on an unanswered tool_use is not finished."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant", "message": {"content": [
+            {"type": "text", "text": "running it"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "sleep 1"}}]}}) + "\n",
+        encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    episode = collector.collect("s1", transcript, "demo", "claude_code")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
+
+    assert collector.advance_inferred(old + timedelta(minutes=30)) == []
+    assert store.latest_episode("s1").state == "open"
+    assert collector.advance_inferred(old + timedelta(hours=2), new_activity=True) == []
+    assert store.latest_episode("s1").state == "open"
+
+
+def test_new_activity_shortens_the_grace_wait(tmp_path: Path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    episode = collector.collect("s1", transcript, "demo", "claude_code")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
+
+    receipts = collector.advance_inferred(old + timedelta(minutes=31), new_activity=True)
+
+    assert len(receipts) == 1 and receipts[0].end_kind == "inferred"
+
+
+def test_missing_transcript_is_skipped_instead_of_finalizing(tmp_path: Path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    episode = collector.collect("s1", transcript, "demo", "claude_code")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
+    transcript.unlink()
+
+    assert collector.advance_inferred(old + timedelta(hours=1)) == []
+    assert store.latest_episode("s1").state == "open"
 
 
 def test_append_cancels_inferred_pending(tmp_path: Path):

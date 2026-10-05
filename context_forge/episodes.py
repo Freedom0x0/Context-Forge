@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,12 +9,45 @@ from .domain import EpisodeCheckpoint, EpisodeRecord, FinalizationReceipt, Sessi
 from .queue import JobStore, _now
 from .transcript import sanitize_text
 
+# Written down rather than configured: the numbers are a safety margin around a
+# cheap mistake, and a knob here would only invite "why did it never close".
+PENDING_AFTER = timedelta(minutes=30)
+GRACE = timedelta(minutes=30)
+
 
 def _complete_text(path: Path) -> tuple[str, int]:
     data = path.read_bytes()
     complete = data.rsplit(b"\n", 1)[0] if not data.endswith(b"\n") else data[:-1]
     count = data.count(b"\n")
     return complete.decode("utf-8", errors="replace"), count
+
+
+def _awaiting_tool_result(path: Path) -> bool:
+    """True when the last complete line is an assistant turn holding a tool_use.
+
+    That shape means a tool call is still outstanding (or the host died mid-call),
+    so the session is not finished however long the file has been quiet. An
+    unreadable or missing transcript is treated the same way: skip this pass
+    instead of finalizing on evidence we cannot check.
+    """
+    try:
+        text, _ = _complete_text(Path(path))
+    except OSError:
+        return True
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return True
+    try:
+        record = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(record, dict) or record.get("type") != "assistant":
+        return False
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content)
 
 
 class EpisodeCollector:
@@ -45,25 +79,41 @@ class EpisodeCollector:
         )
         return self.store.save_episode(record)
 
-    def advance_inferred(self, now: datetime | None = None, *, process_alive: bool,
-                         active_tools: bool, pending_after: timedelta = timedelta(minutes=30),
-                         grace: timedelta = timedelta(minutes=30)) -> list[FinalizationReceipt]:
-        """Advance conservative abnormal-end detection by one state transition."""
-        if process_alive or active_tools:
-            return []
+    def advance_inferred(self, now: datetime | None = None, *,
+                         new_activity: bool = False,
+                         pending_after: timedelta = PENDING_AFTER,
+                         grace: timedelta = GRACE) -> list[FinalizationReceipt]:
+        """Close episodes nobody reported the end of, using file evidence only.
+
+        Guessing wrong is cheap here: `collect()` opens a new segment for lines
+        that arrive after finalization, so an over-eager close splits a session in
+        two instead of losing it — which is why no process-level evidence is
+        required to run this.
+
+        `new_activity` means a transcript appeared this pass: the user is clearly
+        around, so anything already suspected can be closed without the grace wait.
+        """
         now = now or datetime.now(timezone.utc)
         receipts: list[FinalizationReceipt] = []
         for episode in self.store.active_episodes():
             last = datetime.fromisoformat(episode.last_activity_at)
-            if episode.state == "open" and now - last >= pending_after:
+            silence = now - last
+            suspected = episode.state == "inferred_pending"
+            if not suspected and silence < pending_after:
+                continue
+            if suspected and not new_activity and silence < grace:
+                continue
+            if _awaiting_tool_result(Path(episode.transcript_path)):
+                continue
+            if episode.state == "open" and not new_activity:
                 self.store.save_episode(episode.model_copy(update={
                     "state": "inferred_pending", "last_activity_at": now.isoformat(),
                 }))
-            elif episode.state == "inferred_pending" and now - last >= grace:
-                event_id = f"inferred:{episode.session_id}:{episode.segment}:{episode.transcript_digest}"
-                receipts.append(self.request_finalize(
-                    episode.session_id, end_kind="inferred", event_id=event_id,
-                ))
+                continue
+            event_id = f"inferred:{episode.session_id}:{episode.segment}:{episode.transcript_digest}"
+            receipts.append(self.request_finalize(
+                episode.session_id, end_kind="inferred", event_id=event_id,
+            ))
         return receipts
 
     def checkpoint(self, event: SessionLifecycleEvent) -> EpisodeCheckpoint:
