@@ -1,0 +1,29 @@
+{
+  "id": "memory-apply-tool",
+  "name": "memory-apply-tool",
+  "title": "application 写入口：memory_apply 与派生 attribution",
+  "description": "F5 定案 A：隐式票要有 application 记录才能影响权重，attribution 由证据派生而非宿主自封",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-10-05",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "2"
+  }
+}

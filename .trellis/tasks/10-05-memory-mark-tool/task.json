@@ -1,0 +1,29 @@
+{
+  "id": "memory-mark-tool",
+  "name": "memory-mark-tool",
+  "title": "隐式票入口：MCP 写回工具 memory_mark",
+  "description": "宿主在引用/采纳/验证后回报阶段；曝光不计票的纪律已在权重侧，缺的是写回通道",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-10-05",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "2"
+  }
+}

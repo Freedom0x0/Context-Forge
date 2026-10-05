@@ -101,6 +101,38 @@ def create_server():
         return result.as_dict()
 
     @server.tool()
+    def context_forge_memory_mark(memory_id: str, request_id: str, stage: str,
+                                  version: int = 0, session_id: str = "",
+                                  note: str = "") -> dict:
+        """Report what the host did with a memory: referenced | applied | validated.
+
+        Exposure stages (`retrieved` / `tool_returned` / `presented`) are refused on
+        purpose — being shown a memory is not a vote. Re-sending the same
+        (request_id, stage, memory, version) is a no-op, so a retry cannot double-count.
+        The reply carries the current weight so the caller sees whether the mark moved
+        anything: `applied` and `validated` only count once an application record
+        attributes them to an outcome.
+        """
+        from .memory import MARKABLE_STAGES
+
+        store = _memory()
+        if stage not in MARKABLE_STAGES:
+            raise ValueError(f"stage must be one of {', '.join(MARKABLE_STAGES)}")
+        if not request_id:
+            raise ValueError("request_id is required (tie the mark to one recall)")
+        record = store.get(memory_id, version or None)
+        if record is None:
+            raise KeyError(memory_id)
+        store.record_retrieval(
+            record.id, record.version, request_id=request_id, stage=stage,
+            session_id=session_id or None,
+            idempotency_key=f'{request_id}:{stage}:{record.id}:{record.version}',
+            explanation={'source': 'host_mark', **({'note': note} if note else {})},
+        )
+        return {'memory_id': record.id, 'version': record.version, 'stage': stage,
+                'request_id': request_id, 'weight': store.weight(record.id)}
+
+    @server.tool()
     def context_forge_memory_report(similarity_threshold: float = 0.6) -> dict:
         from .memory_merge import MemoryMerge
         return MemoryMerge(_memory()).report(similarity_threshold=similarity_threshold).as_dict()

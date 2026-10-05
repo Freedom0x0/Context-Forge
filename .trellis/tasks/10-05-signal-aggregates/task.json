@@ -1,0 +1,29 @@
+{
+  "id": "signal-aggregates",
+  "name": "signal-aggregates",
+  "title": "signal_counts 聚合表 + 维度列提到 memories",
+  "description": "F2 落地：单条粒度聚合、每日重算当月、180 天清理按聚合水位派生边界",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-10-05",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "2"
+  }
+}

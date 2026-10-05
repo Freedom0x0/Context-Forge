@@ -366,6 +366,26 @@
 
 **状态：已定（2026-09-29 晚，F1/F2 取代 A②/B④ 的表述；F3+F4 定稿高危确认形态，D 段"待拍板"事项已闭合）**
 
+### F5（2026-09-30 补）隐式票缺半个入口：定 A 方案
+
+**实测**（临时库、一条 active 记忆）：`3 次 applied + 2 次 validated` → `retrieval_events` 5 行，
+`weight 1.0 → 1.0`，`memory_applications` **0 行**。原因：`_weight_events` 只在该 memory/version 存在
+`attribution='confirmed'` 的 application 记录时才计入 applied/validated（当初为止住"自报采纳就抬权重"设的闸），
+而 `record_application` 在生产代码里**零调用者**（只有测试在调）。所以 `context_forge_memory_mark` 单独上线后，
+隐式票是"记得到、看不见效果"的空转，问题 1 的"投票数据当自动档油门刹车"这条依赖悬空。
+
+**定：A —— 补 `context_forge_memory_apply` 写 application 记录。**
+
+- `confirmed` **不允许宿主自封**：`attribution='confirmed'` 必须带验证来源（schema 已有的
+  `validation_source_ids_json` / `actual_outcome`），即"结果真的好"要有证据撑着；只凭一句"我用了且没问题"
+  最多落成 `plausible`/`unknown`，不参与权重。
+- 明确不采纳 **B**（放宽 `_weight_events` 让 applied/validated 自身计票）：等于把权重变成宿主可自刷的指标，
+  正是当初否掉的方向。
+- 明确不采纳 **C**（mark 只当观测、权重靠明票）：会让"隐式票"这条设计整条作废，而它正是"不打断心流"下
+  唯一能持续收到信号的路；明票只作强信号补充的现状不需要靠废除隐票来维持。
+
+**状态：已定（2026-09-30），任务 `10-05-memory-apply-tool`**
+
 ### G. 第 0 层任务拆分（2026-09-29 晚，用户确认拆解后建档）
 
 | 任务目录 | 内容 | 归属调整 |
@@ -412,6 +432,13 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
       而这段逻辑先比时间戳、几乎不花钱；真正花钱的模型调用仍由同一条 pass 里既有的 `process_pending_finalizations` 驱动。
       附带修正：`--once` 现在会推进 inferred（非删除类维护），但**仍不跑 retention**。
 - **剩余第 1 层**：`09-30-per-db-instance-lock`（因 8b.2 实测更正，已从"正确性问题"降级为"卫生问题"）
+- ✅ 第 2 层已建三件：`10-05-memory-mark-tool`、`10-05-signal-aggregates`、`10-05-vote-report-buckets`
+- ⚠️ `10-05-memory-mark-tool` 已完成（全量 **275 passed**），但**实测暴露隐式票只做了一半**：
+      3 次 applied + 2 次 validated 都进了 `retrieval_events`，`weight` 仍是 `1.0 → 1.0`，因为
+      `_weight_events` 要求同 memory/version 存在 `attribution='confirmed'` 的 application 记录才计票，
+      而 `record_application` 在生产代码里**零调用者**。三条出路（A 补 `memory_apply` 且禁止宿主自封 confirmed /
+      B 放宽计票门槛（等于让宿主自刷权重，原设计已否）/ C 承认 mark 只是观测信号、权重靠明票）**待用户选定**。
+      选定前，第 2 层的"投票驱动自动档"这条依赖是悬空的。
 - ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
       `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
       `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、

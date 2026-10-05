@@ -78,6 +78,10 @@ GLOB_MARKERS = '*?/\\'
 _SLUG = re.compile(r'^[^\s*?/\\<>=%:]+$')
 EXPANSION_KINDS = ('derived_from', 'supports', 'refines', 'overlaps')
 CONFLICT_KINDS = ('conflicts_with', 'contradicts', 'exception_to')
+RETRIEVAL_STAGES = ('retrieved', 'tool_returned', 'presented', 'referenced', 'applied', 'validated')
+# Being shown a memory is not using it: the first three stages are written by the recall
+# path itself, so a host reporting back may only name what it did with what it was shown.
+MARKABLE_STAGES = ('referenced', 'applied', 'validated')
 
 EVIDENCE_SCORE = {'verified': 1.0, 'supported': 0.7, 'unverified': 0.3,
                   'unknown': 0.1, 'contradicted': -0.5}
@@ -760,7 +764,7 @@ class MemoryStore:
     def record_retrieval(self, memory_id: str, version: int, *, request_id: str,
                          stage: str, idempotency_key: str, session_id: str | None = None,
                          explanation: dict | None = None) -> None:
-        if stage not in {'retrieved', 'tool_returned', 'presented', 'referenced', 'applied', 'validated'}:
+        if stage not in RETRIEVAL_STAGES:
             raise ValueError('invalid retrieval stage')
         if not request_id or not idempotency_key:
             raise ValueError('request and idempotency key required')

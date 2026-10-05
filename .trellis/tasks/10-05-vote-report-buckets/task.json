@@ -1,0 +1,29 @@
+{
+  "id": "vote-report-buckets",
+  "name": "vote-report-buckets",
+  "title": "反对率分桶报表 + 沉默即报警",
+  "description": "问题1 第二层：按 host/model+prompt_version/evidence_level 出桶；绝对数+比率，样本<20 不给百分比",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-10-05",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "2"
+  }
+}
