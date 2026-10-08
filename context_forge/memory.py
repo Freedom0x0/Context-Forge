@@ -83,6 +83,20 @@ RETRIEVAL_STAGES = ('retrieved', 'tool_returned', 'presented', 'referenced', 'ap
 # Being shown a memory is not using it: the first three stages are written by the recall
 # path itself, so a host reporting back may only name what it did with what it was shown.
 MARKABLE_STAGES = ('referenced', 'applied', 'validated')
+# Widening is bounded by which operator is allowed, never by how many terms may be
+# dropped: a term that matches no document is shed for free, and matching terms are only
+# ever given up together by switching the whole query to a union.
+WIDEN_RESULT_CAP = 100
+
+
+def _fts_match(terms: Sequence[str], operator: str = ' AND ') -> str:
+    return operator.join('"' + term.replace('"', '""') + '"' for term in terms)
+
+
+def _token_frequency(connection: sqlite3.Connection, term: str) -> int:
+    """How many indexed documents contain a term — decides which token is safe to drop."""
+    return connection.execute('SELECT count(*) FROM memory_fts WHERE memory_fts MATCH ?',
+                              (_fts_match([term]),)).fetchone()[0]
 
 EVIDENCE_SCORE = {'verified': 1.0, 'supported': 0.7, 'unverified': 0.3,
                   'unknown': 0.1, 'contradicted': -0.5}
@@ -349,7 +363,7 @@ def text_scores(ranks: Sequence[float]) -> list[float]:
 
 def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
              bonus: float, evidence: float, freshness: float, feedback: float,
-             text: float, risks: Sequence[str]) -> str:
+             text: float, risks: Sequence[str], match_note: str = '') -> str:
     scope = draft.scope
     hits = []
     if scope.visibility == 'global':
@@ -369,7 +383,8 @@ def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
         provenance.append(f'证据路径 +{PROVENANCE_PATH_BONUS:.2f}')
     line_hit = ('为什么命中: 适用[' + ', '.join(hits) + '] 来源[' + (', '.join(provenance) or '无加分')
                 + f'] 证据[{draft.evidence_level} {evidence:.2f}] 时效[{freshness:.2f}] '
-                + f'反馈[{feedback:.2f}] 文本[{text:.2f}]')
+                + f'反馈[{feedback:.2f}] 文本[{text:.2f}]'
+                + (f' 匹配[{match_note}]' if match_note else ''))
 
     projects = ', '.join(draft.provenance.projects) or '未声明项目'
     sessions = draft.provenance.sessions
@@ -423,7 +438,7 @@ def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
 def relevance(memory: MemoryRecord, ctx: RetrievalContext,
               weights: ScoreWeights = DEFAULT_WEIGHTS, *, text: float = 0.0,
               applied: int = 0, feedback: float = 0.0, conflicts: int = 0,
-              risks: Sequence[str] = ()) -> ScoreBreakdown:
+              risks: Sequence[str] = (), match_note: str = '') -> ScoreBreakdown:
     """Five weighted dimensions minus the conflict penalty.
 
     `feedback` is the w4 calibration hook (P3's `apply_feedback_weight`);
@@ -445,7 +460,7 @@ def relevance(memory: MemoryRecord, ctx: RetrievalContext,
         conflict_penalty=penalty, admitted_by=derive_level(memory.draft),
         explanation=_explain(memory.draft, ctx, applicability=applicability, bonus=bonus,
                              evidence=evidence, freshness=freshness, feedback=feedback,
-                             text=text, risks=risks))
+                             text=text, risks=risks, match_note=match_note))
 
 
 def _split_snapshot(raw: str, *, owner: str, privacy: str) -> tuple[str, MemoryDraft]:
@@ -1375,6 +1390,7 @@ class MemoryStore:
                                technologies=frozenset(technologies), domains=frozenset(domains))
         tokens = list(dict.fromkeys(tokenize(query)))[:128]
         single_han = re.fullmatch(r'[\u3400-\u9fff\U00020000-\U0002fa1f]', query.strip()) is not None
+        channel_notes: dict[str, str] = {}
         with self._connection() as connection:
             if single_han:
                 rows = [(row['id'], 1.0) for row in connection.execute(
@@ -1384,12 +1400,48 @@ class MemoryStore:
                     "AND instr(json_extract(v.snapshot_json,'$.body') || json_extract(v.snapshot_json,'$.summary'),?)>0 "
                     'ORDER BY m.id', (query.strip(),))]
             elif tokens:
-                match = ' AND '.join('"' + token.replace('"', '""') + '"' for token in tokens)
-                rows = [(row['id'], float(row['rank'])) for row in connection.execute(
-                    'SELECT m.id,bm25(memory_fts) AS rank FROM memory_fts '
-                    'JOIN memories m ON m.id=memory_fts.memory_id '
-                    "WHERE memory_fts MATCH ? AND m.status IN ('active','conflicted') AND m.suppressed=0 "
-                    'ORDER BY bm25(memory_fts),m.id', (match,))]
+                def search_with(terms: list[str], operator: str = ' AND ',
+                                limit_rows: int | None = None) -> list[tuple[str, float]]:
+                    sql = ('SELECT m.id,bm25(memory_fts) AS rank FROM memory_fts '
+                           'JOIN memories m ON m.id=memory_fts.memory_id '
+                           "WHERE memory_fts MATCH ? AND m.status IN ('active','conflicted') "
+                           'AND m.suppressed=0 ORDER BY bm25(memory_fts),m.id')
+                    if limit_rows:
+                        sql += f' LIMIT {int(limit_rows)}'
+                    return [(row['id'], float(row['rank'])) for row in connection.execute(
+                        sql, (_fts_match(terms, operator),))]
+
+                rows = search_with(tokens)
+                wanted = min(limit or 100, 100)
+                if len(rows) < wanted and len(tokens) > 1:
+                    seen = {memory_id for memory_id, _ in rows}
+
+                    def absorb(found: list[tuple[str, float]], reason: str) -> None:
+                        added = [item for item in found if item[0] not in seen]
+                        if not added:
+                            return
+                        rows.extend(added)
+                        seen.update(memory_id for memory_id, _ in added)
+                        for memory_id, _rank in added:
+                            channel_notes[memory_id] = reason
+
+                    # A term that appears in no document can never satisfy an AND, so giving it up
+                    # costs nothing and buys everything. Measured: with a fixed drop budget, queries
+                    # carrying four or more unseen terms recovered 0% until the budget exceeded
+                    # their count.
+                    impossible = {token for token in tokens
+                                  if not _token_frequency(connection, token)}
+                    if impossible:
+                        keep = [token for token in tokens if token not in impossible]
+                        if keep:
+                            absorb(search_with(keep),
+                                   f'去掉 {len(impossible)} 个匹配不上的词')
+                    if len(rows) < wanted:
+                        # Last resort: the union of every term, so nothing that matches has to be
+                        # given up. Results are capped; the number of terms is not.
+                        absorb(search_with(tokens, ' OR ', WIDEN_RESULT_CAP),
+                               '词并集兜底：命中其中一个词即可')
+                    rows.sort(key=lambda item: (item[1], item[0]))
             else:
                 return []
             effective_limit = min(limit or 100, 100) if single_han else limit
@@ -1443,6 +1495,7 @@ class MemoryStore:
                 rescored.append((record, relevance(
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],
                     feedback=weights.get(record.id, DEFAULT_WEIGHT) - DEFAULT_WEIGHT,
+                    match_note=channel_notes.get(record.id, ''),
                     risks=[*extras.get(record.id, ()), *notes[record.id]])))
             rescored.sort(key=lambda item: (-item[1].total, item[0].id))
             return self._fit(rescored if effective_limit is None else rescored[:effective_limit],

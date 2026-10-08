@@ -207,7 +207,11 @@ def test_search_chinese_ascii_safety_and_limits(store):
     assert store.search('SQLite', project=None) == [record]
     assert len(store.search('数据库', project='other', limit=None)) == 13
     assert store.search('"* - : ()', project='demo') == []
-    assert store.search('SQLite OR missing', project='demo') == []
+    # 'or' stays an ordinary word (quoted in the match string), and a term no document
+    # contains is shed rather than dooming the query — but the hit has to say so.
+    assert store.search('SQLite OR missing', project='demo') == [record]
+    breakdown = store.search_scored('SQLite OR missing', project='demo')[0][1]
+    assert '匹配不上的词' in breakdown.explanation
     assert store.search('SQLite', project='demo', byte_budget=1) == []
 
 
