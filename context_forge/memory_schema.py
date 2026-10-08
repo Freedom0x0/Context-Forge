@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 CORE = """
 CREATE TABLE memories (
@@ -11,6 +11,7 @@ CREATE TABLE memories (
  host TEXT NOT NULL DEFAULT 'unknown',
  model TEXT NOT NULL DEFAULT '',
  prompt_version TEXT NOT NULL DEFAULT '',
+ evidence_level TEXT NOT NULL DEFAULT 'unknown',
  FOREIGN KEY(id,current_version) REFERENCES memory_versions(memory_id,version)
  DEFERRABLE INITIALLY DEFERRED
 );

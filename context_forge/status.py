@@ -39,6 +39,9 @@ def collect(store: JobStore) -> dict[str, int | str]:
     egress_kind, egress_destination = egress_surface(settings)
     return {
         "sessions": m["sessions"],
+        "episodes_last_by_host": ", ".join(
+            f"{host}={str(info['last_activity_at'])[:10]}({info['episodes']})"
+            for host, info in store.host_activity().items()),
         "episodes_inferred": m["episodes_inferred"],
         "egress": egress_destination if egress_kind != 'none' else "none",
         "episodes_by_host": ", ".join(f"{host}={count}" for host, count in store.host_counts().items()),

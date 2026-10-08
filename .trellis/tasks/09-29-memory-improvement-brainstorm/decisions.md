@@ -432,6 +432,15 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
       而这段逻辑先比时间戳、几乎不花钱；真正花钱的模型调用仍由同一条 pass 里既有的 `process_pending_finalizations` 驱动。
       附带修正：`--once` 现在会推进 inferred（非删除类维护），但**仍不跑 retention**。
 - **剩余第 1 层**：`09-30-per-db-instance-lock`（因 8b.2 实测更正，已从"正确性问题"降级为"卫生问题"）
+- ✅ `10-05-signal-aggregates` 完成（全量 297 passed，4 次变异验证）：`memories(host/model/prompt_version)` 派生缓存
+      + `Provenance.host`（默认 `'unknown'`，因为导入/手写记忆没有宿主）+ `signal_counts` 覆盖式月重算
+      + 剪枝边界由 `aggregated_through()` 派生、无聚合则不删 + 无 memory.db 时 `signals` 步**跳过而非记成功**。
+- ✅ `10-05-vote-report-buckets` 完成（全量 **304 passed**，4 次变异验证）：第四维度 `evidence_level`（schema 7）、
+      `bucket_report()` 三轴（host / model+prompt_version / evidence_level）、样本 <20 只给绝对数、
+      **分母含 suppressed/archived**（防"清理坏记忆来美化比率"）、`memory-report` 增 `buckets` 段；
+      `doctor.check_host_silence` + `status.episodes_last_by_host` 落地时间维度的沉默报警。**第 2 层四件全部完成。**
+- ⚠️ 实测缺口记务：**8a.3 的"解析失败次数"无采集点** —— `watcher.scan_once` 对 stat 失败 / 读不出 meta /
+      无完整行的文件是静默 `continue`。故当前沉默报警**只有时间维度**。已建 `10-08-scan-failure-counter`（P3）承接。
 - ✅ 第 2 层已建三件：`10-05-memory-mark-tool`、`10-05-signal-aggregates`、`10-05-vote-report-buckets`
 - ⚠️ `10-05-memory-mark-tool` 已完成（全量 **275 passed**），但**实测暴露隐式票只做了一半**：
       3 次 applied + 2 次 validated 都进了 `retrieval_events`，`weight` 仍是 `1.0 → 1.0`，因为

@@ -629,6 +629,7 @@ class MemoryStore:
                 ('host', "ALTER TABLE memories ADD COLUMN host TEXT NOT NULL DEFAULT 'unknown'"),
                 ('model', "ALTER TABLE memories ADD COLUMN model TEXT NOT NULL DEFAULT ''"),
                 ('prompt_version', "ALTER TABLE memories ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''"),
+                ('evidence_level', "ALTER TABLE memories ADD COLUMN evidence_level TEXT NOT NULL DEFAULT 'unknown'"),
             ):
                 if name not in memory_columns:
                     connection.execute(ddl)
@@ -637,9 +638,9 @@ class MemoryStore:
                 'SELECT m.id, v.snapshot_json FROM memories m '
                 'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version').fetchall():
                 value = MemoryDraft.model_validate_json(row['snapshot_json'])
-                connection.execute('UPDATE memories SET host=?,model=?,prompt_version=? WHERE id=?',
+                connection.execute('UPDATE memories SET host=?,model=?,prompt_version=?,evidence_level=? WHERE id=?',
                                    (value.provenance.host, value.model or '',
-                                    value.prompt_version or '', row['id']))
+                                    value.prompt_version or '', value.evidence_level, row['id']))
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -1000,6 +1001,50 @@ class MemoryStore:
                 'ORDER BY month DESC LIMIT ?) GROUP BY signal ORDER BY signal', (months,)).fetchall()
         return {row['signal']: row['events'] for row in rows}
 
+    BUCKET_AXES = (('host', 'host'),
+                   ('model+prompt_version', "model || '@' || prompt_version"),
+                   ('evidence_level', 'evidence_level'))
+
+    def bucket_report(self, months: int = 6, min_sample: int = 20) -> list[dict]:
+        """Opposition / support counts per reporting bucket, sample size included.
+
+        A rate is withheld below `min_sample`: "1 of 2 opposed" is noise, and printing a
+        percentage there invites acting on it. The denominator is every memory in the
+        bucket, suppressed or not, so shrinking the sample cannot make the rate look better.
+        """
+        rows: list[dict] = []
+        with self._connection() as connection:
+            window = [row['month'] for row in connection.execute(
+                'SELECT DISTINCT month FROM signal_counts ORDER BY month DESC LIMIT ?', (months,))]
+            if not window:
+                return rows
+            placeholders = ','.join('?' * len(window))
+            for axis, expression in self.BUCKET_AXES:
+                grouped = connection.execute(
+                    f'SELECT {expression} AS bucket, COUNT(*) AS memories, '
+                    'SUM(CASE WHEN signals.against_events > 0 THEN 1 ELSE 0 END) AS against_memories, '
+                    'COALESCE(SUM(signals.against_events), 0) AS against_events, '
+                    'COALESCE(SUM(signals.support_events), 0) AS support_events '
+                    'FROM memories LEFT JOIN ('
+                    '  SELECT memory_id, '
+                    "    SUM(CASE WHEN signal LIKE 'vote:%' THEN events ELSE 0 END) AS against_events, "
+                    "    SUM(CASE WHEN signal IN ('stage:applied','stage:validated') THEN events ELSE 0 END) "
+                    '    AS support_events '
+                    f'  FROM signal_counts WHERE month IN ({placeholders}) GROUP BY memory_id'
+                    ') AS signals ON signals.memory_id = memories.id '
+                    'GROUP BY bucket ORDER BY bucket', (*window,)).fetchall()
+                for row in grouped:
+                    memories = row['memories']
+                    enough = memories >= min_sample
+                    rows.append({'axis': axis, 'bucket': row['bucket'], 'memories': memories,
+                                 'against_memories': row['against_memories'] or 0,
+                                 'against_events': row['against_events'],
+                                 'support_events': row['support_events'],
+                                 'against_rate': (round((row['against_memories'] or 0) / memories, 6)
+                                                 if enough and memories else None),
+                                 'note': '' if enough else f'样本不足（<{min_sample}），只给绝对数'})
+        return rows
+
     def record_feedback(self, memory_id: str, *, outcome: str, idempotency_key: str,
                         note: str = '', actor: Actor = 'human') -> MemoryRecord:
         """Record human / attributable negative feedback on a memory.
@@ -1106,18 +1151,19 @@ class MemoryStore:
                 raise SourceConflict(f'source identity {source.identity!r} already has different content')
             connection.execute('INSERT OR IGNORE INTO memory_sources VALUES (?,?,?,?)',
                                (source.identity, digest(source.excerpt), source_json, timestamp))
+        dimensions = (draft.provenance.host, draft.model or '', draft.prompt_version or '',
+                      draft.evidence_level)
         if previous is None:
             connection.execute('INSERT INTO memories(id,kind,current_version,status,user_owned,suppressed,'
-                               'host,model,prompt_version) VALUES (?,?,?,?,?,?,?,?,?)',
-                               (memory_id, draft.kind, version, draft.status, draft.user_owned, draft.suppressed,
-                                draft.provenance.host, draft.model or '', draft.prompt_version or ''))
+                               'host,model,prompt_version,evidence_level) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                               (memory_id, draft.kind, version, draft.status, draft.user_owned,
+                                draft.suppressed, *dimensions))
         else:
             changed = connection.execute('UPDATE memories SET current_version=?,status=?,user_owned=?,suppressed=?, '
-                                         'host=?,model=?,prompt_version=? '
+                                         'host=?,model=?,prompt_version=?,evidence_level=? '
                                          'WHERE id=? AND current_version=?',
                                          (version, draft.status, draft.user_owned, draft.suppressed,
-                                          draft.provenance.host, draft.model or '', draft.prompt_version or '',
-                                          memory_id, expected_version))
+                                          *dimensions, memory_id, expected_version))
             if changed.rowcount != 1:
                 raise VersionConflict(memory_id)
         connection.execute(

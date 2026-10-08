@@ -21,6 +21,7 @@ class EffectivenessReport:
     # Roll-up coverage from signal_counts, so the reader knows whether these numbers came
     # from raw events that are still kept or from an aggregate that outlives them.
     signals: dict[str, object] = field(default_factory=dict)
+    buckets: tuple[dict, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -29,6 +30,7 @@ class EffectivenessReport:
             'tidy_candidates': [_record_view(record) for record in self.tidy_candidates],
             'exposure_vs_adoption': self.exposure_vs_adoption,
             'signals': self.signals,
+            'buckets': list(self.buckets),
         }
 
 
@@ -126,4 +128,5 @@ class MemoryEffectiveness:
             signals={'aggregated_through': self.store.aggregated_through(),
                      'window_months': window,
                      'totals': self.store.signal_totals(window)},
+            buckets=tuple(self.store.bucket_report(months=window)),
         )

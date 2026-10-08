@@ -178,6 +178,33 @@ def check_egress() -> tuple[str, bool, str]:
     return ('egress', True, 'no model transport; transcripts never leave this machine')
 
 
+def check_host_silence(days: int = 7) -> tuple[str, bool, str]:
+    """A host whose transcripts stopped being collected has probably broken (8a.3)."""
+    from .config import runtime_dir
+
+    path = runtime_dir() / 'queue.db'
+    if not path.exists():
+        return ('host-silence', True, 'queue not initialised')
+    activity = JobStore(path).host_activity()
+    if not activity:
+        return ('host-silence', True, 'no episodes collected for any host yet')
+    now = _now()
+    problems: list[str] = []
+    details: list[str] = []
+    for host, info in activity.items():
+        try:
+            age = (now - datetime.fromisoformat(str(info['last_activity_at']))).days
+        except ValueError:
+            problems.append(f'{host}: unreadable activity timestamp')
+            continue
+        details.append(f'{host} last collected {age}d ago ({info["episodes"]} episodes)')
+        if age > days:
+            problems.append(f'{host} silent for {age}d (> {days}d)')
+    if problems:
+        return ('host-silence', False, '; '.join(problems))
+    return ('host-silence', True, '; '.join(details))
+
+
 def check_lifecycle_hooks() -> tuple[str, bool, str]:
     from .install_hook import status
     info = status()
@@ -366,6 +393,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_watcher(),
         check_scheduled(),
         check_egress(),
+        check_host_silence(),
         check_memory(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,

@@ -117,4 +117,4 @@ def test_egress_and_scheduled_are_wired_into_doctor(isolated, monkeypatch):
 
     rows = {name for name, _ok, _detail in doctor.run_all()}
 
-    assert {'egress', 'scheduled'} <= rows
+    assert {'egress', 'scheduled', 'host-silence'} <= rows

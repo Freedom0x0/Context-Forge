@@ -95,7 +95,7 @@ def test_v4_database_gains_a_backfilled_risk_column(tmp_path: Path):
 
     report = MemoryStore.migrate(path, dry_run=False)
 
-    assert report['to'] == 6
+    assert report['to'] == 7
     with sqlite3.connect(path) as connection:
         assert dict(connection.execute(
             'SELECT memory_id, risk FROM memory_versions').fetchall()) == {

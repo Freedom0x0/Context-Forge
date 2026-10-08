@@ -205,6 +205,13 @@ class JobStore:
         return {row["host"]: row["n"] for row in self.db.execute(
             "SELECT host, COUNT(*) AS n FROM session_episodes GROUP BY host ORDER BY host")}
 
+    def host_activity(self) -> dict[str, dict[str, object]]:
+        """Latest collection time per host: a host that stops appearing has broken."""
+        return {row['host']: {'episodes': row['episodes'], 'last_activity_at': row['last_activity']}
+                for row in self.db.execute(
+                    'SELECT host, COUNT(*) AS episodes, MAX(last_activity_at) AS last_activity '
+                    'FROM session_episodes GROUP BY host ORDER BY host')}
+
     def scheduled_due(self, step: str, now: datetime, period_seconds: int) -> bool:
         row = self.db.execute(
             "SELECT last_success_at FROM scheduled_runs WHERE step=?", (step,)).fetchone()
