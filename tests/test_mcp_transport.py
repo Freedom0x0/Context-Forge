@@ -176,3 +176,41 @@ def test_memory_mark_records_host_votes_over_stdio(tmp_path):
         _stop_server(proc, sink)
 
     assert rows == [("applied", "req-1")]                   # exactly one recorded mark
+
+
+def test_memory_apply_derives_attribution_over_stdio(tmp_path):
+    """`confirmed` must come from evidence plus a validated report, not from the host's word."""
+    pytest.importorskip(
+        "mcp",
+        reason="mcp package not installed; run the transport e2e with "
+               "`pip install 'context-forge[mcp]'`",
+    )
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _memory(runtime)
+    arguments = {"memory_id": "e2e-memory", "task_id": "task-1",
+                 "action": "followed the rule", "expected_outcome": "deploy passed",
+                 "actual_outcome": "deploy passed", "validation_source_ids": "e2e:tool:1"}
+
+    proc, sink, _init = _start_server(runtime)
+    try:
+        listed = _call(proc, sink, 2, "tools/list", {})
+        assert "context_forge_memory_apply" in {t["name"] for t in listed["result"]["tools"]}
+
+        claimed_early = _tool(proc, sink, 3, "context_forge_memory_apply", {
+            **arguments, "request_id": "req-never-validated"})
+        assert claimed_early["attribution"] == "plausible"
+        assert "no validated report" in claimed_early["withheld_reason"]
+
+        _tool(proc, sink, 4, "context_forge_memory_mark", {
+            "memory_id": "e2e-memory", "request_id": "req-2", "stage": "applied"})
+        marked = _tool(proc, sink, 5, "context_forge_memory_mark", {
+            "memory_id": "e2e-memory", "request_id": "req-2", "stage": "validated"})
+        applied = _tool(proc, sink, 6, "context_forge_memory_apply", {
+            **arguments, "request_id": "req-2"})
+    finally:
+        _stop_server(proc, sink)
+
+    assert applied["attribution"] == "confirmed" and applied["withheld_reason"] == ""
+    assert applied["weight"] != marked["weight"], (marked["weight"], applied["weight"])

@@ -133,6 +133,30 @@ def create_server():
                 'request_id': request_id, 'weight': store.weight(record.id)}
 
     @server.tool()
+    def context_forge_memory_apply(memory_id: str, task_id: str, action: str,
+                                   expected_outcome: str, request_id: str,
+                                   version: int = 0, actual_outcome: str = "",
+                                   validation_source_ids: str = "") -> dict:
+        """Report that acting on a memory produced the outcome it promised.
+
+        Attribution is derived here, never taken from the caller: `confirmed` needs a
+        reported outcome, evidence identities belonging to that version, and an earlier
+        `validated` mark under the same request_id. Anything weaker is stored as
+        `plausible` and does not move weight — `withheld_reason` in the reply says which
+        condition was missing.
+        """
+        application, withheld = _memory().record_host_application(
+            memory_id=memory_id, task_id=task_id, action=action,
+            expected_outcome=expected_outcome, request_id=request_id,
+            version=version or None, actual_outcome=actual_outcome,
+            validation_source_ids=_tags(validation_source_ids),
+        )
+        return {'application_id': application.application_id,
+                'memory_id': application.memory_id, 'version': application.memory_version,
+                'attribution': application.attribution, 'withheld_reason': withheld,
+                'weight': _memory().weight(application.memory_id)}
+
+    @server.tool()
     def context_forge_memory_report(similarity_threshold: float = 0.6) -> dict:
         from .memory_merge import MemoryMerge
         return MemoryMerge(_memory()).report(similarity_threshold=similarity_threshold).as_dict()

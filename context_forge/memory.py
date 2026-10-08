@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -868,6 +869,50 @@ class MemoryStore:
             connection.execute('INSERT INTO memory_applications VALUES (?,?,?,?,?,?,?,?,?,?)',
                                (*values, now()))
             self._recompute_weight(connection, application.memory_id)
+
+    def record_host_application(self, *, memory_id: str, task_id: str, action: str,
+                                expected_outcome: str, request_id: str,
+                                version: int | None = None, actual_outcome: str = '',
+                                validation_source_ids: Sequence[str] = ()) -> tuple[MemoryApplication, str]:
+        """Record one host-reported application with attribution derived, never declared.
+
+        Returns `(application, withheld_reason)`. `confirmed` needs three things a host
+        cannot grant itself: a reported outcome, evidence identities that belong to this
+        version, and an earlier `validated` report under the same request. Without the
+        third one the claim is only self-assertion, so it lands as `plausible` and does
+        not move weight.
+        """
+        if not task_id or not action or not expected_outcome or not request_id:
+            raise ValueError('task_id, action, expected_outcome and request_id are required')
+        record = self.get(memory_id, version)
+        if record is None:
+            raise KeyError((memory_id, version))
+        with self._connection() as connection:
+            validated = connection.execute(
+                "SELECT 1 FROM retrieval_events WHERE request_id=? AND memory_id=? AND version=? "
+                "AND stage='validated' LIMIT 1", (request_id, record.id, record.version)).fetchone()
+        if not actual_outcome:
+            withheld = 'no outcome reported yet'
+        elif not tuple(validation_source_ids):
+            withheld = 'no evidence identities named'
+        elif not validated:
+            withheld = f'no validated report under request {request_id}'
+        else:
+            withheld = ''
+        attribution = 'confirmed' if not withheld else ('plausible' if actual_outcome else 'unknown')
+        application = MemoryApplication(
+            # The attribution is part of the identity so a later, better-evidenced report
+            # strengthens the record instead of colliding with the weaker one. Weight only
+            # asks whether a confirmed row exists, so the earlier row cannot double-count.
+            application_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f'context-forge:application:'
+                                                               f'{task_id}:{record.id}:{record.version}'
+                                                               f':{attribution}')),
+            task_id=task_id, memory_id=record.id, memory_version=record.version,
+            action=action, expected_outcome=expected_outcome,
+            actual_outcome=actual_outcome or None,
+            validation_source_ids=tuple(validation_source_ids), attribution=attribution)
+        self.record_application(application)
+        return application, withheld
 
     def applications(self, memory_id: str | None = None, version: int | None = None) -> list[dict]:
         with self._connection() as connection:

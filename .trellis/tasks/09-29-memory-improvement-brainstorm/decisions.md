@@ -439,6 +439,12 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
       而 `record_application` 在生产代码里**零调用者**。三条出路（A 补 `memory_apply` 且禁止宿主自封 confirmed /
       B 放宽计票门槛（等于让宿主自刷权重，原设计已否）/ C 承认 mark 只是观测信号、权重靠明票）**待用户选定**。
       选定前，第 2 层的"投票驱动自动档"这条依赖是悬空的。
+- ✅ F5 的 A 方案已实施（`10-05-memory-apply-tool`，全量 **288 passed**）：`record_host_application` 服务端派生
+      attribution（`confirmed` 需"有结果 + 指得出该版本的证据来源 + 同 request_id 上已有 validated 回报"三件齐备），
+      宿主不能自封；隐式票现在**真的会移动权重**（实测断言 `weight != 1.0`）。
+      实施中发现并修掉一个设计缺陷：`application_id` 原方案只由 `(task_id, memory_id, version)` 派生，
+      会让"先报 plausible、补证据后再报 confirmed"的正常流程撞 `IdempotencyConflict`（e2e 复现）；
+      改为把 `attribution` 纳入 id 种子，弱记录留档、强记录另成一行，权重只看是否存在 confirmed 行故不叠算。
 - ✅ 第 0 层实施进度：`09-29-host-dimension` 完成（全量 234 passed，列序守卫变异验证 14 failed）；
       `09-29-risk-field-classifier` 完成（全量 251 passed，kind 门与 migrate 回填各做过变异验证）；
       `09-29-scheduled-run-ledger` 完成（全量 258 passed，含新增 7 例）。**已提交** `9b66941`（代码）、
