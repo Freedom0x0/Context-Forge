@@ -46,7 +46,7 @@ class FinalizationService:
             self._validate_output(output, episode.session_id, {item.id for item in existing})
             extraction_json = output.model_dump_json()
             operations = self._plan(receipt.finalization_id, output, episode.session_id,
-                                    episode.project)
+                                    episode.project, episode.host)
             receipt = self.queue.freeze_finalization(finalization_id, extraction_json, operations)
         operations = self.queue.finalization_operations(finalization_id)
         results: list[str] = []
@@ -95,7 +95,7 @@ class FinalizationService:
                     raise ValueError("relation evidence must reference candidate sources")
 
     def _plan(self, finalization_id: str, output: FinalizationOutput,
-              session_id: str, project: str | None) -> list[dict]:
+              session_id: str, project: str | None, host: str = 'unknown') -> list[dict]:
         operations = []
         for ordinal, candidate in enumerate(output.candidates):
             draft = candidate.draft
@@ -103,7 +103,7 @@ class FinalizationService:
             sessions = tuple(sorted(set(draft.provenance.sessions) | {session_id}))
             draft = draft.model_copy(update={
                 "provenance": Provenance(projects=projects, sessions=sessions,
-                                           paths=draft.provenance.paths),
+                                           paths=draft.provenance.paths, host=host),
             })
             exact = self.memory.find_exact(canonical_fingerprint(draft))
             memory_id = exact.id if exact else str(uuid.uuid5(uuid.NAMESPACE_URL,

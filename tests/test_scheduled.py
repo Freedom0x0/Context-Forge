@@ -125,3 +125,35 @@ def test_dropped_ledger_table_is_recreated_on_open(tmp_path: Path):
     store.record_scheduled_success('retention', NOW)
 
     assert [row['step'] for row in store.scheduled_runs()] == ['retention']
+
+
+def test_signals_step_is_skipped_without_a_memory_database(tmp_path: Path):
+    """Skipping must not be recorded as success, or the ledger would lie."""
+    store = JobStore(tmp_path / 'queue.db')
+
+    assert 'signals' not in scheduled.run_due(store, NOW)
+    assert 'signals' not in {row['step'] for row in store.scheduled_runs()}
+
+
+def test_signals_step_aggregates_and_prunes_with_a_memory_database(tmp_path: Path, monkeypatch):
+    from context_forge.memory import MemoryStore
+    from context_forge.memory_models import MemoryDraft, Provenance, Source
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    body = 'cache keys must include the tenant id'
+    memory = MemoryStore.initialize(tmp_path / 'memory.db')
+    memory.put('m1', MemoryDraft(body=body, status='active', role='claim',
+                                 provenance=Provenance(projects=('demo',), sessions=('s1',)),
+                                 sources=(Source(identity='m1:tool:1', kind='tool', excerpt=body),)),
+               expected_version=0, idempotency_key='put-1', actor='tool', reason='fixture')
+    from datetime import datetime, timezone
+    moment = datetime.now(timezone.utc).isoformat()
+    memory.record_retrieval('m1', 1, request_id='req-1', stage='applied',
+                            idempotency_key=f'req-1:applied:{moment}')
+    store = JobStore(tmp_path / 'queue.db')
+
+    ran = scheduled.run_due(store, NOW, memory_store=memory)
+
+    assert 'signals' in ran
+    assert memory.signal_totals() == {'stage:applied': 1}
+    assert memory.aggregated_through() == scheduled._month_keys()[0]

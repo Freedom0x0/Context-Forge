@@ -13,37 +13,76 @@ would be re-applied every day.
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Callable
 
+from .memory import MemoryStore
 from .queue import JobStore
 
 DAILY_SECONDS = 86400
 
 
-def _retention(store: JobStore) -> None:
+@dataclass(frozen=True)
+class Context:
+    """What a step may touch. Steps get the queue always and memory when it exists."""
+
+    queue: JobStore
+    memory: MemoryStore | None = None
+
+
+def _retention(ctx: Context) -> None:
     from .config import load_settings
 
     settings = load_settings()
     days = settings.retention_days if settings else 30
-    store.retention_apply(days, dry_run=False)
+    ctx.queue.retention_apply(days, dry_run=False)
 
 
-STEPS: dict[str, Callable[[JobStore], None]] = {'retention': _retention}
+def _month_keys(today: date | None = None) -> tuple[str, str]:
+    """Current and previous month, as 'YYYY-MM'."""
+    today = today or date.today()
+    previous = (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+    return today.strftime('%Y-%m'), previous
+
+
+def _signals(ctx: Context) -> None:
+    """Roll the aggregate forward, then let it license pruning raw events.
+
+    Recomputing two whole months is cheaper than tracking deltas and is idempotent,
+    so a crash mid-step is fixed by the next run rather than leaving half-counted data.
+    """
+    if ctx.memory is None:
+        return
+    for month in _month_keys():
+        ctx.memory.aggregate_signals(month)
+    ctx.memory.prune_retrieval_events()
+
+
+STEPS: dict[str, Callable[[Context], None]] = {'retention': _retention, 'signals': _signals}
+
+# Steps that have nothing to do without the memory database. Skipping is not the same as
+# succeeding: recording `signals` as run while no memory.db existed would make a silent
+# gap look like a healthy ledger.
+MEMORY_STEPS = frozenset({'signals'})
 
 
 def run_due(store: JobStore, now: datetime | None = None, *,
             period_seconds: int = DAILY_SECONDS,
-            steps: dict[str, Callable[[JobStore], None]] | None = None) -> list[str]:
+            steps: dict[str, Callable[[Context], None]] | None = None,
+            memory_store: MemoryStore | None = None) -> list[str]:
     """Run every overdue step once and return the names that succeeded."""
+    ctx = Context(store, memory_store)
     steps = steps if steps is not None else STEPS
     moment = now or datetime.now().astimezone()
     executed: list[str] = []
     for name, step in steps.items():
+        if name in MEMORY_STEPS and memory_store is None:
+            continue
         if not store.scheduled_due(name, moment, period_seconds):
             continue
         try:
-            step(store)
+            step(ctx)
         except Exception as exc:  # noqa: BLE001 - one step must not stop the rest
             store.record_scheduled_failure(name, moment, f'{type(exc).__name__}: {exc}')
             print(f'[scheduled] {name} failed: {type(exc).__name__}: {exc}')

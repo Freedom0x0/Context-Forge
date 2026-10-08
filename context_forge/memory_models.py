@@ -61,6 +61,10 @@ class Provenance(MemoryModel):
     projects: tuple[str, ...] = ()
     sessions: tuple[str, ...] = ()
     paths: tuple[str, ...] = ()
+    # Which agent produced the memory. 'unknown' rather than a host name: imported and
+    # hand-written records have no agent, and blaming Claude Code for them would poison
+    # the very bucket the report exists to read.
+    host: str = 'unknown'
 
 
 class ApplicabilityScope(MemoryModel):

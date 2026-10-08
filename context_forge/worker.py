@@ -129,7 +129,9 @@ def process_session(store: JobStore, vault: Vault,
                 from .memory_lifecycle import MemoryLifecycle
                 from .provider_http import PROMPT_VERSION
                 model = getattr(gateway, "model", None) or getattr(gateway, "name", None)
-                MemoryLifecycle(memory_store, model=model, prompt_version=PROMPT_VERSION).publish_session(
+                episode = store.latest_episode(session_id)
+                MemoryLifecycle(memory_store, model=model, prompt_version=PROMPT_VERSION,
+                                host=episode.host if episode else 'unknown').publish_session(
                     artifacts, session_id=session_id, project=project,
                     source_reference=transcript_path or "",
                 )

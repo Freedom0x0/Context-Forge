@@ -284,5 +284,6 @@ def test_cli_exports_the_three_reports(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload) == {"applications", "anomaly_candidates", "tidy_candidates",
-                            "exposure_vs_adoption"}
+                            "exposure_vs_adoption", "signals"}
+    assert set(payload["signals"]) == {"aggregated_through", "window_months", "totals"}
     assert payload["exposure_vs_adoption"]["adoption"] == 0

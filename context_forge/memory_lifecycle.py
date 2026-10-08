@@ -157,15 +157,17 @@ class MemoryLifecycle:
     """Application service for automatic proposals and human corrections."""
 
     def __init__(self, store: MemoryStore, *, model: str | None = None,
-                 prompt_version: str | None = None) -> None:
+                 prompt_version: str | None = None, host: str = 'unknown') -> None:
         self.store = store
         self.model = model
         self.prompt_version = prompt_version
+        self.host = host
 
     def candidates(self, artifacts: SessionArtifacts, *, session_id: str,
                    project: str | None = None, source_reference: str = "") -> tuple[Candidate, ...]:
         sources = self._sources(artifacts, session_id, source_reference)
-        provenance = Provenance(projects=(project,) if project else (), sessions=(session_id,))
+        provenance = Provenance(projects=(project,) if project else (), sessions=(session_id,),
+                                host=self.host)
         result: list[Candidate] = []
         knowledge_id = None
         if artifacts.knowledge and artifacts.should_save:

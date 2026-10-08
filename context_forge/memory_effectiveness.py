@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .memory import MemoryStore
@@ -18,6 +18,9 @@ class EffectivenessReport:
     anomaly_candidates: tuple[MemoryRecord, ...]
     tidy_candidates: tuple[MemoryRecord, ...]
     exposure_vs_adoption: dict[str, float]
+    # Roll-up coverage from signal_counts, so the reader knows whether these numbers came
+    # from raw events that are still kept or from an aggregate that outlives them.
+    signals: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -25,6 +28,7 @@ class EffectivenessReport:
             'anomaly_candidates': [_record_view(record) for record in self.anomaly_candidates],
             'tidy_candidates': [_record_view(record) for record in self.tidy_candidates],
             'exposure_vs_adoption': self.exposure_vs_adoption,
+            'signals': self.signals,
         }
 
 
@@ -113,9 +117,13 @@ class MemoryEffectiveness:
                     **self.application_report(record.id),
                 })
         ratio = adoption / exposure if exposure else 0.0
+        window = max(1, -(-days // 30))                # the day window expressed in months
         return EffectivenessReport(
             applications=tuple(applications),
             anomaly_candidates=tuple(self.anomaly_candidates()),
             tidy_candidates=tuple(self.tidy_candidates(days)),
             exposure_vs_adoption={'exposure': exposure, 'adoption': adoption, 'ratio': round(ratio, 6)},
+            signals={'aggregated_through': self.store.aggregated_through(),
+                     'window_months': window,
+                     'totals': self.store.signal_totals(window)},
         )

@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 CORE = """
 CREATE TABLE memories (
@@ -8,6 +8,9 @@ CREATE TABLE memories (
  user_owned INTEGER NOT NULL CHECK(user_owned IN (0,1)),
  suppressed INTEGER NOT NULL CHECK(suppressed IN (0,1)),
  weight REAL NOT NULL DEFAULT 1.0,
+ host TEXT NOT NULL DEFAULT 'unknown',
+ model TEXT NOT NULL DEFAULT '',
+ prompt_version TEXT NOT NULL DEFAULT '',
  FOREIGN KEY(id,current_version) REFERENCES memory_versions(memory_id,version)
  DEFERRABLE INITIALLY DEFERRED
 );
@@ -57,6 +60,11 @@ CREATE TABLE retrieval_events (
  memory_id TEXT NOT NULL, version INTEGER NOT NULL, session_id TEXT,
  explanation_json TEXT NOT NULL CHECK(json_valid(explanation_json)), created_at TEXT NOT NULL,
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
+);
+CREATE TABLE signal_counts (
+ month TEXT NOT NULL, memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ signal TEXT NOT NULL, events INTEGER NOT NULL,
+ PRIMARY KEY(month,memory_id,version,signal)
 );
 CREATE TABLE memory_applications (
  application_id TEXT PRIMARY KEY,
@@ -164,3 +172,11 @@ CREATE TABLE IF NOT EXISTS precipitation_migrations (
 """
 
 SCHEMA = CORE + PROJECTIONS
+
+V6 = """
+CREATE TABLE IF NOT EXISTS signal_counts (
+ month TEXT NOT NULL, memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ signal TEXT NOT NULL, events INTEGER NOT NULL,
+ PRIMARY KEY(month,memory_id,version,signal)
+);
+"""

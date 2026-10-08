@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import exp, log
 from pathlib import Path
 from typing import Iterator, Literal, NamedTuple, Sequence
@@ -18,7 +18,7 @@ from .memory_models import (
     DEFAULT_OWNER, Actor, Level, MemoryApplication, MemoryDraft, MemoryRecord,
     Relation, Scope, derive_level, split_legacy_scopes,
 )
-from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4
+from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6
 from .risk import risk_of
 from .rules import glob_match
 
@@ -562,7 +562,7 @@ class MemoryStore:
         if version == SCHEMA_VERSION:
             report['unchanged'] = -1
             return report
-        if version not in (1, 2, 3, 4):
+        if version not in (1, 2, 3, 4, 5):
             raise MemoryStoreError(f'cannot migrate memory schema {version} to {SCHEMA_VERSION}')
         if not dry_run:
             report['backup'] = str(cls._online_backup(path))
@@ -624,6 +624,22 @@ class MemoryStore:
                                    (canonical_fingerprint(value), risk_of(value),
                                     row['memory_id'], row['version']))
             _exec_script(connection, V4)
+            memory_columns = {row[1] for row in connection.execute('PRAGMA table_info(memories)')}
+            for name, ddl in (
+                ('host', "ALTER TABLE memories ADD COLUMN host TEXT NOT NULL DEFAULT 'unknown'"),
+                ('model', "ALTER TABLE memories ADD COLUMN model TEXT NOT NULL DEFAULT ''"),
+                ('prompt_version', "ALTER TABLE memories ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in memory_columns:
+                    connection.execute(ddl)
+            _exec_script(connection, V6)
+            for row in connection.execute(
+                'SELECT m.id, v.snapshot_json FROM memories m '
+                'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version').fetchall():
+                value = MemoryDraft.model_validate_json(row['snapshot_json'])
+                connection.execute('UPDATE memories SET host=?,model=?,prompt_version=? WHERE id=?',
+                                   (value.provenance.host, value.model or '',
+                                    value.prompt_version or '', row['id']))
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -926,6 +942,64 @@ class MemoryStore:
                                           'ORDER BY application_id', (memory_id, version))
             return [dict(row) for row in rows]
 
+    def aggregate_signals(self, month: str) -> dict:
+        """Rebuild one month of `signal_counts` from the raw events.
+
+        Overwrite, never delta: that is what makes the daily step safe to re-run after a
+        crash and what eventually lets raw events be pruned. `month` is 'YYYY-MM', taken
+        from the event timestamps.
+        """
+        counts: dict[tuple[str, int, str], int] = {}
+        with self._connection() as connection:
+            for row in connection.execute(
+                    'SELECT memory_id,version,stage FROM retrieval_events '
+                    "WHERE substr(created_at,1,7)=?", (month,)):
+                key = (row['memory_id'], row['version'], f"stage:{row['stage']}")
+                counts[key] = counts.get(key, 0) + 1
+            for row in connection.execute(
+                    "SELECT memory_id,version,payload_json FROM memory_events "
+                    "WHERE kind='feedback' AND substr(created_at,1,7)=?", (month,)):
+                outcome = json.loads(row['payload_json']).get('outcome', 'unknown')
+                key = (row['memory_id'], row['version'], f'vote:{outcome}')
+                counts[key] = counts.get(key, 0) + 1
+        with self._connection(write=True) as connection:
+            connection.execute('DELETE FROM signal_counts WHERE month=?', (month,))
+            connection.executemany('INSERT INTO signal_counts VALUES (?,?,?,?,?)',
+                                   [(month, memory_id, version, signal, events)
+                                    for (memory_id, version, signal), events in sorted(counts.items())])
+        return {'month': month, 'rows': len(counts)}
+
+    def aggregated_through(self) -> str | None:
+        """Latest month the aggregate covers — the only thing that makes pruning safe."""
+        with self._connection() as connection:
+            row = connection.execute('SELECT MAX(month) AS month FROM signal_counts').fetchone()
+        return row['month'] if row and row['month'] else None
+
+    def prune_retrieval_events(self, retention_days: int = 180) -> int:
+        """Drop raw events only once an aggregate covers their month *and* retention expired.
+
+        With no aggregate rows at all this deletes nothing: the summary must exist before
+        the detail it stands in for goes away.
+        """
+        covered = self.aggregated_through()
+        if covered is None:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()[:7]
+        with self._connection(write=True) as connection:
+            changed = connection.execute(
+                'DELETE FROM retrieval_events WHERE substr(created_at,1,7) <= ? '
+                'AND substr(created_at,1,7) < ?', (covered, cutoff))
+            return changed.rowcount
+
+    def signal_totals(self, months: int = 12) -> dict[str, int]:
+        """Aggregate event counts per signal over the most recent months, newest included."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                'SELECT signal, SUM(events) AS events FROM signal_counts '
+                'WHERE month IN (SELECT DISTINCT month FROM signal_counts '
+                'ORDER BY month DESC LIMIT ?) GROUP BY signal ORDER BY signal', (months,)).fetchall()
+        return {row['signal']: row['events'] for row in rows}
+
     def record_feedback(self, memory_id: str, *, outcome: str, idempotency_key: str,
                         note: str = '', actor: Actor = 'human') -> MemoryRecord:
         """Record human / attributable negative feedback on a memory.
@@ -1033,13 +1107,17 @@ class MemoryStore:
             connection.execute('INSERT OR IGNORE INTO memory_sources VALUES (?,?,?,?)',
                                (source.identity, digest(source.excerpt), source_json, timestamp))
         if previous is None:
-            connection.execute('INSERT INTO memories(id,kind,current_version,status,user_owned,suppressed) '
-                               'VALUES (?,?,?,?,?,?)',
-                               (memory_id, draft.kind, version, draft.status, draft.user_owned, draft.suppressed))
+            connection.execute('INSERT INTO memories(id,kind,current_version,status,user_owned,suppressed,'
+                               'host,model,prompt_version) VALUES (?,?,?,?,?,?,?,?,?)',
+                               (memory_id, draft.kind, version, draft.status, draft.user_owned, draft.suppressed,
+                                draft.provenance.host, draft.model or '', draft.prompt_version or ''))
         else:
-            changed = connection.execute('UPDATE memories SET current_version=?,status=?,user_owned=?,suppressed=? '
+            changed = connection.execute('UPDATE memories SET current_version=?,status=?,user_owned=?,suppressed=?, '
+                                         'host=?,model=?,prompt_version=? '
                                          'WHERE id=? AND current_version=?',
-                                         (version, draft.status, draft.user_owned, draft.suppressed, memory_id, expected_version))
+                                         (version, draft.status, draft.user_owned, draft.suppressed,
+                                          draft.provenance.host, draft.model or '', draft.prompt_version or '',
+                                          memory_id, expected_version))
             if changed.rowcount != 1:
                 raise VersionConflict(memory_id)
         connection.execute(
