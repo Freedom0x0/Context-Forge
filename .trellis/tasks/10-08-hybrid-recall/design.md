@@ -31,8 +31,10 @@
 ## 3. 数据布局
 
 - `memory_versions` 加两列：`embedding_model TEXT NOT NULL DEFAULT ''`、`embedding BLOB`。
-  BLOB = float32 小端打包（`array('f')` / `struct`）。**维度不写进 BLOB**：由 `embedding_model` 决定；
-  解包时长度与该模型登记的维度不符 → 视为失效行（跳过 + 计数），不猜。
+  BLOB = float32 小端打包（`array('f')` / `struct`）。**维度不写进 BLOB**：由配置的
+  `embedding_model` + `embedding_dimensions` 决定（2026-10-08 补：Voyage-4 同一模型可选 256/512/1024/2048，
+  只靠模型名推不出维度）；
+  解包时长度与登记的维度不符 → 视为失效行（跳过 + 计数），不猜。
 - 两列是**派生缓存**，权威仍是 `snapshot_json`（符合 spec：不为已有快照数据造第二权威）。
 - 迁移走显式 `MemoryStore.migrate()`：**`SCHEMA_VERSION` 7 → 8** + 在线备份 + `dry_run` 默认，
   普通连接打开旧库仍然 raise（照 risk 列那次的形状，勿在连接时隐式迁移）。
@@ -109,6 +111,7 @@ embedding 端点，只会得到一个 404 或者打错端点。单开三项，�
 | `embedding_base_url` | OpenAI 兼容的 `/v1/embeddings` 所在基址 | 空 = 语义通道关闭 |
 | `embedding_api_key` | 该基址的密钥，**只走环境变量或本地配置，不入库、不进 Git**（同提取通路那条约束）；本地 Ollama 可空 | 空 |
 | `embedding_model` | 模型名，同时决定向量维度 | 空 |
+| `embedding_dimensions` | **请求的维度**（Voyage-4 可选 256/512/1024/2048）——同模型可选维度，所以维度不能只由模型名推出；§3 的 BLOB 长度失效校验需要它做对照 | 空 = 用模型默认 |
 
 按这个形状就能一套代码四种落地（详见 §10 的已验证端点）：OpenAI 远端、本地 Ollama（**不出境**）、
 Voyage、以及任何 OpenAI 兼容网关。**差异只允许出现在请求体的附加字段上**（如 Voyage 的 `input_type`），
@@ -181,3 +184,18 @@ Voyage、以及任何 OpenAI 兼容网关。**差异只允许出现在请求体�
 这个解析在 Voyage 与 OpenAI 上是否真的完全一致。所以接通路的第一步**不是写代码**，是一次**只读探针**：
 拿一条与真实记忆无关的假字符串打一次 `/v1/embeddings`，把维度与响应字段名抄下来，再决定解析层。
 探针不写库、不迁移、不碰真实数据。
+
+**2026-10-08 补：路线定为远端 Voyage（用户不装 Ollama）**，核到的官方文档数字：
+
+| 项 | 数字 | 对本设计的影响 |
+|---|---|---|
+| 端点 | `POST https://api.voyageai.com/v1/embeddings` | 与我们钉的 OpenAI 兼容形状一致 |
+| 请求字段 | `input`, `model`, `input_type`（可为 `null`/`query`/`document`） | **写入用 `document`、查询用 `query`**，同一份代码差一个字段——正是 §6 说的"差异只在请求体附加字段" |
+| 批量上限 | **1,000 条文本/请求** | `reindex-embeddings` 回填要分批，314 条历史一次就够 |
+| 维度 | Voyage-4 系列可选 **256/512/1024/2048** | ⚠️ **必须新增第四项配置或把维度写死在探针结论里**：§3 定的是"维度不进 BLOB、由 `embedding_model` 决定"，而同一模型可选维度 → 没有登记的维度就没法做长度失效校验 |
+| 响应 | 文档同时出现 `embeddings` 与 `total_tokens`，OpenAI 形状是 `data[i].embedding` | **正是探针要解决的那件事**：SDK 属性名 ≠ 原始 JSON 字段名，不能猜 |
+| 价格 | 每百万 token **$0.02–$0.18**，免费额度 **50M–200M token** | 314 条全量回填约 10–20 万 token → **不到一美分**；一万条量级仍在免费额度内 |
+| 归属 | ⚠️ 纠正一处听起来像事实的错误：Anthropic 文档推荐 Voyage **不等于** Anthropic 拥有 Voyage | 2025-02 报道是 **MongoDB 以 2.2 亿美元收购 Voyage**（新闻源，非官方文档）；别在文档里写"Anthropic 的 embedding 服务" |
+
+一次边界后果要用户明确授权：接 Voyage = **出境面从 1 条变成 2 条**（提取通路之外多一份"记忆正文的向量请求"）。
+红线次序不变：`doctor.check_egress()` 先把 Voyage 列出来 → 只读探针 → 才谈 schema 与写入。
