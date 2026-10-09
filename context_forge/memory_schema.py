@@ -1,7 +1,9 @@
 # 8 folds case in canonical_fingerprint: no new DDL, but every stored fingerprint must be
 # recomputed from snapshot_json, which is what MemoryStore.migrate() already does for it.
 # 9 adds pending_confirmations (the high-risk approval ledger): DDL only, no derived data.
-SCHEMA_VERSION = 9
+# 10 adds replay_attempts to that ledger: a host re-exchanging a used handle is an anomaly
+# worth counting server-side, because the exception alone would leave no trace of the attempt.
+SCHEMA_VERSION = 10
 
 CORE = """
 CREATE TABLE memories (
@@ -121,6 +123,7 @@ CREATE TABLE pending_confirmations (
  request_id TEXT, session_id TEXT, reason TEXT NOT NULL,
  issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
  approved_at TEXT, approved_from_tty INTEGER, used_at TEXT,
+ replay_attempts INTEGER NOT NULL DEFAULT 0,
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
 """
@@ -194,7 +197,8 @@ CREATE TABLE IF NOT EXISTS signal_counts (
 
 # 9: a server-side ledger for high-risk confirmations. The token is a random handle, not a
 # digest of content, so a host cannot mint one; approval and use are two separate columns
-# because a human approving is not the same event as a host exchanging it.
+# because a human approving is not the same event as a host exchanging it. v10's extra column
+# is added by a guarded ALTER in migrate(), so this script stays the historical delta.
 V9 = """
 CREATE TABLE IF NOT EXISTS pending_confirmations (
  token TEXT PRIMARY KEY, memory_id TEXT NOT NULL, version INTEGER NOT NULL,

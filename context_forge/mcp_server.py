@@ -80,6 +80,10 @@ def create_server():
         applicability scoring and candidate-pool admission. Leave both empty to
         auto-detect them from `root` (the project root, default cwd).
         `legacy_filter` reverts scoring and top-K only (the rollback hatch).
+
+        A high-risk rule nobody has approved comes back without its text: the item carries
+        `confirmation_required`, a summary and a handle. A human answers the handle in their own
+        terminal (`forge approve`); only then does `context_forge_memory_confirm` release it.
         """
         techs, doms = _tags(technologies), _tags(domains)
         if not techs and not doms:
@@ -99,6 +103,17 @@ def create_server():
         if result is None:
             raise KeyError(memory_id)
         return result.as_dict()
+
+    @server.tool()
+    def context_forge_memory_confirm(token: str) -> dict:
+        """Trade a high-risk handle for the rule text recall withheld.
+
+        The handle comes from a recall, and it only works after a human answered it in their own
+        terminal with `forge approve`. Answering is not this call: possession of the handle means
+        a rule was shown to you, not that a person agreed to it. Each handle releases its text
+        once; a second call is refused and counted, and an expired or re-versioned handle is dead.
+        """
+        return _memory().consume_confirmation(token)
 
     @server.tool()
     def context_forge_memory_mark(memory_id: str, request_id: str, stage: str,

@@ -181,10 +181,11 @@ def check_egress() -> tuple[str, bool, str]:
 def check_confirmations() -> tuple[str, bool, str]:
     """High-risk rules parked for a human.
 
-    A fresh wait is normal — the point of the gate is that a person answers. Two things are not:
-    a request that expired with nobody answering (the rule is stuck invisible), and an approval
-    recorded without a terminal, which should be unreachable through the API and is therefore
-    worth printing if it ever appears.
+    A fresh wait is normal — the point of the gate is that a person answers. Three things are not:
+    a request that expired with nobody answering (the rule is stuck invisible), an approval
+    recorded without a terminal (unreachable through the API, so worth printing if it appears),
+    and a handle exchanged more than once (F3's replay signal: something is re-trying its way
+    past a gate that only ever opens once).
     """
     from .config import runtime_dir
     from .memory import MemoryStore, MemoryStoreError, now
@@ -201,12 +202,15 @@ def check_confirmations() -> tuple[str, bool, str]:
     moment = now()
     stalled = [row for row in trail
                if row['approved_at'] is None and row['used_at'] is None and row['expires_at'] <= moment]
+    replays = sum(row['replay_attempts'] or 0 for row in trail)
     off_terminal = [row for row in trail if row['approved_at'] and not row['approved_from_tty']]
     problems = []
     if stalled:
         problems.append(f"{len(stalled)} approval(s) expired unanswered")
     if off_terminal:
         problems.append(f"{len(off_terminal)} approval(s) recorded without a terminal")
+    if replays:
+        problems.append(f"{replays} exchange attempt(s) on already-used handle(s)")
     if problems:
         return ("confirmations", False, "; ".join(problems) + f"; {len(pending)} awaiting now")
     return ("confirmations", True, f"{len(pending)} awaiting approval")

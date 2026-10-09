@@ -537,7 +537,7 @@ def approve(token: str = typer.Option(None, "--token", help="the handle from a r
         raise typer.BadParameter('that token is not awaiting approval (answered, expired, '
                                  'or the memory changed version since)')
     typer.echo(f"{selected['memory_id']}@{selected['version']}  {selected['reason']}")
-    typer.echo(f"--- full text being published -------------------------------\n{selected['body']}\n---")
+    typer.echo(f"--- full text being released --------------------------------\n{selected['body']}\n---")
     if not apply:
         typer.echo("dry run; nothing written. add --apply, then type the challenge code.")
         return
@@ -550,6 +550,9 @@ def approve(token: str = typer.Option(None, "--token", help="the handle from a r
         raise typer.Exit(code=2)
     record = store.approve_confirmation(selected['token'], from_tty=True)
     typer.echo(f"approved: {record.id}@{record.version} status={record.draft.status}")
+    typer.echo("the host trades this handle for the text with "
+               "context_forge_memory_confirm(token), once. if the rule is reworded into a new "
+               "version it is withheld again and waits for you a second time.")
 
 
 @app.command("hygiene-undo")

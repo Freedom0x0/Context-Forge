@@ -19,7 +19,7 @@ from .memory_models import (
     Relation, Scope, derive_level, split_legacy_scopes,
 )
 from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6, V9
-from .risk import risk_of
+from .risk import requires_confirmation, risk_of
 from .rules import glob_match
 
 
@@ -108,6 +108,25 @@ def _token_frequency(connection: sqlite3.Connection, term: str) -> int:
     """How many indexed documents contain a term — decides which token is safe to drop."""
     return connection.execute('SELECT count(*) FROM memory_fts WHERE memory_fts MATCH ?',
                               (_fts_match([term]),)).fetchone()[0]
+
+
+def _approved_pairs(connection: sqlite3.Connection,
+                    pairs: Sequence[tuple[str, int]]) -> set[tuple[str, int]]:
+    """Which of these (memory_id, version) pairs a human has already answered.
+
+    Keyed on the version, not the token: approval is a property of the text, so every later
+    recall of that same text is released by the same one reading, and a new version is not.
+    A row saying "approved" without a terminal behind it answers nothing — recall and the
+    exchange must refuse it the same way, or the weaker door becomes the way through.
+    """
+    if not pairs:
+        return set()
+    ids = sorted({memory_id for memory_id, _ in pairs})
+    rows = connection.execute(
+        'SELECT memory_id,version FROM pending_confirmations WHERE approved_at IS NOT NULL '
+        'AND approved_from_tty '
+        f'AND memory_id IN ({",".join("?" * len(ids))})', ids).fetchall()
+    return {(row['memory_id'], row['version']) for row in rows} & set(pairs)
 
 EVIDENCE_SCORE = {'verified': 1.0, 'supported': 0.7, 'unverified': 0.3,
                   'unknown': 0.1, 'contradicted': -0.5}
@@ -661,6 +680,11 @@ class MemoryStore:
                     connection.execute(ddl)
             _exec_script(connection, V6)
             _exec_script(connection, V9)
+            confirmation_columns = {row[1] for row in connection.execute(
+                'PRAGMA table_info(pending_confirmations)')}
+            if 'replay_attempts' not in confirmation_columns:
+                connection.execute('ALTER TABLE pending_confirmations ADD COLUMN replay_attempts '
+                                   'INTEGER NOT NULL DEFAULT 0')
             for row in connection.execute(
                 'SELECT m.id, v.snapshot_json FROM memories m '
                 'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version').fetchall():
@@ -790,6 +814,43 @@ class MemoryStore:
                 (token, memory_id, version, request_id, session_id, reason, moment, expiry))
         return token
 
+    def open_confirmation(self, memory_id: str, version: int, *, reason: str,
+                         request_id: str | None = None, session_id: str | None = None,
+                         ttl_seconds: int = CONFIRMATION_TTL_SECONDS) -> dict:
+        """Return one live handle for this version, issuing a new row only if none is open.
+
+        Recall can fire many times a minute for the same parked rule. Handing out a fresh token
+        each time would bury the human under identical requests and grow the ledger without
+        bound, so an unanswered, unexpired handle is reused; a re-issue happens once it lapses
+        or is answered, which is when the old one stops meaning anything.
+        """
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                'SELECT token,expires_at FROM pending_confirmations WHERE memory_id=? AND version=? '
+                'AND approved_at IS NULL AND used_at IS NULL AND expires_at > ? '
+                'ORDER BY issued_at DESC LIMIT 1', (memory_id, version, now())).fetchone()
+            if row is not None:
+                return {'token': row['token'], 'expires_at': row['expires_at']}
+        token = self.issue_confirmation(memory_id, version, reason=reason, request_id=request_id,
+                                        session_id=session_id, ttl_seconds=ttl_seconds)
+        with self._connection() as connection:
+            expiry = connection.execute('SELECT expires_at FROM pending_confirmations WHERE token=?',
+                                        (token,)).fetchone()['expires_at']
+        return {'token': token, 'expires_at': expiry}
+
+    def approved_versions(self, pairs: Sequence[tuple[str, int]]) -> set[tuple[str, int]]:
+        """Which of these (memory_id, version) pairs a human has already answered."""
+        if not pairs:
+            return set()
+        with self._connection() as connection:
+            return _approved_pairs(connection, pairs)
+
+    def needs_confirmation(self, record: MemoryRecord) -> bool:
+        """A high-risk rule whose text nobody has read yet."""
+        if not requires_confirmation(record.draft):
+            return False
+        return (record.id, record.version) not in self.approved_versions([(record.id, record.version)])
+
     def pending_confirmations(self) -> list[dict]:
         """Open requests joined to the text a human has to read before answering.
 
@@ -851,12 +912,57 @@ class MemoryStore:
                                'WHERE token=?', (now(), token))
             return record
 
+    def consume_confirmation(self, token: str) -> dict:
+        """Give the withheld text to whoever holds a handle a human actually answered.
+
+        Approval is the load-bearing check, not possession of the token: recall hands the token
+        to the model, so an exchange gated on the token alone would be the model approving itself.
+        The handle is single-use, and a second attempt on a used one is counted in the same
+        transaction that reports it — a host that keeps re-exchanging one handle is behaving
+        exactly as F3 predicted and should surface in a report, not vanish into an exception.
+        """
+        released = None
+        denied = None
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                'SELECT c.token,c.memory_id,c.version,c.approved_at,c.approved_from_tty,'
+                'c.used_at,c.expires_at,m.current_version FROM pending_confirmations c '
+                'JOIN memories m ON m.id=c.memory_id WHERE c.token=?', (token,)).fetchone()
+            if row is None:
+                raise KeyError(token)
+            if row['used_at'] is not None:
+                connection.execute('UPDATE pending_confirmations SET replay_attempts='
+                                   'replay_attempts + 1 WHERE token=?', (token,))
+                denied = ('this token was already exchanged; run the recall again for a new one')
+            elif row['approved_at'] is None:
+                denied = ('no human has answered this handle yet: run '
+                          'forge approve --token <handle> --apply in a terminal')
+            elif not row['approved_from_tty']:
+                denied = 'this approval was not recorded from a terminal, so it does not release the text'
+            elif row['expires_at'] <= now():
+                denied = 'this token expired; run the recall again to get a new one'
+            elif row['current_version'] != row['version']:
+                denied = 'the memory changed version; this approval no longer applies'
+            else:
+                record = self._record(connection, row['memory_id'], row['version'])
+                if record is None:
+                    raise KeyError((row['memory_id'], row['version']))
+                connection.execute('UPDATE pending_confirmations SET used_at=? WHERE token=?',
+                                   (now(), token))
+                released = {'memory_id': record.id, 'version': record.version,
+                            'body': record.draft.body, 'kind': record.draft.kind,
+                            'risk': record.draft.risk, 'status': record.draft.status,
+                            'approved_at': row['approved_at']}
+        if denied is not None:
+            raise PermissionError(denied)
+        return released
+
     def confirmation_audit_trail(self, limit: int = 50) -> list[dict]:
         """Recent answers, with the tty flag: what was approved, when and how."""
         with self._connection() as connection:
             return [dict(row) for row in connection.execute(
                 'SELECT token,memory_id,version,reason,issued_at,expires_at,approved_at,'
-                'approved_from_tty,used_at FROM pending_confirmations '
+                'approved_from_tty,used_at,replay_attempts FROM pending_confirmations '
                 'ORDER BY issued_at DESC LIMIT ?', (max(1, limit),))]
 
     def tombstone_session_sources(self, session_id: str, *, reason: str = 'session deleted') -> int:
@@ -1591,9 +1697,14 @@ class MemoryStore:
                     notes[memory_id].append(f'\u4e0e {other} \u5b58\u5728 {kind}, \u9700\u6309\u7248\u672c\u5206\u6d41')
                     notes[other].append(f'\u4e0e {memory_id} \u5b58\u5728 {kind}, \u9700\u6309\u7248\u672c\u5206\u6d41')
             rescored = []
+            approved = _approved_pairs(connection, [(record.id, record.version)
+                                                    for record, _ in top])
             for record, _score in top:
-                if risk_of(record.draft) == 'high':
-                    notes[record.id].append('高危指令：先向人确认，未确认不得执行')
+                if requires_confirmation(record.draft):
+                    notes[record.id].append(
+                        '高危指令：本版本已由人在终端批准'
+                        if (record.id, record.version) in approved else
+                        '高危指令：正文不随本次召回返回，需人在终端批准后换取')
                 text, count = base[record.id]
                 rescored.append((record, relevance(
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],

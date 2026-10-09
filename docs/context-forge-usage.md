@@ -85,8 +85,8 @@ forge hygiene --apply           # 只跑可无人值守的两档：归档完全�
 forge hygiene --review          # 逐条判决，必须在终端里敲（管道喂进来的答案一律拒绝）
 forge hygiene-undo <id>         # 撤销一次自动改动；先打印计划，加 --apply 才写
 forge approve                   # 列出等你批的高危规则（只读）
-forge approve --token <handle>           # 显示将要发布的全文，不写库
-forge approve --token <handle> --apply   # 终端里回读挑战码后才发布；管道进来的直接拒绝
+forge approve --token <handle>           # 显示将要放行的全文，不写库
+forge approve --token <handle> --apply   # 终端里回读挑战码才放行；管道进来的直接拒绝
 ```
 
 定时执行不需要命令：watcher 常驻循环每天跑一次 `--apply` 的那两档，每一步单独记账（`forge doctor` 的 `scheduled` 行会列出哪个步骤上次失败、错在哪）。近似重复和"很久没用"永远停在报告里等人判——**相似不等于相同，没人用不等于错**。自动档宽窄由你的判决记录回看：`forge memory-report` 的 `verdicts` 段给绝对数，不给百分比。
@@ -125,9 +125,13 @@ forge sync                            # 建/更新 memory.db（单向：vault �
 forge mcp-install                     # 交给 claude CLI 注册（user scope，写入 ~/.claude.json）
 ```
 
-工具：召回类 `context_forge_memory_search` / `_memory_get` / `_memory_report` /
-`_memory_effectiveness` / `_memory_hygiene`；Gen1 vault 类 `context_forge_search` /
+工具：召回类 `context_forge_memory_search` / `_memory_get` / `_memory_confirm` /
+`_memory_report` / `_memory_effectiveness` / `_memory_hygiene`；Gen1 vault 类 `context_forge_search` /
 `_get` / `_match_rules` / `_recent_knowledge` / `_recent_rules` / `_record_feedback`。
+
+高危规则的两步：召回遇到没人批过的 `risk=high` 规则时**不返回正文**，只给 `confirmation_required` +
+摘要 + 句柄，`body` 是 `null`；你在终端批完之后，宿主用 `context_forge_memory_confirm(token)` 换取正文，
+一个句柄只用一次。同一条规则改一个字就是新版本，重新待批；批过的版本后续召回正常返回。
 
 撤销：`forge mcp-install --uninstall`。配置细节与**已证/未证边界**见 `docs/mcp-transport.md`。
 

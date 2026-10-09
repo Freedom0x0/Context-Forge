@@ -6,7 +6,7 @@
   <a href="README.md"><img alt="version" src="https://img.shields.io/badge/version-v1.0.0-0F1419?style=flat-square&labelColor=FAFAF9"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-0F1419?style=flat-square&labelColor=FAFAF9">
   <img alt="python" src="https://img.shields.io/badge/python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white">
-  <img alt="tests" src="https://img.shields.io/badge/tests-98%20passed-16A34A?style=flat-square">
+  <img alt="tests" src="https://img.shields.io/badge/tests-390%20passed-16A34A?style=flat-square">
 </p>
 
 Context Forge 是一个 local-first 的 Agent 记忆基础设施。它不修改大模型参数，也不把历史对话无差别塞进上下文，而是把经历、来源、适用条件、冲突和结果保存在可追溯的 SQLite 长期记忆中，在需要时检索，并允许人工纠正。
@@ -22,7 +22,7 @@ Context Forge 是一个 local-first 的 Agent 记忆基础设施。它不修改�
 - **结果追踪**：区分 retrieved、tool_returned、presented、referenced、applied、validated；曝光不会自动提高可信度。
 - **保守整理**：完全重复且决策边界一致时才自动归档；相似内容只生成候选，不擅自判断同义、冲突或替代。
 - **可恢复**：版本、来源、关系和事件事务一致；支持 FTS 重建、SQLite 在线备份/恢复和旧 vault 导入。
-- **高危闸门**：确定性分类器判为 `risk=high` 的规则停在 `candidate`，人在终端批准后才可召回。待批请求是服务端随机句柄（不是内容的派生物，模型算不出第二个）：10 分钟有效、一次性、记忆换版即作废。
+- **高危闸门**：确定性分类器判为 `risk=high` 的规则停在 `candidate`，人在终端批准后才可召回。**闸门也管已经发布的那一半**：召回遇到从未被批准过的高危规则时扣掉正文，只返回 `confirmation_required`、摘要和服务端句柄；人在终端批准（`forge approve`）后，宿主调 `context_forge_memory_confirm(token)` 才拿到可执行文本。一个版本批一次，改写即重新待批。待批请求是服务端随机句柄（不是内容的派生物，模型算不出第二个）：10 分钟有效、一次性（重复换取会被记进台账并由 `forge doctor` 打印）、记忆换版即作废。
 - **宿主接入**：读侧宿主无关——任何会说 MCP 的宿主读的都是同一个 `memory.db`，装一次 server 即可。写侧目前只认 Claude Code：T1（watcher 读 `~/.claude/projects` 的 transcript）与 T2（SessionEnd/PreCompact hook）两条**确定性**通路。因此共享是单向的：CC 沉淀的记忆别的宿主能搜到，别的宿主干的活不会自动入库。MCP 工具那条路（T3）只作人工补录的支线，任何宿主的默认沉淀都不得只依赖它。
 
 ### 明确不做
@@ -124,7 +124,7 @@ forge-mcp
 5. **检索不是采用**：返回、呈现、引用、应用和验证分别记录。
 6. **整理可逆**：自动整理保留历史、来源和关系，支持撤销。
 7. **`shared` 是对内敞开，不是对外敞开**：它的含义是"对本保险箱全局可见"，不是"对世界可见"——本地场景下记忆就像人自己的记忆，对本人全部可见。任何离开保险箱的路径（云同步、团队库、导出）必须过一道独立的出库闸门。项目级授权（`access.visibility`）是主人对自己项目说的话，属于选择加入的例外，不是默认。
-8. **脱敏只挡"出境的那一次"，且规则永不完备**：唯一的真实外泄面是把文本发给远端模型 API 的那一次调用；按第 7 条，本地 `memory.db` 与 vault 属于保险箱内部，不算泄露。正则黑名单是追赶战（JSON 引号形态、裸密钥前缀、裸 Bearer 都曾漏过），不当强保证用。敏感路径与破坏性命令由确定性分类器判成 `risk=high`（不是模型自评），**高危规则因此停在 `candidate`：召回看不见它，直到有人在终端里批准**——用延迟换不打断。`model_provider` 配成 none/offline 时，出境面根本不存在。
+8. **脱敏只挡"出境的那一次"，且规则永不完备**：唯一的真实外泄面是把文本发给远端模型 API 的那一次调用；按第 7 条，本地 `memory.db` 与 vault 属于保险箱内部，不算泄露。正则黑名单是追赶战（JSON 引号形态、裸密钥前缀、裸 Bearer 都曾漏过），不当强保证用。敏感路径与破坏性命令由确定性分类器判成 `risk=high`（不是模型自评），**新沉淀的高危规则停在 `candidate`：召回看不见它，直到有人在终端里批准；已经发布过的高危规则在召回时扣正文，宿主必须拿人去批换来的句柄才能取回文本**——用延迟换不打断。这条保证的边界写清楚：它挡的是"没被人读过就执行"，不挡"在本机读"——`memory.db` 与 vault 投影文件仍在本地可读，而有 shell 权限的宿主理论上也能自己跑 `forge approve`，所以批准必须回读挑战码、且批准记录进台账供事后审计。`model_provider` 配成 none/offline 时，出境面根本不存在。
 
 ## 测试与验收
 
@@ -132,9 +132,9 @@ forge-mcp
 python -m pytest tests/ -q
 ```
 
-当前验证结果：`366 passed`（2026-10-09）。
+当前验证结果：`390 passed`（2026-10-09）。
 
-测试覆盖存储事务和并发、证据与关系、中文/ASCII 检索、作用域隔离、生命周期、worker 端到端接入、MCP 工具、保守整理、备份恢复和旧 vault 导入。
+测试覆盖存储事务和并发、证据与关系、中文/ASCII 检索、作用域隔离、生命周期、worker 端到端接入、MCP 工具、保守整理、高危规则的扣留与换取（含假句柄、过期、换版、重复换取）、备份恢复和旧 vault 导入。
 
 持续学习质量仍需使用独立的多轮任务数据集评估，包括决策正确率、错误复发率、过度泛化、跨范围泄露、延迟和 token 成本；通过确定性测试不等于已经证明模型能力提升。
 

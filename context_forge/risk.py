@@ -57,3 +57,12 @@ def risk_of(draft: MemoryDraft) -> RiskLevel:
     if getattr(draft, 'kind', 'knowledge') != 'rule':
         return 'normal'
     return classify_risk(draft.body)
+
+
+def requires_confirmation(draft: MemoryDraft) -> bool:
+    """One definition of "a human has to read this text before it is usable".
+
+    The deposit gate parks such a draft and the recall gate withholds its body. If the two
+    predicates drifted apart, a rule could reach a host that nobody ever showed a human.
+    """
+    return getattr(draft, 'kind', 'knowledge') == 'rule' and risk_of(draft) == 'high'

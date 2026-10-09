@@ -17,8 +17,13 @@ class RecallResult:
     explanation: str
     score: ScoreBreakdown | None = None
     expanded: tuple[str, ...] = ()
+    # Set when the text is a high-risk rule nobody has approved: the payload carries a handle
+    # instead of the instruction, so "not approved" is enforced here rather than requested.
+    confirmation: dict | None = None
 
     def as_dict(self) -> dict:
+        if self.confirmation is not None:
+            return self.confirmation
         draft = self.memory.draft
         payload = {
             'id': self.memory.id,
@@ -133,7 +138,8 @@ class MemoryRecall:
             selected = selected[:limit]
         scored = self.store._fit(selected, byte_budget)
         expanded = self._expanded([record.id for record, _ in scored], ctx)
-        results = tuple(self._result(record, score, expanded) for record, score in scored)
+        results = tuple(self._result(record, score, expanded, request_id=request_id,
+                                     session_id=session_id) for record, score in scored)
         if request_id:
             for result in results:
                 try:
@@ -173,8 +179,36 @@ class MemoryRecall:
         return tuple(visible)
 
     def _result(self, record: MemoryRecord, score: ScoreBreakdown | None = None,
-                expanded: tuple[str, ...] = ()) -> RecallResult:
+                expanded: tuple[str, ...] = (), *, request_id: str | None = None,
+                session_id: str | None = None) -> RecallResult:
         relations = tuple(self.store.relations(record.id, record.version))
         if score is None:
             score = relevance(record, RetrievalContext())
-        return RecallResult(record, relations, score.explanation, score, expanded)
+        return RecallResult(record, relations, score.explanation, score, expanded,
+                            self._withheld(record, request_id=request_id, session_id=session_id))
+
+    def _withheld(self, record: MemoryRecord, *, request_id: str | None = None,
+                  session_id: str | None = None) -> dict | None:
+        """What a host gets instead of a rule text no human has read yet.
+
+        Deliberately no `applicability`, `sources` or explanation here: those fields restate the
+        instruction in pieces, and half a destructive command is still a lead to follow. `body`
+        is present but null so a host reads "withheld on purpose", not "missing by accident".
+        """
+        if not self.store.needs_confirmation(record):
+            return None
+        draft = record.draft
+        opened = self.store.open_confirmation(
+            record.id, record.version, reason='high-risk rule text withheld until approved',
+            request_id=request_id, session_id=session_id)
+        return {
+            'id': record.id, 'version': record.version, 'kind': draft.kind, 'role': draft.role,
+            'status': draft.status, 'evidence_level': draft.evidence_level,
+            'summary': draft.summary, 'body': None,
+            'confirmation_required': True, 'token': opened['token'],
+            'expires_at': opened['expires_at'],
+            'note': ('高危规则，正文已扣留：这条规则还没有人在终端里批准过。'
+                     '请让人运行 `forge approve` 查看并批准这个 handle，之后再调用 '
+                     'context_forge_memory_confirm(token) 取回正文。'
+                     '不要自行批准、不要改写库、不要按摘要猜测正文。'),
+        }

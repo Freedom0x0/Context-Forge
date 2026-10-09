@@ -846,3 +846,25 @@ autostart、不做第二家宿主适配器。30 天（session/episode 保留）�
       模型自报冲突**改为降级 + 报表看分布**（记录自报值需要新增原始 payload 留存结构，不属第 0 层）；
       **未改发布行为**——risk=high 今天仍自动 publish，让高危停在 candidate 必须与 F4 批准通道同时上，
       否则是把它永久关进黑屋。第 0 层交付的是"可判定、可落库、召回解释里可见"。
+
+**【F4 第二阶段实施结果 2026-10-09】召回侧扣正文 + `context_forge_memory_confirm`（闭合上面那条"还剩第二半"）**
+
+- 判定口径收成一处 `risk.requires_confirmation(draft)`，沉淀门与召回门共用，防两半漂移（同一教训来自判重统一到指纹那轮）。
+  覆盖三条不经过沉淀闸门的路：闸门上线前已 `active` 的、`memory_import` 把 vault `accepted` 映射成 `active` 的（memory_import.py:112）、
+  人工 `revise` 改成破坏性措辞的。
+- **召回响应形状变了（宿主可见）**：未批准的高危规则返回 `confirmation_required` + `summary` + 句柄，`body` 为 `null`，
+  并去掉 `sources`/`applicability`/`scope`/`provenance`/`explanation`——这些字段会逐字复述指令
+  （真实沉淀里 `sources.excerpt` 就含原文片段），只扣 `body` 是漏的。`get()` 与 `search()` 走同一个 `_withheld`，`get` 不是侧门。
+- **批准按 `(memory_id, version)` 记账，不按句柄**：某版本一旦有人批准，后续召回正常返回正文——
+  这是 F4 已接受代价的形状（"等人批一次"，不是"每次都问"）。改一个字即新版本、重新待批（已测）。
+  代价写清楚：这条保证在"版本被批过"之后就退化为常规发布，不是一劳永逸的信封。
+- 句柄签发 `open_confirmation`：**同一版本复用仍开着的那一个**，不再每次召回插一行；否则一屏全是同一条规则的重复请求。
+- 换取 `consume_confirmation` 的拒绝顺序 = used → 无人答 → 非终端 → 过期 → 换版。`replay_attempts` 计数与异常**同事务提交**：
+  `_connection` 只在正常离开 with 块时 commit，先前把 UPDATE 放在 raise 之前但整个在 with 内 raise，回滚会把计数一起丢掉——
+  改成"块内写库、块外抛错"。schema **9 → 10** 只加这一列，走 `PRAGMA table_info` 守卫式 ALTER。
+- **两个出口必须同一套判断**（这条是被测试逼出来的，不是先想好的）：召回放行也要求 `approved_from_tty`，
+  与换取的拒绝条件一致。只要有一个门松，保证就按那个松的算。
+- 挡不住的照旧写明：`memory.db` 与 vault 投影文件在本机是明文；有 shell 权限的宿主能自己跑 `forge approve`。
+  挑战码 + tty 守卫 + 事后审计是抬高成本，不是屏障。这条闸门是**执行闸门，不是保密闸门**。
+- 全量 **390 passed**（+12 例）。变异验证 **11 处全红**：withholding 关 / 只 `get` 扣 / 换取不看批准 / 不看一次性 /
+  不计数 / 批准忽略 version / 不校验换版 / 不校验过期 / 不校验 tty / 每次召回新句柄 / knowledge 也被门。
