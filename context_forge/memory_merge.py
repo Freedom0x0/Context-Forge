@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Iterator, NamedTuple, Sequence
 
-from .memory import MemoryStore, canonical_json, folded_body, tokenize
+from .memory import MemoryStore, canonical_fingerprint, canonical_json, folded_body, tokenize
 from .memory_models import MemoryRecord, Relation
 
 
@@ -52,10 +52,6 @@ def token_similarity(left_text: str, right_text: str) -> float:
     return len(left_tokens & right_tokens) / len(union) if union else 0.0
 
 
-def _normalized(record: MemoryRecord) -> str:
-    return normalized_text(record)
-
-
 def _boundary(record: MemoryRecord) -> str:
     return canonical_json({
         'kind': record.draft.kind,
@@ -82,6 +78,8 @@ class _Profile(NamedTuple):
     text: str
     boundary: str
     tokens: frozenset
+    fingerprint: str
+    provenance: str
 
 
 def _profiles(records: Sequence[MemoryRecord]) -> list[_Profile]:
@@ -89,8 +87,25 @@ def _profiles(records: Sequence[MemoryRecord]) -> list[_Profile]:
     for position, record in enumerate(records):
         text = normalized_text(record)
         profiles.append(_Profile(position, record, record.draft.kind, text,
-                                 _boundary(record), frozenset(tokenize(text))))
+                                 _boundary(record), frozenset(tokenize(text)),
+                                 canonical_fingerprint(record.draft),
+                                 canonical_json(record.draft.provenance.model_dump(mode='json'))))
     return profiles
+
+
+def _duplicate_candidate(left: _Profile, right: _Profile, score: float) -> MergeCandidate:
+    """One fingerprint means one assertion inside one boundary.
+
+    Provenance is outside the fingerprint on purpose (the write gate treats a rule learned in
+    two projects as one memory), but archiving the loser of such a pair would remove the other
+    project from recall — so only provenance-identical pairs may be canonicalized automatically.
+    """
+    same_source = left.provenance == right.provenance
+    return MergeCandidate(
+        left.record.id, right.record.id, 'duplicate_of', score,
+        'same fingerprint' + (' and same provenance' if same_source else
+                              '; provenance differs, so merging would drop a source'),
+        same_source)
 
 
 def _group(profiles: Sequence[_Profile], key) -> dict:
@@ -135,12 +150,10 @@ class MemoryMerge:
         profiles = _profiles(self._live_records())
         exact: list[tuple[int, int, MergeCandidate]] = []
         matched: set[tuple[int, int]] = set()
-        for members in _group(profiles, lambda item: (item.kind, item.text, item.boundary)).values():
+        for members in _group(profiles, lambda item: item.fingerprint).values():
             for left, right in combinations(members, 2):
                 matched.add((left.position, right.position))
-                exact.append((left.position, right.position, MergeCandidate(
-                    left.record.id, right.record.id, 'duplicate_of', 1.0,
-                    'normalized content and decision boundary are identical', True)))
+                exact.append((left.position, right.position, _duplicate_candidate(left, right, 1.0)))
         overlaps: list[tuple[int, int, MergeCandidate]] = []
         for kind, members in _group(profiles, lambda item: item.kind).items():
             # Rules were never compared across differing boundaries; keep that by grouping on it.
@@ -164,9 +177,9 @@ class MemoryMerge:
     def merge_candidates(self, threshold: float = 0.9) -> tuple[MergeCandidate, ...]:
         """High-similarity pairs split into merge and conflict proposals.
 
-        Boundary-identical pairs carry `automatic=True` and are the only ones
-        `apply_exact` accepts. A contradictory applicability is labelled
-        `conflicts_with` and is never merged.
+        Fingerprint-identical pairs sharing provenance carry `automatic=True` and
+        are the only ones `apply_exact` accepts. A contradictory applicability is
+        labelled `conflicts_with` and is never merged.
         """
         if not 0 <= threshold <= 1:
             raise ValueError('similarity threshold must be between zero and one')
@@ -181,10 +194,9 @@ class MemoryMerge:
                     proposals.append((left.position, right.position, MergeCandidate(
                         left.record.id, right.record.id, 'conflicts_with', round(score, 6),
                         'high similarity with contradictory applicability; do not merge', False)))
-                elif left.text == right.text and left.boundary == right.boundary:
-                    proposals.append((left.position, right.position, MergeCandidate(
-                        left.record.id, right.record.id, 'duplicate_of', round(score, 6),
-                        'normalized content and decision boundary are identical', True)))
+                elif left.fingerprint == right.fingerprint:
+                    proposals.append((left.position, right.position,
+                                      _duplicate_candidate(left, right, round(score, 6))))
                 else:
                     proposals.append((left.position, right.position, MergeCandidate(
                         left.record.id, right.record.id, 'overlaps', round(score, 6),
@@ -221,8 +233,10 @@ class MemoryMerge:
         duplicate = self.store.get(duplicate_id)
         if canonical is None or duplicate is None:
             raise KeyError((canonical_id, duplicate_id))
-        if _normalized(canonical) != _normalized(duplicate) or _boundary(canonical) != _boundary(duplicate):
+        if canonical_fingerprint(canonical.draft) != canonical_fingerprint(duplicate.draft):
             raise ValueError('candidate is stale or no longer exact')
+        if canonical.draft.provenance != duplicate.draft.provenance:
+            raise ValueError('same fingerprint, different provenance: a human must choose the source')
         if duplicate.draft.status == 'archived' and any(
             relation['kind'] == 'duplicate_of' and relation['target_id'] == canonical.id
             for relation in self.store.relations(duplicate.id)

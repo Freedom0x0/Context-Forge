@@ -5,12 +5,13 @@ from itertools import combinations
 
 import pytest
 
-from context_forge.memory import MemoryStore
+from context_forge.memory import MemoryStore, canonical_fingerprint
 from context_forge.memory_merge import (
-    MemoryMerge, _applicability_conflict, _boundary, _normalized, token_similarity,
+    MemoryMerge, MergeCandidate, _applicability_conflict, _boundary, normalized_text,
+    token_similarity,
 )
 from context_forge.memory_models import (
-    Applicability, ApplicabilityScope, MemoryDraft, Provenance, Source,
+    Applicability, ApplicabilityScope, MemoryDraft, MemorySpace, Provenance, Source,
 )
 
 
@@ -42,7 +43,9 @@ def test_report_is_read_only_deterministic_and_explicit_when_empty(tmp_path):
     assert before == (file_hash(path), path.stat().st_mtime_ns)
 
 
-def test_exact_duplicate_requires_same_decision_boundary(tmp_path):
+def test_exact_duplicate_is_the_write_gate_fingerprint_not_the_source_project(tmp_path):
+    """Which project learned a rule no longer makes it a second memory — but only a human may
+    canonicalize the pair, because archiving the loser without a union deletes that project."""
     store = MemoryStore.initialize(tmp_path / "memory.db")
     add(store, "a", "Use transaction boundaries")
     add(store, "b", " use  transaction boundaries ")
@@ -50,9 +53,54 @@ def test_exact_duplicate_requires_same_decision_boundary(tmp_path):
     add(store, "different-condition", "Use transaction boundaries", applicability=(
         Applicability(condition="external API only", result="unknown"),
     ))
+
     report = MemoryMerge(store).report(similarity_threshold=0.5)
-    assert [(item.left_id, item.right_id) for item in report.exact_duplicates] == [("a", "b")]
+
+    assert [(item.left_id, item.right_id, item.automatic)
+            for item in report.exact_duplicates] == [
+        ("a", "b", True),
+        ("a", "different-project", False),
+        ("b", "different-project", False),
+    ]
+    # A declared condition is part of the boundary, so this pair is still only a review signal.
+    assert all("different-condition" not in (item.left_id, item.right_id)
+               for item in report.exact_duplicates)
     assert all(not item.automatic for item in report.possible_overlaps)
+
+
+def test_differing_privacy_is_never_an_auto_mergeable_duplicate(tmp_path):
+    """The hole this closes: identical wording used to be an exact duplicate across owner and
+    privacy, so canonicalizing it could quietly move a private memory into the shared space."""
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    for memory_id, privacy in (("shared-one", "shared"), ("private-one", "private")):
+        store.put(memory_id, MemoryDraft(
+            kind="rule", body="生产环境禁止直接改 schema", status="active",
+            space=MemorySpace(owner="default", privacy=privacy),
+            provenance=Provenance(projects=("demo",)),
+            sources=(Source(identity=f"source:{memory_id}", kind="observation",
+                            excerpt="生产环境禁止直接改 schema"),),
+        ), expected_version=0, idempotency_key=f"put:{memory_id}", reason="test")
+
+    report = MemoryMerge(store).report()
+
+    assert report.exact_duplicates == ()
+    # Still worth a human look, but never something the merge executor will accept.
+    assert [(item.left_id, item.right_id, item.kind, item.automatic)
+            for item in MemoryMerge(store).merge_candidates(threshold=1.0)] \
+        == [("private-one", "shared-one", "overlaps", False)]
+
+
+def test_apply_exact_refuses_a_cross_project_pair_even_if_marked_automatic(tmp_path):
+    """A candidate built from an older report can go stale after provenance was edited."""
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    add(store, "a", "Use transaction boundaries")
+    add(store, "b", "Use transaction boundaries", project="other")
+    stale = MergeCandidate("a", "b", "duplicate_of", 1.0, 'from an earlier report', True)
+
+    with pytest.raises(ValueError, match='provenance'):
+        MemoryMerge(store).apply_exact(stale, idempotency_key="refuse")
+
+    assert store.get("b").draft.status == "active"
 
 
 def test_rules_do_not_compare_across_project_boundaries(tmp_path):
@@ -156,19 +204,23 @@ def _corpus(tmp_path):
 
 
 def _brute_force(records, similarity_threshold):
-    """The pre-batching algorithm, verbatim: every pair recomputes text and boundary."""
+    """The rule as written down, applied to every pair without buckets or memoisation.
+
+    Exactness is the write gate's fingerprint, so which project learned a rule no longer
+    makes it a different memory; `automatic` still requires the provenance to agree, because
+    archiving the loser of a cross-project pair would remove that project from recall.
+    """
     exact, overlaps = [], []
     for left, right in combinations(records, 2):
+        if canonical_fingerprint(left.draft) == canonical_fingerprint(right.draft):
+            exact.append((left.id, right.id,
+                          left.draft.provenance == right.draft.provenance))
+            continue
         if left.draft.kind != right.draft.kind:
             continue
-        same_text = _normalized(left) == _normalized(right)
-        same_boundary = _boundary(left) == _boundary(right)
-        if same_text and same_boundary:
-            exact.append((left.id, right.id))
+        if left.draft.kind == 'rule' and _boundary(left) != _boundary(right):
             continue
-        if left.draft.kind == 'rule' and not same_boundary:
-            continue
-        if token_similarity(_normalized(left), _normalized(right)) >= similarity_threshold:
+        if token_similarity(normalized_text(left), normalized_text(right)) >= similarity_threshold:
             overlaps.append((left.id, right.id))
     return exact, overlaps
 
@@ -178,16 +230,18 @@ def _brute_force_proposals(records, threshold):
     for left, right in combinations(records, 2):
         if left.draft.kind != right.draft.kind:
             continue
-        score = token_similarity(_normalized(left), _normalized(right))
+        score = token_similarity(normalized_text(left), normalized_text(right))
         if score < threshold:
             continue
         if _applicability_conflict(left, right):
             kind = 'conflicts_with'
-        elif _normalized(left) == _normalized(right) and _boundary(left) == _boundary(right):
+        elif canonical_fingerprint(left.draft) == canonical_fingerprint(right.draft):
             kind = 'duplicate_of'
         else:
             kind = 'overlaps'
-        proposals.append((left.id, right.id, kind, round(score, 6)))
+        automatic = (kind == 'duplicate_of'
+                     and left.draft.provenance == right.draft.provenance)
+        proposals.append((left.id, right.id, kind, round(score, 6), automatic))
     return proposals
 
 
@@ -198,7 +252,7 @@ def _live(store):
 
 @pytest.mark.parametrize('threshold', [0.1, 0.5, 0.6, 0.9, 1.0])
 def test_batched_report_equals_the_pairwise_reference_including_order(tmp_path, threshold):
-    """The batching rewrite must change cost only: same pairs, same order, same scores."""
+    """Buckets may change the cost, never the answer: same pairs, same order, same flags."""
     store = _corpus(tmp_path)
     records = _live(store)
     expected_exact, expected_overlaps = _brute_force(records, threshold)
@@ -206,8 +260,9 @@ def test_batched_report_equals_the_pairwise_reference_including_order(tmp_path, 
     report = MemoryMerge(store).report(similarity_threshold=threshold)
 
     assert report.total == len(records)
-    assert [(item.left_id, item.right_id) for item in report.exact_duplicates] == expected_exact
-    assert all(item.automatic and item.score == 1.0 for item in report.exact_duplicates)
+    assert [(item.left_id, item.right_id, item.automatic)
+            for item in report.exact_duplicates] == expected_exact
+    assert all(item.score == 1.0 for item in report.exact_duplicates)
     assert [(item.left_id, item.right_id) for item in report.possible_overlaps] == expected_overlaps
     assert report.broad_scopes == tuple(record.id for record in records
                                         if record.draft.scope.visibility == 'global')
@@ -236,7 +291,7 @@ def test_exact_duplicates_keep_record_order_across_groups(tmp_path):
     found = [(item.left_id, item.right_id) for item in
              MemoryMerge(store).report(similarity_threshold=0.5).exact_duplicates]
 
-    assert found == expected
+    assert found == [pair[:2] for pair in expected]
     assert found == [('a-trio-one', 'h-trio-two'), ('a-trio-one', 'i-trio-three'),
                      ('b-pair-one', 'c-pair-two'), ('h-trio-two', 'i-trio-three')]
 
@@ -249,7 +304,7 @@ def test_batched_proposals_equals_the_pairwise_reference_including_order(tmp_pat
 
     found = MemoryMerge(store).merge_candidates(threshold=threshold)
 
-    assert [(item.left_id, item.right_id, item.kind, item.score)
+    assert [(item.left_id, item.right_id, item.kind, item.score, item.automatic)
             for item in found] == expected
 
 

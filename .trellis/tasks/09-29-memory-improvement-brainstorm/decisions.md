@@ -271,6 +271,32 @@
 - 一次自测失败值得记：新测试起初给两次沉淀共用了同一个 `Source.identity`，被 `SourceConflict` 挡下——
   **这是内容寻址来源在正确地工作**，不是代码问题；夹具改成按 session 编 identity。
 
+**【第 3 步实施结果 2026-10-09】整理判重统一到指纹**
+
+- `report` 与 `merge_candidates` 的"完全重复"改成**指纹相等**；`_normalized` 已删（无人再用），
+  "同一句正文"只剩 `folded_body` 一处定义。规则的"跨边界不比"这条**保留旧口径**（仍用 `_boundary`），
+  因为那条测试（`test_rules_do_not_compare_across_project_boundaries`）钉的是产品决定：
+  项目 one 的规则和项目 two 的规则不该拿来比相似度。指纹含正文，若用它当跳过条件，
+  规则的近重复**永远不可能被比**——所以"判完全重复"和"要不要比相似度"是两个问题，不能一把改。
+- 两个缺陷按预期消掉，都有测试钉住：
+  1. **privacy 洞**：只差 `space.privacy` 的两条，旧口径给出 `exact_duplicates=[('private','shared')]`
+     且 `automatic=True`（= `apply_exact` 唯一接受的档）；现在报告不再判完全重复，
+     `merge_candidates` 只给 `overlaps`、`automatic=False`。
+  2. **跨项目盲区**：同一断言在 alpha/beta 各存一份，旧口径**连相似度都不比**、overlaps=0；
+     现在进 `exact_duplicates`，但 `automatic=False`。
+- `automatic=False` 这条是**有意的刹车**，不是遗漏：`apply_exact` 只做"归档输家"，
+  它不会把来源并进赢家。所以跨项目对一旦自动归并，就会把 beta 项目从召回里删掉。
+  等第 4 步（provenance 求并）之后，仍需要一步"归并时并把 provenance"才可以让这类对变自动。
+  已在 `_duplicate_candidate` 的 docstring 里写明这个理由，免得后人当 bug 删掉。
+- `apply_exact` 的过期守卫改成两层：指纹不等 → `candidate is stale`；指纹等但来源不等 →
+  拒绝（覆盖"报告生成后来源被编辑过"这种陈旧候选）。
+- 变异验证 4 处：`automatic` 恒真 → 9 红；report 退回旧口径 → 7 红；proposals 退回旧口径 → 4 红；
+  删掉来源过期守卫 → 1 红。
+- 一处**主动改动既有期望**（不是回归）：`test_exact_duplicate_requires_same_decision_boundary`
+  原断言"跨项目不算完全重复"。这正是本轮要翻转的那条，已改名并重写为
+  `test_exact_duplicate_is_the_write_gate_fingerprint_not_the_source_project`，
+  断言序列里逐项写出 `automatic`。
+
 **状态：已定（2026-09-29）**
 
 ---
