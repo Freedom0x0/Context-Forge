@@ -7,7 +7,7 @@ aggregates, deletions), and a shared transaction would let a later failure undo 
 real content change.
 
 Writes made from here must derive idempotency keys from the *candidate identity*
-(`daily:g1:{a}:{b}`), never from the date or the run number, or the same pair
+(`hygiene:exact:{a}:{b}@{version}`), never from the date or the run number, or the same pair
 would be re-applied every day.
 """
 
@@ -59,12 +59,33 @@ def _signals(ctx: Context) -> None:
     ctx.memory.prune_retrieval_events()
 
 
-STEPS: dict[str, Callable[[Context], None]] = {'retention': _retention, 'signals': _signals}
+def _hygiene(ctx: Context) -> None:
+    """Canonicalize exact duplicates and note contradictions: the two unattended tiers.
+
+    G3 and G4 stay proposals. The pass is capped, and a cap that bit is printed rather than
+    swallowed, because a library with more duplicates than one pass can take is exactly the
+    situation where silence would look like health.
+    """
+    if ctx.memory is None:
+        return
+    from .memory_lifecycle import MemoryLifecycle
+
+    actions = MemoryLifecycle(ctx.memory).apply_auto_tier()
+    changed = actions['exact_applied'] + actions['conflicts_annotated']
+    deferred = actions['exact_deferred'] + actions['conflicts_deferred']
+    if changed or deferred:
+        print(f'[scheduled] hygiene archived {actions["exact_applied"]} duplicate(s), '
+              f'noted {actions["conflicts_annotated"]} contradiction(s), '
+              f'deferred {deferred} for the next pass')
+
+
+STEPS: dict[str, Callable[[Context], None]] = {
+    'retention': _retention, 'signals': _signals, 'hygiene': _hygiene}
 
 # Steps that have nothing to do without the memory database. Skipping is not the same as
 # succeeding: recording `signals` as run while no memory.db existed would make a silent
 # gap look like a healthy ledger.
-MEMORY_STEPS = frozenset({'signals'})
+MEMORY_STEPS = frozenset({'signals', 'hygiene'})
 
 
 def run_due(store: JobStore, now: datetime | None = None, *,

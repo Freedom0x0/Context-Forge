@@ -157,3 +157,49 @@ def test_signals_step_aggregates_and_prunes_with_a_memory_database(tmp_path: Pat
     assert 'signals' in ran
     assert memory.signal_totals() == {'stage:applied': 1}
     assert memory.aggregated_through() == scheduled._month_keys()[0]
+
+
+def _duplicate_pair(tmp_path):
+    from context_forge.memory import MemoryStore
+    from context_forge.memory_models import MemoryDraft, Provenance, Source
+
+    memory = MemoryStore.initialize(tmp_path / 'memory.db')
+    body = 'always validate external input'
+    for memory_id in ('keep', 'twin'):
+        memory.put(memory_id, MemoryDraft(
+            body=body, status='active', provenance=Provenance(projects=('demo',)),
+            sources=(Source(identity=f'source:{memory_id}', kind='observation', excerpt=body),),
+        ), expected_version=0, idempotency_key=f'put:{memory_id}', reason='test')
+    return memory
+
+
+def test_the_hygiene_step_canonicalizes_once_per_day(tmp_path: Path):
+    store = JobStore(tmp_path / 'queue.db')
+    memory = _duplicate_pair(tmp_path)
+    steps = {'hygiene': scheduled.STEPS['hygiene']}
+
+    assert scheduled.run_due(store, NOW, steps=steps, memory_store=memory) == ['hygiene']
+    assert memory.get('twin').draft.status == 'archived'
+
+    assert scheduled.run_due(store, NOW + timedelta(minutes=5), steps=steps,
+                             memory_store=memory) == []          # not due yet
+    rows = {row['step']: row for row in store.scheduled_runs()}
+    assert rows['hygiene']['last_error'] is None
+    assert rows['hygiene']['last_success_at'] == NOW.isoformat()
+
+
+def test_the_hygiene_step_is_skipped_when_no_library_exists(tmp_path: Path):
+    """Skipping is not succeeding: a ledger entry here would date a pass that never looked
+    at any memory, and the next real gap would read as healthy."""
+    store = JobStore(tmp_path / 'queue.db')
+    steps = {'hygiene': scheduled.STEPS['hygiene']}
+
+    assert scheduled.run_due(store, NOW, steps=steps, memory_store=None) == []
+    assert store.scheduled_runs() == []
+
+
+def test_the_hygiene_step_tolerates_being_called_without_a_library(tmp_path: Path):
+    """`run_due` already skips it; the guard inside is for anyone calling the step directly."""
+    store = JobStore(tmp_path / 'queue.db')
+
+    scheduled.STEPS['hygiene'](scheduled.Context(store, None))      # must not raise
