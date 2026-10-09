@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Iterator, NamedTuple, Sequence
+from math import ceil
+from typing import NamedTuple, Sequence
 
 from .memory import MemoryStore, canonical_fingerprint, canonical_json, folded_body, tokenize
 from .memory_models import MemoryRecord, Relation
+
+
+# A review report nobody can read is not a report: 600 nearly-identical memories used to emit
+# 179,400 overlap pairs. The cap is on what the report returns, not on what it found.
+OVERLAP_REPORT_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,8 @@ class MergeReport:
     exact_duplicates: tuple[MergeCandidate, ...]
     possible_overlaps: tuple[MergeCandidate, ...]
     broad_scopes: tuple[str, ...]
+    overlaps_found: int
+    overlap_limit: int = OVERLAP_REPORT_LIMIT
 
     def as_dict(self) -> dict:
         return {
@@ -33,10 +41,13 @@ class MergeReport:
             'broad_scopes': list(self.broad_scopes),
             'quality': {
                 'automatic_candidates': len(self.exact_duplicates),
-                'ambiguous_candidates': len(self.possible_overlaps),
+                'ambiguous_candidates': self.overlaps_found,
+                'ambiguous_shown': len(self.possible_overlaps),
+                'overlap_limit': self.overlap_limit,
+                'truncated': self.overlaps_found > len(self.possible_overlaps),
                 'broad_scope_observations': len(self.broad_scopes),
             },
-            'empty': not self.exact_duplicates and not self.possible_overlaps and not self.broad_scopes,
+            'empty': not self.exact_duplicates and not self.overlaps_found and not self.broad_scopes,
         }
 
 
@@ -116,9 +127,35 @@ def _group(profiles: Sequence[_Profile], key) -> dict:
     return grouped
 
 
-def _pairs_within(groups: Sequence[Sequence[_Profile]]) -> Iterator[tuple[_Profile, _Profile]]:
-    for members in groups:
-        yield from combinations(members, 2)
+def _blocked_pairs(profiles: Sequence[_Profile], threshold: float) -> set[tuple[int, int]]:
+    """Which pairs could still reach the threshold, by the prefix filter.
+
+    Tokens are ordered by one global rule (rarest first, ties by token) and each record is
+    indexed only under its `len - ceil(theta * len) + 1` rarest tokens. Two records sharing no
+    indexed token have Jaccard strictly below the threshold, so nothing that qualifies is lost.
+    The claim is checked, not trusted: the pairwise oracle in the tests walks every pair, and
+    the seeded fuzz test compares the two over random corpora and thresholds.
+    """
+    positions = sorted(item.position for item in profiles)
+    if threshold <= 0:
+        return set(combinations(positions, 2))        # everything qualifies; no pruning is safe
+    frequencies: dict[str, int] = {}
+    for item in profiles:
+        for token in item.tokens:
+            frequencies[token] = frequencies.get(token, 0) + 1
+    index: dict[str, list[int]] = {}
+    for item in profiles:
+        size = len(item.tokens)
+        if not size:
+            continue
+        keep = max(size - ceil(threshold * size) + 1, 1)
+        rarest = sorted(item.tokens, key=lambda token: (frequencies[token], token))
+        for token in rarest[:keep]:
+            index.setdefault(token, []).append(item.position)
+    pairs: set[tuple[int, int]] = set()
+    for members in index.values():
+        pairs.update(combinations(sorted(members), 2))
+    return pairs
 
 
 def _applicability_conflict(left: MemoryRecord, right: MemoryRecord) -> bool:
@@ -144,10 +181,14 @@ class MemoryMerge:
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
 
-    def report(self, *, similarity_threshold: float = 0.6) -> MergeReport:
+    def report(self, *, similarity_threshold: float = 0.6,
+               overlap_limit: int = OVERLAP_REPORT_LIMIT) -> MergeReport:
         if not 0 <= similarity_threshold <= 1:
             raise ValueError('similarity threshold must be between zero and one')
+        if overlap_limit < 1:
+            raise ValueError('overlap limit must be at least one')
         profiles = _profiles(self._live_records())
+        by_position = {item.position: item for item in profiles}
         exact: list[tuple[int, int, MergeCandidate]] = []
         matched: set[tuple[int, int]] = set()
         for members in _group(profiles, lambda item: item.fingerprint).values():
@@ -155,24 +196,24 @@ class MemoryMerge:
                 matched.add((left.position, right.position))
                 exact.append((left.position, right.position, _duplicate_candidate(left, right, 1.0)))
         overlaps: list[tuple[int, int, MergeCandidate]] = []
-        for kind, members in _group(profiles, lambda item: item.kind).items():
-            # Rules were never compared across differing boundaries; keep that by grouping on it.
-            groups = list(_group(members, lambda item: item.boundary).values()) \
-                if kind == 'rule' else [members]
-            for left, right in _pairs_within(groups):
-                if (left.position, right.position) in matched:
-                    continue
-                score = _jaccard(left.tokens, right.tokens)
-                if score >= similarity_threshold:
-                    overlaps.append((left.position, right.position, MergeCandidate(
-                        left.record.id, right.record.id, 'overlaps', round(score, 6),
-                        'token similarity is a review candidate, not proof')))
+        for first, second in sorted(_blocked_pairs(profiles, similarity_threshold)):
+            left, right = by_position[first], by_position[second]
+            if left.kind != right.kind or (first, second) in matched:
+                continue
+            # Rules were never compared across differing boundaries; that still stands.
+            if left.kind == 'rule' and left.boundary != right.boundary:
+                continue
+            score = _jaccard(left.tokens, right.tokens)
+            if score >= similarity_threshold:
+                overlaps.append((first, second, MergeCandidate(
+                    left.record.id, right.record.id, 'overlaps', round(score, 6),
+                    'token similarity is a review candidate, not proof')))
         exact.sort(key=lambda item: item[:2])
-        overlaps.sort(key=lambda item: item[:2])
         broad = tuple(item.record.id for item in profiles
                       if item.record.draft.scope.visibility == 'global')
         return MergeReport(len(profiles), tuple(pair[2] for pair in exact),
-                           tuple(pair[2] for pair in overlaps), broad)
+                           tuple(pair[2] for pair in overlaps[:overlap_limit]), broad,
+                           len(overlaps), overlap_limit)
 
     def merge_candidates(self, threshold: float = 0.9) -> tuple[MergeCandidate, ...]:
         """High-similarity pairs split into merge and conflict proposals.
@@ -184,24 +225,27 @@ class MemoryMerge:
         if not 0 <= threshold <= 1:
             raise ValueError('similarity threshold must be between zero and one')
         profiles = _profiles(self._live_records())
+        by_position = {item.position: item for item in profiles}
         proposals: list[tuple[int, int, MergeCandidate]] = []
-        for members in _group(profiles, lambda item: item.kind).values():
-            for left, right in combinations(members, 2):
-                score = _jaccard(left.tokens, right.tokens)
-                if score < threshold:
-                    continue
-                if _applicability_conflict(left.record, right.record):
-                    proposals.append((left.position, right.position, MergeCandidate(
-                        left.record.id, right.record.id, 'conflicts_with', round(score, 6),
-                        'high similarity with contradictory applicability; do not merge', False)))
-                elif left.fingerprint == right.fingerprint:
-                    proposals.append((left.position, right.position,
-                                      _duplicate_candidate(left, right, round(score, 6))))
-                else:
-                    proposals.append((left.position, right.position, MergeCandidate(
-                        left.record.id, right.record.id, 'overlaps', round(score, 6),
-                        'boundary-compatible overlap; review before merging', False)))
-        proposals.sort(key=lambda item: item[:2])
+        for first, second in sorted(_blocked_pairs(profiles, threshold)):
+            left, right = by_position[first], by_position[second]
+            if left.kind != right.kind:
+                continue
+            score = _jaccard(left.tokens, right.tokens)
+            if score < threshold:
+                continue
+            if _applicability_conflict(left.record, right.record):
+                proposals.append((first, second, MergeCandidate(
+                    left.record.id, right.record.id, 'conflicts_with', round(score, 6),
+                    'high similarity with contradictory applicability; do not merge', False)))
+                continue
+            if left.fingerprint == right.fingerprint:
+                proposals.append((first, second,
+                                  _duplicate_candidate(left, right, round(score, 6))))
+            else:
+                proposals.append((first, second, MergeCandidate(
+                    left.record.id, right.record.id, 'overlaps', round(score, 6),
+                    'boundary-compatible overlap; review before merging', False)))
         return tuple(pair[2] for pair in proposals)
 
     def _live_records(self) -> list[MemoryRecord]:

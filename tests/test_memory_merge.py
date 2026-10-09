@@ -1,4 +1,5 @@
 import hashlib
+import random
 import sys
 import types
 from itertools import combinations
@@ -7,7 +8,7 @@ import pytest
 
 from context_forge.memory import MemoryStore, canonical_fingerprint
 from context_forge.memory_merge import (
-    MemoryMerge, MergeCandidate, _applicability_conflict, _boundary, normalized_text,
+    OVERLAP_REPORT_LIMIT, MemoryMerge, MergeCandidate, _applicability_conflict, _boundary, normalized_text,
     token_similarity,
 )
 from context_forge.memory_models import (
@@ -327,3 +328,73 @@ def test_overlaps_keep_record_order_across_buckets(tmp_path):
 
     assert found == expected
     assert found == [('b-rule-one', 'c-rule-two'), ('d-knowledge-one', 'e-knowledge-two')]
+
+
+def test_blocking_never_loses_a_pair_the_brute_force_finds(tmp_path):
+    """Seeded random corpora against the pairwise oracle.
+
+    The prefix filter is a claim about math, so it gets a claim-shaped test: for every
+    threshold, the blocked pass must return exactly the pairs the all-pairs pass returns —
+    including their order.
+    """
+    for seed in range(8):
+        rng = random.Random(seed)
+        store = MemoryStore.initialize(tmp_path / f'fuzz-{seed}.db')
+        vocabulary = [f'w{index}' for index in range(rng.randint(4, 12))]
+        for index in range(rng.randint(3, 14)):
+            words = rng.sample(vocabulary, rng.randint(1, len(vocabulary)))
+            _put(store, f'r-{index}', ' '.join(words),
+                 kind=rng.choice(['knowledge', 'rule', 'review']))
+        records = _live(store)
+        for threshold in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0):
+            expected_exact, expected_overlaps = _brute_force(records, threshold)
+            report = MemoryMerge(store).report(similarity_threshold=threshold,
+                                               overlap_limit=10 ** 6)
+            assert [(item.left_id, item.right_id, item.automatic)
+                    for item in report.exact_duplicates] == expected_exact, (seed, threshold)
+            assert [(item.left_id, item.right_id)
+                    for item in report.possible_overlaps] == expected_overlaps, (seed, threshold)
+            expected = _brute_force_proposals(records, threshold)
+            assert [(item.left_id, item.right_id, item.kind, item.score, item.automatic)
+                    for item in MemoryMerge(store).merge_candidates(threshold=threshold)] \
+                == expected, (seed, threshold)
+
+
+def _many_overlaps(tmp_path):
+    """Ten memories sharing most of their wording, so the pair count exceeds any small cap."""
+    store = MemoryStore.initialize(tmp_path / 'cap.db')
+    for index in range(10):
+        _put(store, f'c-{index}', f'review the recall explanation every {index} days')
+    return store
+
+
+def test_report_caps_overlaps_and_reports_how_many_it_held_back(tmp_path):
+    store = _many_overlaps(tmp_path)
+    uncapped = MemoryMerge(store).report(similarity_threshold=0.5, overlap_limit=10 ** 6)
+    assert uncapped.overlaps_found == len(uncapped.possible_overlaps) > 5
+
+    capped = MemoryMerge(store).report(similarity_threshold=0.5, overlap_limit=5)
+    quality = capped.as_dict()['quality']
+
+    assert len(capped.possible_overlaps) == 5
+    assert [item.left_id for item in capped.possible_overlaps] \
+        == [item.left_id for item in uncapped.possible_overlaps[:5]]
+    assert capped.overlaps_found == uncapped.overlaps_found
+    assert (quality['ambiguous_candidates'], quality['ambiguous_shown'], quality['overlap_limit']) \
+        == (capped.overlaps_found, 5, 5)
+    assert quality['truncated'] is True
+    assert capped.as_dict()['empty'] is False
+
+
+def test_an_oversized_library_still_returns_a_readable_report(tmp_path):
+    store = _many_overlaps(tmp_path)
+    report = MemoryMerge(store).report(similarity_threshold=0.5)
+    assert len(report.possible_overlaps) <= OVERLAP_REPORT_LIMIT
+    assert report.overlap_limit == OVERLAP_REPORT_LIMIT
+
+
+@pytest.mark.parametrize('bad_limit', [0, -3])
+def test_a_limit_below_one_is_refused_instead_of_silently_hiding_everything(tmp_path, bad_limit):
+    store = _many_overlaps(tmp_path)
+    with pytest.raises(ValueError, match='at least one'):
+        MemoryMerge(store).report(similarity_threshold=0.5, overlap_limit=bad_limit)
