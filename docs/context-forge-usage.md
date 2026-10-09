@@ -77,6 +77,17 @@ forge jobs [--status dead_letter]
 forge jobs-retry <id>            # 死信救回
 ```
 
+### 整理与判决（每天自动 + 偶尔人工）
+
+```bash
+forge hygiene                   # 只读：完全重复 / 近似候选 / 矛盾 / 衰减 / 已判过的计数
+forge hygiene --apply           # 只跑可无人值守的两档：归档完全重复、标注矛盾（每档一轮上限 100）
+forge hygiene --review          # 逐条判决，必须在终端里敲（管道喂进来的答案一律拒绝）
+forge hygiene-undo <id>         # 撤销一次自动改动；先打印计划，加 --apply 才写
+```
+
+定时执行不需要命令：watcher 常驻循环每天跑一次 `--apply` 的那两档，每一步单独记账（`forge doctor` 的 `scheduled` 行会列出哪个步骤上次失败、错在哪）。近似重复和"很久没用"永远停在报告里等人判——**相似不等于相同，没人用不等于错**。自动档宽窄由你的判决记录回看：`forge memory-report` 的 `verdicts` 段给绝对数，不给百分比。
+
 ### 用户在 Obsidian 里做的事（无命令）
 
 | 想做什么 | 怎么操作 |
