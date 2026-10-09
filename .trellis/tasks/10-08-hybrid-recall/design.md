@@ -100,6 +100,20 @@
   否则等于新开一条没人看见的出境路；
 - embedding 未配置 → 出境面不变（不多一条路）。
 
+**配置契约（2026-10-08 定，因为 Anthropic 根本没有 embeddings 产品）**：
+embedding 通路**绝不复用**提取模型的 `ANTHROPIC_*` / `remote_api_url` 配置——沿用同一条配置去猜
+embedding 端点，只会得到一个 404 或者打错端点。单开三项，与提取通路彼此独立：
+
+| 配置项 | 含义 | 默认 |
+|---|---|---|
+| `embedding_base_url` | OpenAI 兼容的 `/v1/embeddings` 所在基址 | 空 = 语义通道关闭 |
+| `embedding_api_key` | 该基址的密钥，**只走环境变量或本地配置，不入库、不进 Git**（同提取通路那条约束）；本地 Ollama 可空 | 空 |
+| `embedding_model` | 模型名，同时决定向量维度 | 空 |
+
+按这个形状就能一套代码四种落地（详见 §10 的已验证端点）：OpenAI 远端、本地 Ollama（**不出境**）、
+Voyage、以及任何 OpenAI 兼容网关。**差异只允许出现在请求体的附加字段上**（如 Voyage 的 `input_type`），
+响应解析统一走 `data[i].embedding`，不为某个 provider 分叉整条管道。
+
 ---
 
 ## 7. 解释与打分
@@ -140,12 +154,30 @@
    （标签只有 `right`/`wrong`，没有"同义换问法"这一维），不能拿来量放宽的召回增量。
    放宽段的证据是自建语料 + 现有门槛不回归；真正的"字面远"增量测量要等有语义通道或新语料再做。
 
-顺序上 1、4、5、8 不依赖 embedding 通路，可以先做完再谈语义通道 —— 这是把"不确定的外部依赖"推到最后的办法。
+顺序上 5 已交付；1、4 在通路确认之前**不做**（给没有写入方的列建迁移是负债），8 的前提已证伪。
 
 ---
 
-## 10. 待验证（**未本机确认，不得当作事实写进代码或文档**）
+## 10. 端点事实（2026-10-08 本机探测 + 官方文档核对）
 
-- 本机 Ollama 是否可用、其 embedding 接口的**路径与响应字段名**（我并未验证过，不能凭记忆写）
-- 已配置的 remote provider 是否提供 embeddings（**我不知道**，需查该 provider 的实际接口）
-- 若上面两条都不成立 → 语义通道保持"设计就绪但默认关闭"，本任务的可用收益由第 5 步（关键词放宽）交付
+**本机现状（实测，不是估计）**
+
+- `ollama` 不在 PATH；`http://127.0.0.1:11434/api/tags` **连接超时** → 本地无 embedding 进程。
+- 提取通路是 Anthropic 形状（`provider_http.py`：`x-api-key` 头、默认基址 `api.anthropic.com`）。
+- Anthropic **自己没有 embeddings 端点**，官方文档把嵌入这件事指向第三方（用户告知：首选 Voyage AI）。
+  ⚠️ 我没能读到原文——`docs.anthropic.com/.../embeddings` 重定向后被区域封锁
+  （307 → `anthropic.com/app-unavailable-in-region`）。所以这条按"用户提供的信息"记录，**不是我验证的**。
+
+**第三方端点（今日读官方文档核过，✅ = 文档原文确认）**
+
+| provider | 端点 | 请求字段 | 响应 | 备注 |
+|---|---|---|---|---|
+| Ollama 原生 | ✅ `POST /api/embed` | `model`, `input` | ✅ `embeddings` | 本地跑 = **不出境**，是最省心的默认路 |
+| Ollama 兼容层 | ✅ `POST /v1/embeddings` | 未逐字段核对 | — | 与 OpenAI 同形状 |
+| Voyage | ✅ `POST https://api.voyageai.com/v1/embeddings` | ✅ `input`, `model`, `input_type` | ✅ `data[].embedding` 未解析过 | 比 OpenAI 多一个 `input_type`；模型如 `voyage-4` |
+| OpenAI | ⚠️ 未在本机/文档逐字段核对 | 行业事实是 `input`/`model` | ⚠️ | 换 provider 时的默认假设 |
+
+**仍未验证，不得当事实写进代码**：各家的批量上限、向量维度、错误体形状，以及 `data[i].embedding`
+这个解析在 Voyage 与 OpenAI 上是否真的完全一致。所以接通路的第一步**不是写代码**，是一次**只读探针**：
+拿一条与真实记忆无关的假字符串打一次 `/v1/embeddings`，把维度与响应字段名抄下来，再决定解析层。
+探针不写库、不迁移、不碰真实数据。
