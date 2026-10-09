@@ -132,6 +132,8 @@ forge mcp-install                     # 交给 claude CLI 注册（user scope，
 高危规则的两步：召回遇到没人批过的 `risk=high` 规则时**不返回正文**，只给 `confirmation_required` +
 摘要 + 句柄，`body` 是 `null`；你在终端批完之后，宿主用 `context_forge_memory_confirm(token)` 换取正文，
 一个句柄只用一次。同一条规则改一个字就是新版本，重新待批；批过的版本后续召回正常返回。
+这条闸门挡"没人读过就执行"，不挡"在本机读"——本地库和 vault 文件仍是明文，理由与边界见
+`docs/adr/0001-withhold-unapproved-high-risk-rules.md`。
 
 撤销：`forge mcp-install --uninstall`。配置细节与**已证/未证边界**见 `docs/mcp-transport.md`。
 
