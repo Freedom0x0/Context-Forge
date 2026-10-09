@@ -6,7 +6,7 @@ from math import ceil
 from typing import NamedTuple, Sequence
 
 from .memory import MemoryStore, canonical_fingerprint, canonical_json, folded_body, tokenize
-from .memory_models import MemoryRecord, Relation
+from .memory_models import MemoryRecord, Provenance, Relation
 
 
 # A review report nobody can read is not a report: 600 nearly-identical memories used to emit
@@ -251,6 +251,55 @@ class MemoryMerge:
     def _live_records(self) -> list[MemoryRecord]:
         return [record for record in self.store.current_records()
                 if record.draft.status not in {'archived', 'disabled'} and not record.draft.suppressed]
+
+    def merge_pair(self, candidate: MergeCandidate, *, idempotency_key: str):
+        """A human's override of the automatic gate: make one memory of the pair.
+
+        `apply_exact` refuses anything that is not fingerprint-identical or whose provenance
+        differs, because an unattended pass must not decide that. A human may. When they do,
+        the loser's projects, sessions and sources move onto the anchor first — archiving the
+        loser without that union would drop those projects from recall, which is the exact
+        thing that made the pair ineligible for automatic canonicalization.
+        """
+        anchor_id, loser_id = sorted((candidate.left_id, candidate.right_id))
+        anchor = self.store.get(anchor_id)
+        loser = self.store.get(loser_id)
+        if anchor is None or loser is None:
+            raise KeyError((anchor_id, loser_id))
+        if loser.draft.user_owned or loser.draft.suppressed or loser.draft.status == 'disabled':
+            return loser
+        if loser.draft.status == 'archived' and any(
+            relation['kind'] == 'duplicate_of' and relation['target_id'] == anchor.id
+            for relation in self.store.relations(loser.id)
+        ):
+            return loser        # this pair was already merged; a second pass must not mint a version
+        sources = {source.identity: source for source in anchor.draft.sources}
+        sources.update({source.identity: source for source in loser.draft.sources})
+        unified = anchor.draft.model_copy(update={
+            'sources': tuple(sources.values()),
+            'provenance': Provenance(
+                projects=tuple(sorted(set(anchor.draft.provenance.projects)
+                                      | set(loser.draft.provenance.projects))),
+                sessions=tuple(sorted(set(anchor.draft.provenance.sessions)
+                                      | set(loser.draft.provenance.sessions))),
+                paths=tuple(sorted(set(anchor.draft.provenance.paths)
+                                   | set(loser.draft.provenance.paths))),
+                host=anchor.draft.provenance.host),
+        })
+        # `put` replaces the version's relation set, so the anchor's own notes are carried over
+        # explicitly — dropping them silently would turn one merge into two losses.
+        merged_anchor = self.store.put(
+            anchor_id, unified, expected_version=anchor.version,
+            idempotency_key=f'{idempotency_key}:anchor', actor='human',
+            reason='human merge: provenance and sources unioned onto the anchor',
+            relations=tuple(self._outgoing_relations(anchor)))
+        retained = self._outgoing_relations(loser)
+        retained.append(Relation(target_id=merged_anchor.id,
+                                 target_version=merged_anchor.version, kind='duplicate_of'))
+        archived = loser.draft.model_copy(update={'status': 'archived'})
+        return self.store.put(loser_id, archived, expected_version=loser.version,
+                              idempotency_key=idempotency_key, actor='human',
+                              reason='human merge: duplicate archived', relations=tuple(retained))
 
     def apply_conflict(self, candidate: MergeCandidate, *, idempotency_key: str):
         """Annotate a contradictory pair with a `conflicts_with` relation.

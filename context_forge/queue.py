@@ -82,6 +82,11 @@ class JobStore:
           step TEXT PRIMARY KEY, last_success_at TEXT, last_error TEXT,
           last_error_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS hygiene_verdicts (
+          candidate_key TEXT PRIMARY KEY, action TEXT NOT NULL, ids_json TEXT NOT NULL,
+          score REAL NOT NULL, note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS episode_checkpoints (
           checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
           segment INTEGER NOT NULL, start_line INTEGER NOT NULL,
@@ -252,6 +257,32 @@ class JobStore:
     def scheduled_runs(self) -> list[dict]:
         return [dict(row) for row in self.db.execute(
             "SELECT * FROM scheduled_runs ORDER BY step")]
+
+    def record_verdict(self, candidate_key: str, action: str, memory_ids: list[str],
+                       *, score: float, note: str = '') -> None:
+        """Ledger one human decision per candidate, overwritten if they change their mind.
+
+        Overwriting is the point: the automation throttle reads "what did the human settle on
+        for this pair", so a second thought must not count twice against the first.
+        """
+        moment = _now()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO hygiene_verdicts(candidate_key,action,ids_json,score,note,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(candidate_key) DO UPDATE SET action=excluded.action,"
+                "ids_json=excluded.ids_json, score=excluded.score, note=excluded.note,"
+                "updated_at=excluded.updated_at",
+                (candidate_key, action, json.dumps(sorted(memory_ids)), score, note,
+                 moment, moment))
+
+    def verdict_counts(self) -> dict[str, int]:
+        return {row['action']: row['n'] for row in self.db.execute(
+            "SELECT action, COUNT(*) AS n FROM hygiene_verdicts GROUP BY action")}
+
+    def verdicts(self, limit: int = 50) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM hygiene_verdicts ORDER BY updated_at DESC LIMIT ?", (limit,))]
 
     def save_episode(self, episode: EpisodeRecord) -> EpisodeRecord:
         values = episode.model_dump()

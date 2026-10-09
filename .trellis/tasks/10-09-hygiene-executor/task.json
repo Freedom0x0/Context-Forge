@@ -1,0 +1,29 @@
+{
+  "id": "hygiene-executor",
+  "name": "hygiene-executor",
+  "title": "整理执行端：自动档接线 + 人审判决入口",
+  "description": "问题 3 的实施：G1/G2 由 `apply_auto_tier` 无人值守执行（CLI `--apply` 与每日轮），G3/G4 走 `adjudicate` 人审判决并记账；判决只给人，非终端直接拒绝",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-10-09",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "09-29-memory-improvement-brainstorm",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "source": "09-29-memory-improvement-brainstorm",
+    "layer": "5"
+  }
+}

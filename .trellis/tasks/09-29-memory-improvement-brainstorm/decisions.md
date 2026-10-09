@@ -128,6 +128,32 @@
   是否复用 MCP 工具、以及"保留/合并/归档/标替代"四种动作分别落到哪个已有函数）与**判决回流计量**
   （问题 1 的反对率要能看见这些动作，靠 `retrieval_events`/`signal_counts` 还是新增事件，待定）。
 
+**【第 5 层第 3 步实施结果 2026-10-09】人审判决入口（他选"按推荐推进"）**
+
+- 三个推荐被采纳：判决**只给人**（非 tty 直接 `Exit(2)`）、"保留"**也记账**（反对率要有分母）、
+  单独建 Trellis 任务 `10-09-hygiene-executor`。
+- 新执行函数 `MemoryMerge.merge_pair()`：**人推翻自动档**的合法路径。合并必须先把输家的
+  projects/sessions/paths 与 sources 并到锚点，再归档输家并挂 `duplicate_of → 锚点的新版本`。
+  不并就会重演第 4 层那个教训——归档输家等于把 beta 项目从召回里删掉。实测：合并后
+  `search(project='beta')` 命中锚点 ✅；同键重跑不多写版本 ✅。
+- 记账落在 **queue.db** 新表 `hygiene_verdicts`，主键 = 候选身份 `left:right`，**覆盖式**
+  （改主意不重复计数）。不在 memory.db 建表 ⇒ 不迁库、不动 schema 8。
+  注意：账在 queue.db，而 `memory-report` 从 memory.db 组装 ⇒ **本轮不做跨库比率**，
+  `forge hygiene`（只读）多一个 `adjudicated` 计数段。
+- 动作集合收窄一项，要认：原决策写"保留/合并/归档/标替代"四个，**"标替代"这轮不接**。
+  理由：`supersede` 要求人另写一条替代正文（它 publish 一个新 Candidate），那是编辑动作，
+  不是对一对候选的判决。硬接就会把"人没时间重写"变成"没有判决"。
+- `archive` 与 `suppress` 的下游差别有测试钉住：archived 仍会被模型静默吸收（就是 `veto_absorbed` 记的那笔），
+  disabled/suppressed 之后模型写入被 `ProtectedMemory` **直接拒绝**。
+- 交互循环留了一个 `_ask()` 小口子（只为测试能喂答案，tty 守卫仍查真 stdin）。第一版直接 `input()` +
+  假 stdin 在 pytest 下 EOF，白折腾一轮。
+- 我这一轮的手误，都在提交前修掉：又一次写出**不存在的命令名**（`forge hygiene-undo` ⇒ 改成如实说
+  "还没有撤销命令"）、`adjudicate` 忘了在函数内 import、`_json` 在新函数里没导入、
+  两处废话断言（`if False else` / `or` 二选一式断言）。
+- 变异验证 5 处，全被抓到：去 tty 守卫 → 1 红；先记账再校验目标 → 4 红；合并不并来源 → 1 红；
+  去"已合并过"守卫 → 1 红；不校验动作名 → 1 红。全量 **358 passed**。
+
+
 
 - 自动档尺度由问题 1 投票数据调节：某自动规则常被人撤销 = 开太宽，收紧；反之放宽。反对率是自动化的油门和刹车。
 

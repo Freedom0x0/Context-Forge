@@ -477,16 +477,20 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
 def hygiene(days: int = typer.Option(90, "--days", min=0),
             min_sources: int = typer.Option(3, "--min-sources", min=1),
             threshold: float = typer.Option(0.9, "--threshold", min=0.0, max=1.0),
-            apply: bool = typer.Option(False, "--apply")) -> None:
-    """Report hygiene items; --apply runs only the two unattended tiers (G1, G2)."""
+            apply: bool = typer.Option(False, "--apply"),
+            review: bool = typer.Option(False, "--review")) -> None:
+    """Report hygiene items; --apply runs the unattended tiers, --review adjudicates the rest."""
     store = _memory()
     if store is None:
         typer.echo("no memory database")
         raise typer.Exit(code=1)
-    from .memory_lifecycle import MemoryLifecycle
+    from .memory_lifecycle import MemoryLifecycle, adjudicate
     import json as _json
 
     lifecycle = MemoryLifecycle(store)
+    if review:
+        _adjudicate_interactively(store, lifecycle, threshold=threshold)
+        return
     if apply:
         actions = lifecycle.apply_auto_tier(merge_threshold=threshold)
         typer.echo(_json.dumps(actions, ensure_ascii=False, indent=2))
@@ -498,11 +502,70 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
                    f"deferred {actions['conflicts_deferred']}.")
         if actions['exact_applied']:
             typer.echo("every archive is a versioned event with `reason=exact duplicate "
-                       "canonicalization`; there is no restore command yet (it lands with "
-                       "`hygiene --review`).")
+                       "canonicalization`; there is no undo command wired yet.")
         return
     report = lifecycle.hygiene_report(days=days, min_sources=min_sources, threshold=threshold)
-    typer.echo(_json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    payload = report.as_dict()
+    payload['adjudicated'] = _store().verdict_counts()
+    typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+VERDICT_KEYS = {'k': 'keep', 'm': 'merge', 'a': 'archive', 's': 'suppress'}
+
+
+def _ask(prompt: str) -> str:
+    """One readline for the review loop, kept as a seam so the loop can be tested without
+    pretending a pipe is a terminal — the tty guard above is what the real run checks."""
+    return input(prompt)
+
+
+def _adjudicate_interactively(store, lifecycle, *, threshold: float) -> None:
+    """Walk the candidates the automatic tier will not touch, one at a time, in a terminal.
+
+    A model must not adjudicate its own memory, so a non-tty stdin is refused outright rather
+    than read as answers an agent typed. Anything unrecognised skips the candidate without
+    ledgering it: an unread answer is not a decision.
+    """
+    import sys
+
+    from .memory_lifecycle import adjudicate
+
+    if not sys.stdin.isatty():
+        typer.echo('--review needs a terminal: a verdict must be a human decision, not an '
+                   'answer an agent typed into a pipe')
+        raise typer.Exit(code=2)
+    import json as _json
+
+    queue = _store()
+    candidates = [item for item in lifecycle.hygiene_report(threshold=threshold).merges
+                  if item.kind != 'conflicts_with']
+    if not candidates:
+        typer.echo('nothing waiting on a verdict')
+        return
+    settled = 0
+    for index, candidate in enumerate(candidates, start=1):
+        typer.echo(f'[{index}/{len(candidates)}] {candidate.left_id} <-> {candidate.right_id}'
+                   f'  score {candidate.score:.2f}  | {candidate.reason}')
+        answer = _ask('    (k)eep / (m)erge / (a)rchive / (s)uppress / (q)uit? ').strip().lower()
+        if answer == 'q':
+            break
+        if answer not in VERDICT_KEYS:
+            typer.echo('    not understood; left unledgered and skipped')
+            continue
+        action = VERDICT_KEYS[answer]
+        target = None
+        if action in ('archive', 'suppress'):
+            target = _ask(f'    which one? [{candidate.left_id} / {candidate.right_id}] ').strip()
+        try:
+            result = adjudicate(candidate, action, store=store, queue=queue, target_id=target)
+        except ValueError as error:
+            typer.echo(f'    refused: {error}')
+            continue
+        settled += 1
+        typer.echo(f'    {action} recorded'
+                   + (f' -> {result["changed_id"]}@{result["changed_version"]}'
+                      if result['changed_id'] else ''))
+    typer.echo(f'{settled} verdict(s) this run; ledger: {_json.dumps(queue.verdict_counts())}')
 
 
 @app.command("retag-vault")

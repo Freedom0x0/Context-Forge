@@ -333,7 +333,7 @@ def test_hygiene_apply_runs_only_the_two_unattended_tiers(tmp_path, monkeypatch)
     assert (payload["exact_applied"], payload["conflicts_annotated"]) == (1, 0)
     assert store.get("twin").draft.status == "archived"
     assert store.get("solo").draft.status == "active"
-    assert "no restore command yet" in applied.output[applied.output.index("\n}") + 2:]
+    assert "no undo command wired yet" in applied.output[applied.output.rindex("}") + 1:]
     assert store.get("keep").draft.status == "active"
     assert store.get("solo").draft.status == "active"
 
@@ -466,3 +466,152 @@ def test_auto_pass_notes_a_contradiction_once_and_again_after_new_evidence(tmp_p
 
     assert third['conflicts_annotated'] == 1
     assert store.get('x').draft.status == 'active'          # a note never changes the content
+
+
+def _cross_project_pair(tmp_path, name='verdict.db'):
+    from context_forge.memory_merge import MemoryMerge
+
+    store = MemoryStore.initialize(tmp_path / name)
+    seed(store, 'alpha-one', body='never log raw tokens', project='alpha')
+    seed(store, 'beta-one', body='never log raw tokens', project='beta')
+    candidate = next(item for item in MemoryMerge(store).report().exact_duplicates
+                     if not item.automatic)
+    return store, candidate
+
+
+def test_a_keep_verdict_changes_nothing_but_gives_the_rate_a_denominator(tmp_path):
+    from context_forge.memory_lifecycle import adjudicate
+    from context_forge.queue import JobStore
+
+    store, candidate = _cross_project_pair(tmp_path)
+    queue = JobStore(tmp_path / 'queue.db')
+
+    result = adjudicate(candidate, 'keep', store=store, queue=queue)
+
+    assert result['changed_id'] is None
+    assert [store.get(x).draft.status for x in ('alpha-one', 'beta-one')] == ['active', 'active']
+    assert queue.verdict_counts() == {'keep': 1}
+
+
+def test_a_merge_verdict_moves_the_loser_s_project_onto_the_anchor(tmp_path):
+    """The pair the automatic tier refuses is exactly the pair a human may settle, and merging
+    must carry beta over or the beta library silently loses the rule it already had."""
+    from context_forge.memory_lifecycle import adjudicate
+    from context_forge.queue import JobStore
+
+    store, candidate = _cross_project_pair(tmp_path, 'merge.db')
+    queue = JobStore(tmp_path / 'queue.db')
+
+    result = adjudicate(candidate, 'merge', store=store, queue=queue)
+
+    anchor = store.get('alpha-one')
+    assert result['changed_id'] == 'beta-one'
+    assert set(anchor.draft.provenance.projects) == {'alpha', 'beta'}
+    assert store.get('beta-one').draft.status == 'archived'
+    assert [record.id for record in store.search('never log raw tokens', project='beta')] \
+        == ['alpha-one']
+    assert queue.verdict_counts() == {'merge': 1}
+
+    again = adjudicate(candidate, 'merge', store=store, queue=queue)
+    assert again['changed_version'] == store.get('beta-one').version == 2
+    assert store.get('alpha-one').version == 2        # a re-run mints no versions
+
+
+def test_re_deciding_a_candidate_overwrites_the_ledger_row(tmp_path):
+    from context_forge.memory_lifecycle import adjudicate
+    from context_forge.queue import JobStore
+
+    store, candidate = _cross_project_pair(tmp_path, 'rethink.db')
+    queue = JobStore(tmp_path / 'queue.db')
+    adjudicate(candidate, 'keep', store=store, queue=queue)
+
+    adjudicate(candidate, 'archive', store=store, queue=queue, target_id='beta-one')
+
+    assert queue.verdict_counts() == {'archive': 1}
+    assert len(queue.verdicts()) == 1
+    assert store.get('beta-one').draft.status == 'archived'
+
+
+def test_a_verdict_target_outside_the_pair_is_refused_and_never_ledgered(tmp_path):
+    from context_forge.memory_lifecycle import adjudicate
+    from context_forge.queue import JobStore
+
+    store, candidate = _cross_project_pair(tmp_path, 'bad_target.db')
+    queue = JobStore(tmp_path / 'queue.db')
+
+    with pytest.raises(ValueError, match='one of the two memories'):
+        adjudicate(candidate, 'archive', store=store, queue=queue, target_id='alpha-one-fake')
+    with pytest.raises(ValueError, match='unknown verdict'):
+        adjudicate(candidate, 'delete', store=store, queue=queue)
+
+    assert queue.verdict_counts() == {}
+    assert store.get('alpha-one').draft.status == 'active'
+
+
+def test_suppress_and_archive_differ_in_what_the_model_may_do_afterwards(tmp_path):
+    """Archived keeps absorbing evidence silently; disabled refuses the write outright."""
+    from context_forge.memory_lifecycle import adjudicate
+    from context_forge.queue import JobStore
+
+    store, candidate = _cross_project_pair(tmp_path, 'suppress.db')
+    queue = JobStore(tmp_path / 'queue.db')
+
+    adjudicate(candidate, 'suppress', store=store, queue=queue, target_id='beta-one')
+
+    assert store.get('beta-one').draft.status == 'disabled'
+    current = store.get('beta-one')
+    with pytest.raises(ProtectedMemory):
+        store.put('beta-one', current.draft, expected_version=current.version,
+                  idempotency_key='model-again', actor='model', reason='re-precipitated')
+
+
+class _TtyIn:
+    def isatty(self):
+        return True
+
+
+def _review_setup(tmp_path, monkeypatch, name, answers):
+    import context_forge.cli as cli
+    from context_forge.memory_lifecycle import MemoryLifecycle
+
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    store, _candidate = _cross_project_pair(tmp_path, name)
+    remaining = list(answers)
+    monkeypatch.setattr("sys.stdin", _TtyIn())
+    monkeypatch.setattr(cli, "_ask",
+                        lambda prompt: remaining.pop(0) if remaining else "q")
+    return cli, store, MemoryLifecycle(store)
+
+
+def test_review_refuses_a_pipe_because_a_model_must_not_judge_its_own_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    _cross_project_pair(tmp_path, 'memory.db')          # `_memory()` reads the runtime dir
+    import context_forge.cli as cli
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(cli.app, ["hygiene", "--review"], input="k\nk\n")
+
+    assert result.exit_code == 2
+    assert "needs a terminal" in result.output
+
+
+def test_review_ledgers_a_named_archive(tmp_path, monkeypatch, capsys):
+    cli, store, lifecycle = _review_setup(tmp_path, monkeypatch, 'walk.db', ["a", "beta-one"])
+
+    cli._adjudicate_interactively(store, lifecycle, threshold=0.9)
+
+    out = capsys.readouterr().out
+    assert "refused" not in out
+    assert cli._store().verdict_counts() == {"archive": 1}
+    assert store.get("beta-one").draft.status == "archived"
+
+
+def test_an_unread_answer_is_not_recorded_as_a_decision(tmp_path, monkeypatch, capsys):
+    cli, store, lifecycle = _review_setup(tmp_path, monkeypatch, 'garbage.db', ["x"])
+
+    cli._adjudicate_interactively(store, lifecycle, threshold=0.9)
+
+    out = capsys.readouterr().out
+    assert "left unledgered" in out
+    assert cli._store().verdict_counts() == {}
+    assert store.get("beta-one").draft.status == "active"

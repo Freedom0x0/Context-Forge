@@ -20,6 +20,47 @@ CONSOLIDATION_THRESHOLD = 0.6
 # is reported and picked up by the next pass.
 AUTO_TIER_LIMIT = 100
 
+# The four things a human may settle on for one merge candidate. `keep` changes nothing in the
+# library but is still ledgered: without it the opposition rate has no denominator.
+REVIEW_ACTIONS = ('keep', 'merge', 'archive', 'suppress')
+
+
+def adjudicate(candidate, action: str, *, store: MemoryStore, queue,
+               target_id: str | None = None, note: str = '') -> dict:
+    """Apply one human verdict to one merge candidate, and ledger it.
+
+    Only a human belongs here. The automatic tier refuses anything that is not
+    fingerprint-identical with the same provenance, and this is how that refusal gets
+    overridden on purpose rather than by silence. `archive` leaves the veto absorbing
+    evidence; `suppress` disables the row, after which model writes to it are refused outright.
+    """
+    if action not in REVIEW_ACTIONS:
+        raise ValueError(f'unknown verdict; expected one of {", ".join(REVIEW_ACTIONS)}')
+    key = f'{candidate.left_id}:{candidate.right_id}'
+    lifecycle = MemoryLifecycle(store)
+    changed = None
+    if action == 'merge':
+        changed = MemoryMerge(store).merge_pair(candidate, idempotency_key=f'verdict:{key}')
+    elif action in ('archive', 'suppress'):
+        if target_id not in (candidate.left_id, candidate.right_id):
+            raise ValueError('target must be one of the two memories in the candidate')
+        record = store.get(target_id)
+        if record is None:
+            raise KeyError(target_id)
+        reason = ('human verdict: archived as duplicate' if action == 'archive'
+                  else 'human verdict: suppressed as duplicate')
+        if action == 'archive':
+            changed = lifecycle.revise(target_id, status='archived', expected_version=record.version,
+                                       idempotency_key=f'verdict:{key}:{target_id}', reason=reason)
+        else:
+            changed = lifecycle.suppress(target_id, expected_version=record.version,
+                                         idempotency_key=f'verdict:{key}:{target_id}', reason=reason)
+    queue.record_verdict(key, action, [candidate.left_id, candidate.right_id],
+                         score=candidate.score, note=note)
+    return {'candidate_key': key, 'action': action, 'target_id': target_id,
+            'changed_id': changed.id if changed else None,
+            'changed_version': changed.version if changed else None}
+
 
 @dataclass(frozen=True)
 class Candidate:
