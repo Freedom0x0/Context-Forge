@@ -15,6 +15,10 @@ from .memory_models import (
 
 
 CONSOLIDATION_THRESHOLD = 0.6
+# One unattended pass may write at most this much, per tier. A pathological library — 300 exact
+# duplicates in one afternoon — must not be canonicalized in a single silent sweep; the remainder
+# is reported and picked up by the next pass.
+AUTO_TIER_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -391,6 +395,68 @@ class MemoryLifecycle:
         stale = record.draft.model_copy(update={'status': 'stale'})
         return self.store.put(memory_id, stale, expected_version=expected_version,
                               idempotency_key=idempotency_key, actor='system', reason=reason)
+
+    def apply_auto_tier(self, *, similarity_threshold: float = 0.6,
+                        merge_threshold: float = 0.9, limit: int = AUTO_TIER_LIMIT) -> dict:
+        """Run the two tiers that may work unattended: G1 exact duplicates, G2 conflict notes.
+
+        Everything else stays a report. Three rules hold this together:
+        - only `automatic` candidates are applied, and a candidate whose anchor went inactive
+          mid-pass is skipped, because a three-way duplicate group emits (a,b), (a,c) and (b,c)
+          and (b,c) would otherwise canonicalize onto an already-archived row;
+        - conflict notes are skipped when the pair already carries the relation, since relation
+          identity derives from the idempotency key and a fresh evidence version would otherwise
+          add a second note on every pass;
+        - the pass is capped at `limit` per action, and whatever it did not reach is reported.
+        """
+        merge = MemoryMerge(self.store)
+        live = {'active', 'conflicted'}
+
+        def is_live(record) -> bool:
+            return record is not None and record.draft.status in live and not record.draft.suppressed
+
+        exact_applied, exact_skipped, exact_deferred = 0, 0, 0
+        for candidate in merge.report(similarity_threshold=similarity_threshold).exact_duplicates:
+            if not candidate.automatic:
+                exact_skipped += 1                     # provenance differs: a human decides
+                continue
+            if exact_applied + exact_skipped >= limit:
+                exact_deferred += 1
+                continue
+            before = self.store.get(candidate.right_id)
+            if not (is_live(self.store.get(candidate.left_id)) and is_live(before)):
+                exact_skipped += 1                     # anchored on a row that left the library
+                continue
+            result = merge.apply_exact(
+                candidate, idempotency_key=f'hygiene:exact:{candidate.left_id}:{candidate.right_id}'
+                                           f'@{before.version}')
+            if before is not None and result.draft.status == 'archived' \
+                    and before.draft.status != 'archived':
+                exact_applied += 1
+            else:
+                exact_skipped += 1                     # human-owned, disabled or already done
+
+        conflicts = [item for item in merge.merge_candidates(threshold=merge_threshold)
+                     if item.kind == 'conflicts_with']
+        conflict_applied, conflict_skipped, conflict_deferred = 0, 0, 0
+        for candidate in conflicts:
+            if conflict_applied + conflict_skipped >= limit:
+                conflict_deferred += 1
+                continue
+            noted = any(item['kind'] == 'conflicts_with' and item['target_id'] == candidate.right_id
+                        for item in self.store.relations(candidate.left_id))
+            if noted:
+                conflict_skipped += 1
+                continue
+            merge.apply_conflict(candidate, idempotency_key=f'hygiene:conflict:{candidate.left_id}'
+                                                            f'@{self.store.get(candidate.left_id).version}'
+                                                            f':{candidate.right_id}')
+            conflict_applied += 1
+
+        return {'exact_applied': exact_applied, 'exact_skipped': exact_skipped,
+                'exact_deferred': exact_deferred, 'conflicts_annotated': conflict_applied,
+                'conflicts_skipped': conflict_skipped, 'conflicts_deferred': conflict_deferred,
+                'limit': limit}
 
     def hygiene_report(self, *, days: int = 90, min_sources: int = 3,
                        threshold: float = 0.9) -> HygieneReport:

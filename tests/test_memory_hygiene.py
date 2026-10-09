@@ -311,6 +311,36 @@ def test_hygiene_report_batches_and_cli_exports(tmp_path, monkeypatch):
     assert json.loads(result.output)["consolidation"][0]["role"] == "claim"
 
 
+def test_hygiene_apply_runs_only_the_two_unattended_tiers(tmp_path, monkeypatch):
+    """The default stays a read-only report; `--apply` is what writes, and it writes G1 and G2
+    only. The JSON block is machine output, so the prose note is read from after its `}`."""
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    seed(store, "keep", body="always validate external input")
+    seed(store, "twin", body="always validate external input")
+    seed(store, "solo", body="rotate signing keys yearly")
+
+    import context_forge.cli as cli
+    from typer.testing import CliRunner
+
+    untouched = CliRunner().invoke(cli.app, ["hygiene"])
+    assert json.loads(untouched.output)["merges"] != []
+    assert store.get("twin").draft.status == "active"
+
+    applied = CliRunner().invoke(cli.app, ["hygiene", "--apply"])
+    assert applied.exit_code == 0, applied.output
+    payload = json.loads(applied.output[:applied.output.index("\n}") + 2])
+    assert (payload["exact_applied"], payload["conflicts_annotated"]) == (1, 0)
+    assert store.get("twin").draft.status == "archived"
+    assert store.get("solo").draft.status == "active"
+    assert "no restore command yet" in applied.output[applied.output.index("\n}") + 2:]
+    assert store.get("keep").draft.status == "active"
+    assert store.get("solo").draft.status == "active"
+
+    rerun = CliRunner().invoke(cli.app, ["hygiene", "--apply"])
+    assert json.loads(rerun.output[:rerun.output.index("\n}") + 2])["exact_applied"] == 0
+
+
 # P4.5 -- the same batched report is exposed as an MCP tool
 def test_mcp_hygiene_tool(tmp_path, monkeypatch):
     import sys
@@ -340,3 +370,99 @@ def test_mcp_hygiene_tool(tmp_path, monkeypatch):
     payload = tools["context_forge_memory_hygiene"]()
     assert set(payload) == {"consolidation", "decay", "merges", "conflicts"}
     assert len(payload["consolidation"]) == 1
+
+
+def _trio(store):
+    for memory_id in ('a', 'b', 'c'):
+        seed(store, memory_id, body='always validate external input')
+
+
+def test_auto_pass_canonicalizes_a_three_way_group_onto_one_anchor(tmp_path):
+    """(a,b), (a,c) and (b,c) all come out of one group; (b,c) must not re-anchor onto the
+    already-archived b, or the library grows a version that points at a withheld memory."""
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    _trio(store)
+
+    report = MemoryLifecycle(store).apply_auto_tier()
+
+    assert report['exact_applied'] == 2
+    assert store.get('a').draft.status == 'active'
+    assert [store.get(x).draft.status for x in ('b', 'c')] == ['archived', 'archived']
+    for memory_id in ('b', 'c'):
+        noted = [(item['kind'], item['target_id']) for item in store.relations(memory_id)]
+        assert ('duplicate_of', 'a') in noted, memory_id
+        assert ('duplicate_of', 'b') not in noted, memory_id
+    # c was archived once, by (a,c); the later (b,c) pair must not re-archive it onto b.
+    assert store.get('c').version == 2
+
+
+def test_a_second_auto_pass_writes_nothing_new(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    _trio(store)
+    MemoryLifecycle(store).apply_auto_tier()
+    versions = {memory_id: store.get(memory_id).version for memory_id in ('a', 'b', 'c')}
+
+    again = MemoryLifecycle(store).apply_auto_tier()
+
+    assert again['exact_applied'] == 0 and again['conflicts_annotated'] == 0
+    assert {memory_id: store.get(memory_id).version for memory_id in ('a', 'b', 'c')} == versions
+
+
+def test_auto_pass_keeps_the_human_row_and_guards_by_provenance(tmp_path):
+    """Two different guards in one pass: a human-owned memory is never the one archived, so its
+    model-written twin goes; and a pair whose provenance differs is reported but not touched."""
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    seed(store, 'mine', body='prefer the smallest working change', user_owned=True)
+    seed(store, 'theirs', body='prefer the smallest working change')
+    seed(store, 'alpha', body='rotate signing keys yearly', project='alpha')
+    seed(store, 'beta', body='rotate signing keys yearly', project='beta')
+
+    report = MemoryLifecycle(store).apply_auto_tier()
+
+    assert report['exact_applied'] == 1
+    assert report['exact_skipped'] == 1
+    assert store.get('mine').draft.status == 'active'        # the human row survives untouched
+    assert store.get('theirs').draft.status == 'archived'    # the model copy is what goes
+    assert store.get('mine').draft.user_owned is True
+    assert [store.get(x).draft.status for x in ('alpha', 'beta')] == ['active', 'active']
+
+
+def test_auto_pass_is_capped_and_the_remainder_survives_to_the_next_pass(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    for memory_id in ('a', 'b', 'c', 'd'):
+        seed(store, memory_id, body='index transcripts by session id')
+
+    first = MemoryLifecycle(store).apply_auto_tier(limit=2)
+
+    assert (first['exact_applied'], first['exact_deferred']) == (2, 4)   # six pairs, cap of two
+    assert store.get('d').draft.status == 'active'
+
+    second = MemoryLifecycle(store).apply_auto_tier()
+
+    assert second['exact_applied'] == 1
+    assert store.get('d').draft.status == 'archived'
+
+
+def test_auto_pass_notes_a_contradiction_once_and_again_after_new_evidence(tmp_path):
+    """The relation id derives from the idempotency key, so the key has to carry the version the
+    note was written on: without it a new evidence version makes the next pass collide with its
+    own earlier event instead of restoring the note the update dropped."""
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    seed(store, 'x', body='prefer sqlite for local storage',
+         applicability=[Applicability(condition='windows only', result='true')])
+    seed(store, 'y', body='prefer sqlite for local storage',
+         applicability=[Applicability(condition='windows only', result='false')])
+
+    first = MemoryLifecycle(store).apply_auto_tier()
+    second = MemoryLifecycle(store).apply_auto_tier()
+
+    assert first['conflicts_annotated'] == 1
+    assert second['conflicts_annotated'] == 0 and second['conflicts_skipped'] >= 1
+
+    current = store.get('x')
+    store.put('x', current.draft, expected_version=current.version,
+              idempotency_key='evidence-again', reason='new evidence lands')
+    third = MemoryLifecycle(store).apply_auto_tier()
+
+    assert third['conflicts_annotated'] == 1
+    assert store.get('x').draft.status == 'active'          # a note never changes the content

@@ -476,8 +476,9 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
 @app.command("hygiene")
 def hygiene(days: int = typer.Option(90, "--days", min=0),
             min_sources: int = typer.Option(3, "--min-sources", min=1),
-            threshold: float = typer.Option(0.9, "--threshold", min=0.0, max=1.0)) -> None:
-    """Export the P4 hygiene report: consolidation, decay, merge and conflict items."""
+            threshold: float = typer.Option(0.9, "--threshold", min=0.0, max=1.0),
+            apply: bool = typer.Option(False, "--apply")) -> None:
+    """Report hygiene items; --apply runs only the two unattended tiers (G1, G2)."""
     store = _memory()
     if store is None:
         typer.echo("no memory database")
@@ -485,8 +486,22 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
     from .memory_lifecycle import MemoryLifecycle
     import json as _json
 
-    report = MemoryLifecycle(store).hygiene_report(
-        days=days, min_sources=min_sources, threshold=threshold)
+    lifecycle = MemoryLifecycle(store)
+    if apply:
+        actions = lifecycle.apply_auto_tier(merge_threshold=threshold)
+        typer.echo(_json.dumps(actions, ensure_ascii=False, indent=2))
+        typer.echo(f"exact duplicates archived {actions['exact_applied']}, "
+                   f"left for a human {actions['exact_skipped']}, "
+                   f"deferred by the cap {actions['exact_deferred']}; "
+                   f"contradictions noted {actions['conflicts_annotated']}, "
+                   f"already noted {actions['conflicts_skipped']}, "
+                   f"deferred {actions['conflicts_deferred']}.")
+        if actions['exact_applied']:
+            typer.echo("every archive is a versioned event with `reason=exact duplicate "
+                       "canonicalization`; there is no restore command yet (it lands with "
+                       "`hygiene --review`).")
+        return
+    report = lifecycle.hygiene_report(days=days, min_sources=min_sources, threshold=threshold)
     typer.echo(_json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
 
 
