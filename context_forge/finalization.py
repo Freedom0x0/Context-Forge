@@ -112,9 +112,14 @@ class FinalizationService:
             if exact:
                 merged_sources = {source.identity: source for source in exact.draft.sources}
                 merged_sources.update({source.identity: source for source in draft.sources})
+                prior = exact.draft.provenance
                 draft = exact.draft.model_copy(update={
                     "sources": tuple(merged_sources.values()),
-                    "provenance": draft.provenance,
+                    "provenance": Provenance(
+                        projects=tuple(sorted(set(prior.projects) | set(draft.provenance.projects))),
+                        sessions=tuple(sorted(set(prior.sessions) | set(draft.provenance.sessions))),
+                        paths=tuple(sorted(set(prior.paths) | set(draft.provenance.paths))),
+                        host=host),
                 })
             payload = {"draft": draft.model_dump(mode="json"), "expected_version": expected,
                        "relations": [item.model_dump(mode="json") for item in candidate.relations]}

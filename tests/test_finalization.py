@@ -177,3 +177,26 @@ def test_a_case_variant_lands_on_the_same_memory(tmp_path):
     assert records[0].version == 2
     assert {item.identity for item in records[0].draft.sources} == {"episode:s0:1:1",
                                                                    "episode:s1:1:1"}
+
+
+def test_a_second_project_widens_provenance_instead_of_replacing_it(tmp_path):
+    """Measured before the fix: one rule precipitated from two projects came back with
+    projects=('beta',) only — the first project had been quietly deleted."""
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    for session, project in (("s0", "alpha"), ("s1", "beta")):
+        transcript = tmp_path / f"{session}.jsonl"
+        transcript.write_text('{"message":"cache fix"}\n', encoding="utf-8")
+        collector.collect(session, transcript, project, "claude_code")
+        receipt = collector.request_finalize(session, end_kind="manual",
+                                             event_id=f"manual-{session}")
+        FinalizationService(queue, memory,
+                            Gateway(made_of("SQLite 事务要回滚", session))).finalize(
+            receipt.finalization_id)
+
+    records = list(memory.current_records())
+    assert len(records) == 1
+    assert records[0].version == 2
+    assert set(records[0].draft.provenance.projects) == {"alpha", "beta"}
+    assert set(records[0].draft.provenance.sessions) == {"s0", "s1"}
