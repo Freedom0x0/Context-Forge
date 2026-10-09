@@ -102,6 +102,7 @@ class JobStore:
           memory_id TEXT NOT NULL, payload_json TEXT NOT NULL,
           status TEXT NOT NULL, result_json TEXT, error TEXT,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          vetoed INTEGER NOT NULL DEFAULT 0,
           UNIQUE(finalization_id,ordinal)
         );
         """)
@@ -128,6 +129,11 @@ class JobStore:
         if "host" not in episode_columns:
             self.db.execute(
                 "ALTER TABLE session_episodes ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'")
+        operation_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(finalization_operations)").fetchall()}
+        if "vetoed" not in operation_columns:
+            self.db.execute(
+                "ALTER TABLE finalization_operations ADD COLUMN vetoed INTEGER NOT NULL DEFAULT 0")
         self.db.commit()
 
     def enqueue_event(self, event: SessionEvent) -> bool:
@@ -353,10 +359,16 @@ class JobStore:
             )
             for operation in operations:
                 payload = json.dumps(operation["payload"], sort_keys=True, separators=(",", ":"))
+                # Named columns, never positional: this table grows through _migrate's ALTER,
+                # and a bare VALUES list silently mismatches each time it does.
                 self.db.execute(
-                    "INSERT OR IGNORE INTO finalization_operations VALUES (?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
+                    "INSERT OR IGNORE INTO finalization_operations "
+                    "(operation_key,finalization_id,ordinal,request_hash,memory_id,payload_json,"
+                    "status,result_json,error,created_at,updated_at,vetoed) "
+                    "VALUES (?,?,?,?,?,?,'pending',NULL,NULL,?,?,?)",
                     (operation["operation_key"], finalization_id, operation["ordinal"],
-                     operation["request_hash"], operation["memory_id"], payload, _now(), _now()),
+                     operation["request_hash"], operation["memory_id"], payload, _now(), _now(),
+                     int(operation.get('vetoed', False))),
                 )
         result = self.receipt(finalization_id)
         assert result is not None
@@ -760,9 +772,16 @@ class JobStore:
         episodes_inferred = self.db.execute(
             "SELECT COUNT(*) AS n FROM session_episodes WHERE end_kind='inferred'"
         ).fetchone()["n"]
+        # Writes that landed on a memory a human had already put away. Only `archived` absorbs
+        # one silently — a suppressed, disabled or human-owned row refuses the write outright
+        # (ProtectedMemory), and that failure is already counted under jobs.
+        veto_absorbed = self.db.execute(
+            "SELECT COUNT(*) AS n FROM finalization_operations WHERE vetoed=1 AND status='committed'"
+        ).fetchone()["n"]
         return {
             "sessions": sessions,
             "episodes_inferred": episodes_inferred,
+            "veto_absorbed": veto_absorbed,
             "reviews": reviews_total,
             "reviews_draft": reviews_draft,
             "reviews_approved": reviews_approved,

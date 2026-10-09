@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from context_forge.domain import FinalizationOutput
 from context_forge.episodes import EpisodeCollector
 from context_forge.finalization import FinalizationService
-from context_forge.memory import MemoryStore, canonical_fingerprint
+from context_forge.memory import MemoryStore, ProtectedMemory, canonical_fingerprint
 from context_forge.memory_models import MemoryDraft, Provenance, Source
 from context_forge.queue import JobStore
 
@@ -200,3 +200,118 @@ def test_a_second_project_widens_provenance_instead_of_replacing_it(tmp_path):
     assert records[0].version == 2
     assert set(records[0].draft.provenance.projects) == {"alpha", "beta"}
     assert set(records[0].draft.provenance.sessions) == {"s0", "s1"}
+
+
+def _precipitate(queue, memory, collector, tmp_path, session, body):
+    """One episode through the real write path: returns (memory ids, finalization id)."""
+    transcript = tmp_path / f"{session}.jsonl"
+    transcript.write_text('{"message":"cache fix"}\n', encoding="utf-8")
+    collector.collect(session, transcript, "demo", "claude_code")
+    receipt = collector.request_finalize(session, end_kind="manual", event_id=f"manual-{session}")
+    ids = FinalizationService(queue, memory, Gateway(made_of(body, session))).finalize(
+        receipt.finalization_id)
+    return ids, receipt.finalization_id
+
+
+def _put_as_human(memory, memory_id, **updates):
+    record = memory.get(memory_id)
+    memory.put(memory_id, record.draft.model_copy(update=updates),
+               expected_version=record.version, idempotency_key=f"human-{memory_id}",
+               actor="human", reason="人说不要这条")
+
+
+def test_a_vetoed_memory_absorbs_new_evidence_and_the_count_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    """The veto holds: still archived, still invisible to recall. The count is how anyone
+    learns the model keeps re-proposing an idea the human already put away."""
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    body = "SQLite 事务必须成对回滚"
+
+    written, _ = _precipitate(queue, memory, collector, tmp_path, "s1", body)
+    memory_id = written[0]
+    _put_as_human(memory, memory_id, status="archived")
+
+    again, finalization_id = _precipitate(queue, memory, collector, tmp_path, "s2", body)
+
+    assert again == [memory_id]                       # the same row, not a fresh active twin
+    record = memory.get(memory_id)
+    assert record.draft.status == "archived"
+    assert record.version == 3
+    assert memory.search(body, project="demo") == []  # still withheld
+    assert queue.finalization_operations(finalization_id)[0]["vetoed"] == 1
+    assert queue.metrics()["veto_absorbed"] == 1
+
+    from context_forge import status as status_mod
+    snapshot = status_mod.collect(queue)
+    assert snapshot["veto_absorbed"] == 1
+    assert "landed on a memory you archived" in status_mod.render_text(snapshot)
+
+
+def test_an_ordinary_update_is_not_counted_as_a_veto(tmp_path):
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    body = "SQLite 事务必须成对回滚"
+
+    written, finalization_id = _precipitate(queue, memory, collector, tmp_path, "s1", body)
+    again, second = _precipitate(queue, memory, collector, tmp_path, "s2", body)
+
+    assert again == written
+    assert memory.get(written[0]).draft.status == "active"
+    assert memory.search(body, project="demo") != []
+    assert queue.finalization_operations(second)[0]["vetoed"] == 0
+    assert queue.metrics()["veto_absorbed"] == 0
+
+
+def test_a_suppressed_row_refuses_the_write_instead_of_absorbing_it(tmp_path):
+    """The two veto kinds differ, and only one is silent: `archived` absorbs new evidence,
+    while a suppressed, disabled or human-owned row refuses it at `put` (ProtectedMemory)."""
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    body = "SQLite 事务必须成对回滚"
+
+    written, _ = _precipitate(queue, memory, collector, tmp_path, "s1", body)
+    _put_as_human(memory, written[0], suppressed=True)
+
+    with pytest.raises(ProtectedMemory):
+        _precipitate(queue, memory, collector, tmp_path, "s2", body)
+
+    assert memory.get(written[0]).draft.suppressed is True
+    assert memory.search(body, project="demo") == []
+    assert queue.metrics()["veto_absorbed"] == 0        # refused, not absorbed
+
+
+def test_an_older_queue_database_gains_the_column_without_breaking_writes(tmp_path):
+    """`vetoed` arrives through ALTER, so the insert must name its columns; a positional
+    VALUES list would have silently mismatched the moment the column appeared."""
+    import sqlite3
+
+    path = tmp_path / "queue.db"
+    JobStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE finalization_operations DROP COLUMN vetoed")
+
+    queue = JobStore(path)
+    with queue.db:
+        columns = [row[1] for row in queue.db.execute(
+            "PRAGMA table_info(finalization_operations)").fetchall()]
+    assert "vetoed" in columns
+
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    written, finalization_id = _precipitate(queue, memory, EpisodeCollector(queue), tmp_path,
+                                           "s1", "SQLite 事务必须成对回滚")
+    assert len(written) == 1
+    assert queue.finalization_operations(finalization_id)[0]["vetoed"] == 0
+
+
+def test_the_status_line_announces_an_absorbed_veto_and_stays_quiet_otherwise():
+    from context_forge import status as status_mod
+
+    snapshot = {"reviews_pending": 0, "jobs_dead_letter": 0, "sessions": 3,
+                "rules_enabled": 0, "memory_unsynced": 0, "veto_absorbed": 2}
+
+    assert "2 write(s) landed on a memory you archived" in status_mod.render_text(snapshot)
+    assert "landed on a memory" not in status_mod.render_text({**snapshot, "veto_absorbed": 0})

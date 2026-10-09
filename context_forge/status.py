@@ -43,6 +43,7 @@ def collect(store: JobStore) -> dict[str, int | str]:
             f"{host}={str(info['last_activity_at'])[:10]}({info['episodes']})"
             for host, info in store.host_activity().items()),
         "episodes_inferred": m["episodes_inferred"],
+        "veto_absorbed": m["veto_absorbed"],
         "egress": egress_destination if egress_kind != 'none' else "none",
         "episodes_by_host": ", ".join(f"{host}={count}" for host, count in store.host_counts().items()),
         "reviews": m["reviews"],
@@ -72,6 +73,9 @@ def render_text(status: dict[str, int | str]) -> str:
         parts.append(f"{dead} job(s) in dead-letter")
     if status.get("memory_unsynced"):
         parts.append(f"{status['memory_unsynced']} vault document(s) not in memory.db (run forge sync)")
+    if status.get("veto_absorbed"):
+        parts.append(f"{status['veto_absorbed']} write(s) landed on a memory you archived "
+                     "(it stays out of recall; disabled or suppressed ones refuse outright)")
     if not parts:
         parts.append("queue clean")
     return f"[context-forge] {'; '.join(parts)} ({status['sessions']} sessions, {status['rules_enabled']} rules)"

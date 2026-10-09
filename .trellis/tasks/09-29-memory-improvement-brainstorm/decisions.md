@@ -330,6 +330,29 @@
   (a) 什么都不做（现状语义正确，只是看不见）；(b) **只加观测**——落地时记一个计数，
   不改写入行为（我的推荐）；(c) 让否决不吸收证据（跳过写入），风险是新证据丢失。
 
+**【实施 2026-10-09 晚，选 (b)】只加计数，不改写入行为**
+
+- 实施过程中量出一条我原先没分清的差别 —— **否决有两种，行为完全不同**：
+  - `archived`：**静默吸收**。状态不变、版本上涨（实测 v2 → v3）、`search` 仍返回空 ⇒ 只有这种需要计数。
+  - `suppressed` / `disabled` / `user_owned`：`store.put` 在 `memory.py:1165` 直接抛 `ProtectedMemory`
+    拒绝写入 ⇒ 已经走 jobs 失败/死信那条**本来就看得见**的路，不该被这个计数再讲一遍。
+  ⇒ 计数只统计 `vetoed=1 AND status='committed'`。我的第一版测试把 suppressed 也当成"吸收"，
+  被这个拒绝挡下才看清 —— 又是一次"先量再写"。
+- 形状：`finalization_operations.vetoed INTEGER NOT NULL DEFAULT 0`（queue.db 是派生库，
+  走既有 `_migrate()` 的 `PRAGMA table_info` + `ALTER` 模板，与 `session_episodes.host` 同形状）。
+  **幂等不受影响**：`request_hash` 只覆盖 `payload`，标记是它的兄弟字段，所以重放/去重语义一字未动
+  （F1 那条"幂等键由身份派生"的纪律不能被我为一个计数器打破）。
+- 顺带拆掉一个埋雷：这张表的插入原本是**位置式 `VALUES (?,?,…)`**，加一列就会静默错位。
+  改成显式列名。变异验证：退回位置式 → 9 红。
+- 出口：`JobStore.metrics()['veto_absorbed']` 与 `forge status` 的一行文本
+  （"N write(s) landed on a memory you archived (it stays out of recall; disabled or suppressed ones refuse outright)" —— 文案只讲被计量的那一种）。
+  **一处偏离要说明**：我给选项时写的是"进 `memory-report`"，实际进了 `status`。
+  原因：`memory-report` 由 `MemoryEffectiveness` 从 memory.db 组装，而这个数在 queue.db；
+  塞进报表要把 JobStore 传进去，为一条计数跨一次库 —— 不值。`status` 是队列态的既有出口。
+- 变异验证 4 处：写入门不标记 → 1 红；把被拒绝的写入也算成吸收 → 1 红；插入退回位置式 → 9 红；
+  状态行不再播报 → 2 红。全量 **341 passed**。
+
+
 
 **【第 5 步实施结果 2026-10-09】前缀分块 + 报告上限**
 

@@ -121,12 +121,17 @@ class FinalizationService:
                         paths=tuple(sorted(set(prior.paths) | set(draft.provenance.paths))),
                         host=host),
                 })
+            # A memory the human archived, disabled or suppressed still absorbs evidence and
+            # stays out of recall: `_put` copies the stored draft, so the veto holds. Counting
+            # it is the only way anyone learns the model keeps re-proposing a rejected idea.
+            vetoed = bool(exact is not None and (exact.draft.status in {'archived', 'disabled'}
+                                                 or exact.draft.suppressed))
             payload = {"draft": draft.model_dump(mode="json"), "expected_version": expected,
                        "relations": [item.model_dump(mode="json") for item in candidate.relations]}
             operation_key = f"{finalization_id}:memory:{ordinal}"
             operations.append({
                 "operation_key": operation_key, "ordinal": ordinal,
                 "memory_id": memory_id, "payload": payload,
-                "request_hash": digest(canonical_json(payload)),
+                "request_hash": digest(canonical_json(payload)), "vetoed": vetoed,
             })
         return operations
