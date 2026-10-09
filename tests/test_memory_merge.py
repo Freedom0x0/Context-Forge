@@ -12,7 +12,7 @@ from context_forge.memory_merge import (
     token_similarity,
 )
 from context_forge.memory_models import (
-    Applicability, ApplicabilityScope, MemoryDraft, MemorySpace, Provenance, Source,
+    Applicability, ApplicabilityScope, MemoryDraft, MemorySpace, Provenance, Relation, Source,
 )
 
 
@@ -398,3 +398,30 @@ def test_a_limit_below_one_is_refused_instead_of_silently_hiding_everything(tmp_
     store = _many_overlaps(tmp_path)
     with pytest.raises(ValueError, match='at least one'):
         MemoryMerge(store).report(similarity_threshold=0.5, overlap_limit=bad_limit)
+
+
+def test_undoing_a_canonicalization_keeps_the_other_notes(tmp_path):
+    """A `put` replaces the version's relation set. If undo carried nothing forward, revoking
+    the duplicate edge would also delete a human's `refines` note that happened to sit on it."""
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    add(store, "a", "same")
+    add(store, "b", "same")
+    anchor, duplicate = store.get("a"), store.get("b")
+    store.put("b", duplicate.draft, expected_version=duplicate.version,
+              idempotency_key="note-b", actor="human", reason="a human note",
+              relations=(Relation(target_id=anchor.id, target_version=anchor.version,
+                                  kind="refines"),))
+
+    merge = MemoryMerge(store)
+    archived = merge.apply_exact(merge.report().exact_duplicates[0], idempotency_key="merge-1")
+    duplicate_edge = next(item for item in store.relations("b", archived.version)
+                          if item["kind"] == "duplicate_of")
+
+    restored = merge.undo_exact("b", expected_version=archived.version,
+                                relation_id=duplicate_edge["id"], idempotency_key="undo-1")
+
+    kinds = [item["kind"] for item in store.relations("b", restored.version)]
+    assert kinds == ["refines"]
+    assert store.get("b").draft.status == "active"
+    assert [item["kind"] for item in store.relations("a")
+            if item["target_id"] == "b"] == []          # the anchor was never rewritten

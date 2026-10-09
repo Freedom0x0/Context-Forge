@@ -153,6 +153,34 @@
 - 变异验证 5 处，全被抓到：去 tty 守卫 → 1 红；先记账再校验目标 → 4 红；合并不并来源 → 1 红；
   去"已合并过"守卫 → 1 红；不校验动作名 → 1 红。全量 **358 passed**。
 
+**【第 5 层第 4、5 步实施结果 2026-10-09】撤销命令 + G4 人审**
+
+- `forge hygiene-undo <id>`：**撤销哪一种由库决定**，不让人再报一次类型——带 `duplicate_of` 出边的
+  走 `undo_exact`（归档输家回 active 且那条关系被撤销），带 `derived_from` 出边的走 `undo_consolidation`。
+  默认 dry-run 打印计划、`--apply` 才写；幂等键 `undo:{id}@{version}`（身份派生，不含日期）。
+  没有这两类出边的直接 BadParameter，不"随便撤销一个"。
+- `adjudicate_decay(memory_id, keep|stale)` 与 review 的第二段（先 G3 再 G4，`q` 中止后续阶段）。
+  `mark_stale` 对 `role='preference'` 抛错 ⇒ 判决被拒且**不记账**：被拒的动作不能进分母。
+- 两条实现细节值得记：`undo_consolidation` 只撤销 `memory_id==该条且version==该版本` 的 derived_from，
+  所以测试断言用 `include_revoked=True` 看"被撤销"而不是看"消失"；而 `undo_exact` 之后当前版本不再有
+  出边，因此第二次 `hygiene-undo` 自然落到 BadParameter（用它当"撤销是可重复判定"的守卫测试）。
+- 变异验证 5 处全红：去掉 dry-run 门 → 1 红；撤销归档但不撤销关系 → 1 红；G4 不校验动作名 → 1 红；
+  先记账再执行 → 1 红；G4 阶段被跳过 → 1 红。全量 **363 passed**。
+- 第 5 层只剩**判决计入反对率报表**这一件，且它要先定跨库口径（账在 queue.db，报表读 memory.db）。
+
+**【补记 2026-10-09】`hygiene-undo` 暴露并修掉一条既有缺陷**
+
+- `undo_exact` 重写版本时**不带出边**，而 `put` 是替换该版本的关系集合 ⇒ 撤销一条重复边会顺手删掉
+  输家身上别的人工关系（例如 `refines`）。这个缺陷一直都在（`apply_exact` 会把出边带到归档版本），
+  但只有"人能撤销"之后才可达 —— 是我这条命令让它变成真路径，所以一并修：撤销时把除被撤那条以外的
+  出边全部带到新版本。
+- 测试 `test_undoing_a_canonicalization_keeps_the_other_notes` 断言 `kinds == ['refines']`；
+  变异两处各 1 红（不带任何边 / 把要撤的边也带回去）。全量 **364 passed**。
+- 教训记一条：**给一个既有函数加用户入口之前，先看它的副作用面**。我第 4 步最初写"还没有撤销命令"
+  是对的谨慎，但接到命令层时没主动去查 `undo_exact` 的关系语义，是它自己撞出来的（靠测试，不靠运气）。
+
+
+
 
 
 - 自动档尺度由问题 1 投票数据调节：某自动规则常被人撤销 = 开太宽，收紧；反之放宽。反对率是自动化的油门和刹车。

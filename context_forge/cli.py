@@ -489,7 +489,7 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
 
     lifecycle = MemoryLifecycle(store)
     if review:
-        _adjudicate_interactively(store, lifecycle, threshold=threshold)
+        _adjudicate_interactively(store, lifecycle, threshold=threshold, days=days)
         return
     if apply:
         actions = lifecycle.apply_auto_tier(merge_threshold=threshold)
@@ -502,7 +502,7 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
                    f"deferred {actions['conflicts_deferred']}.")
         if actions['exact_applied']:
             typer.echo("every archive is a versioned event with `reason=exact duplicate "
-                       "canonicalization`; there is no undo command wired yet.")
+                       "canonicalization`; reverse one with `forge hygiene-undo <memory-id>`.")
         return
     report = lifecycle.hygiene_report(days=days, min_sources=min_sources, threshold=threshold)
     payload = report.as_dict()
@@ -510,7 +510,60 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
     typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@app.command("hygiene-undo")
+def hygiene_undo(memory_id: str,
+                 apply: bool = typer.Option(False, "--apply"),
+                 version: int = typer.Option(None, "--version", min=1)) -> None:
+    """Reverse one automatic change on this memory: an archived duplicate, or a consolidation.
+
+    Which one is read from the library rather than asked for, because the two look identical to
+    a human typing a bare id: the loser of a canonicalization carries `duplicate_of`, the
+    abstraction carries `derived_from`.
+    """
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    import json as _json
+
+    record = store.get(memory_id)
+    if record is None:
+        raise typer.BadParameter(f'no memory {memory_id}')
+    expected = version or record.version
+    outgoing = [item for item in store.relations(memory_id) if item['memory_id'] == memory_id]
+    duplicate = next((item for item in outgoing if item['kind'] == 'duplicate_of'), None)
+    derived = [item for item in outgoing if item['kind'] == 'derived_from']
+    if duplicate is not None:
+        plan = {'action': 'unarchive duplicate', 'memory_id': memory_id, 'expected_version': expected,
+                'revoke_relation': duplicate['id'], 'canonical': duplicate['target_id']}
+    elif derived:
+        plan = {'action': 'undo consolidation', 'memory_id': memory_id,
+                'expected_version': expected, 'revoke_relations': [item['id'] for item in derived]}
+    else:
+        raise typer.BadParameter(f'{memory_id} carries no automatic change to undo '
+                                 '(only duplicate_of and derived_from edges are reversible here)')
+    if not apply:
+        typer.echo(_json.dumps({'dry_run': True, **plan}, ensure_ascii=False, indent=2))
+        typer.echo('run it with --apply')
+        return
+    key = f'undo:{memory_id}@{expected}'
+    if duplicate is not None:
+        from .memory_merge import MemoryMerge
+
+        restored = MemoryMerge(store).undo_exact(memory_id, expected_version=expected,
+                                                 relation_id=duplicate['id'], idempotency_key=key)
+    else:
+        from .memory_lifecycle import MemoryLifecycle
+
+        restored = MemoryLifecycle(store).undo_consolidation(memory_id, expected_version=expected,
+                                                             idempotency_key=key)
+    typer.echo(_json.dumps({'applied': True, 'memory_id': restored.id,
+                            'version': restored.version, 'status': restored.draft.status},
+                           ensure_ascii=False))
+
+
 VERDICT_KEYS = {'k': 'keep', 'm': 'merge', 'a': 'archive', 's': 'suppress'}
+DECAY_KEYS = {'s': 'stale', 'k': 'keep'}
 
 
 def _ask(prompt: str) -> str:
@@ -519,7 +572,7 @@ def _ask(prompt: str) -> str:
     return input(prompt)
 
 
-def _adjudicate_interactively(store, lifecycle, *, threshold: float) -> None:
+def _adjudicate_interactively(store, lifecycle, *, threshold: float, days: int) -> None:
     """Walk the candidates the automatic tier will not touch, one at a time, in a terminal.
 
     A model must not adjudicate its own memory, so a non-tty stdin is refused outright rather
@@ -528,7 +581,7 @@ def _adjudicate_interactively(store, lifecycle, *, threshold: float) -> None:
     """
     import sys
 
-    from .memory_lifecycle import adjudicate
+    from .memory_lifecycle import adjudicate, adjudicate_decay
 
     if not sys.stdin.isatty():
         typer.echo('--review needs a terminal: a verdict must be a human decision, not an '
@@ -537,17 +590,16 @@ def _adjudicate_interactively(store, lifecycle, *, threshold: float) -> None:
     import json as _json
 
     queue = _store()
-    candidates = [item for item in lifecycle.hygiene_report(threshold=threshold).merges
-                  if item.kind != 'conflicts_with']
-    if not candidates:
-        typer.echo('nothing waiting on a verdict')
-        return
+    report = lifecycle.hygiene_report(days=days, threshold=threshold)
+    candidates = [item for item in report.merges if item.kind != 'conflicts_with']
     settled = 0
+    stopped = False
     for index, candidate in enumerate(candidates, start=1):
-        typer.echo(f'[{index}/{len(candidates)}] {candidate.left_id} <-> {candidate.right_id}'
+        typer.echo(f'[G3 {index}/{len(candidates)}] {candidate.left_id} <-> {candidate.right_id}'
                    f'  score {candidate.score:.2f}  | {candidate.reason}')
         answer = _ask('    (k)eep / (m)erge / (a)rchive / (s)uppress / (q)uit? ').strip().lower()
         if answer == 'q':
+            stopped = True
             break
         if answer not in VERDICT_KEYS:
             typer.echo('    not understood; left unledgered and skipped')
@@ -565,6 +617,27 @@ def _adjudicate_interactively(store, lifecycle, *, threshold: float) -> None:
         typer.echo(f'    {action} recorded'
                    + (f' -> {result["changed_id"]}@{result["changed_version"]}'
                       if result['changed_id'] else ''))
+    if not stopped:
+        for index, record in enumerate(report.decay, start=1):
+            typer.echo(f'[G4 {index}/{len(report.decay)}] {record.id} v{record.version}'
+                       f'  {record.draft.summary}')
+            answer = _ask('    (s)take / (k)eep / (q)uit? ').strip().lower()
+            if answer == 'q':
+                break
+            if answer not in DECAY_KEYS:
+                typer.echo('    not understood; left unledgered and skipped')
+                continue
+            try:
+                result = adjudicate_decay(record.id, DECAY_KEYS[answer], store=store, queue=queue)
+            except ValueError as error:
+                typer.echo(f'    refused: {error}')
+                continue
+            settled += 1
+            typer.echo(f'    {DECAY_KEYS[answer]} recorded'
+                       + (f' -> {result["changed_id"]}@{result["changed_version"]}'
+                          if result['changed_id'] else ''))
+    if not candidates and not report.decay:
+        typer.echo('nothing waiting on a verdict')
     typer.echo(f'{settled} verdict(s) this run; ledger: {_json.dumps(queue.verdict_counts())}')
 
 

@@ -32,8 +32,10 @@
 - **"标替代"（supersede）不接**：`supersede` 要求人**另写一条替代正文**（它 publish 一个新 Candidate），
   那是编辑动作，不是对一对候选的判决。留给 revise/supersede 自己的入口。
   这是对原决策四动作中的一项主动收窄，理由记在此处。
-- **`forge hygiene-undo` 不存在**：`undo_exact`/`undo_consolidation` 是库函数，没有命令入口。
-  `--apply` 的提示语如实说"还没有撤销命令"，不编命令名。
+- **`forge hygiene-undo <id>`（第 4 步）**：读库决定撤销哪一种——带 `duplicate_of` 出边的走 `undo_exact`
+  （归档的输家回 active，且**那条关系被撤销**），带 `derived_from` 出边的走 `undo_consolidation`。
+  默认 dry-run 只打印计划，`--apply` 才写。幂等键 `undo:{id}@{version}`（身份派生，不含日期）。
+  认不出的记忆报 BadParameter，而不是随便撤销一个。
 - 判决回流到问题 1 的反对率报表：账已在 queue.db，但报表从 memory.db 组装 ⇒ **本轮不做跨库比率**。
 
 ## 验收
@@ -43,9 +45,20 @@
 - [x] 人审 merge 保住跨来源项目的召回（实测 beta 项目仍能命中锚点）
 - [x] 非终端 `--review` 被拒；认不得的答复不记账
 - [x] 每步都有变异验证（第 1 步 5 处、第 2 步 3 处、第 3 步 5 处，全被抓到）
-- [ ] 撤销命令（`hygiene-undo`）与 G4 的人审交互
+- [x] 撤销命令 `hygiene-undo`：默认 dry-run、`--apply` 才写、被撤销的关系有断言
+- [x] G4 人审：`adjudicate_decay(keep|stale)` + review 循环第二段（先 G3 后 G4；`q` 中止后续阶段）
 - [ ] 判决计入反对率报表（跨库口径待定）
 
 ## 全量测试
 
-第 3 步完成时 **358 passed**。
+第 3 步 358 passed；第 4、5 步（`hygiene-undo` 与 G4 人审）完成时 **363 passed**。
+变异验证累计：第 1 步 5 处、第 2 步 3 处、第 3 步 5 处、第 4/5 步 5 处（撤回去 dry-run、
+撤销不解除关系、G4 不校验动作名、被拒判决仍记账、G4 阶段被跳过），全被抓到。
+
+- **第 4 步** `forge hygiene-undo`（默认 dry-run）。
+- **第 5 步** G4：`adjudicate_decay(memory_id, keep|stale)`，review 循环加第二段；
+  `mark_stale` 对 `role='preference'` 抛错 ⇒ 该判决被拒且**不记账**（有测试）。
+- **顺带修掉一条既有缺陷**（我的命令把它变成人可达）：`undo_exact` 原先不带出边重写版本，
+  而 `put` 是**替换**该版本的关系集合 ⇒ 撤销重复边会顺手删掉输家身上别的人工关系（如 `refines`）。
+  现在撤销时把除被撤那条之外的出边全部带到新版本上。测试：`kinds == ['refines']`；
+  变异两处（不带任何边 / 把要撤的边也带回去）各 1 红。

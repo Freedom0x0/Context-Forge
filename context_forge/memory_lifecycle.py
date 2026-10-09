@@ -24,6 +24,29 @@ AUTO_TIER_LIMIT = 100
 # library but is still ledgered: without it the opposition rate has no denominator.
 REVIEW_ACTIONS = ('keep', 'merge', 'archive', 'suppress')
 
+# G4: "nobody used it" is not "it is wrong", so only a human may mark it stale.
+DECAY_ACTIONS = ('keep', 'stale')
+
+
+def adjudicate_decay(memory_id: str, action: str, *, store: MemoryStore, queue,
+                     note: str = '') -> dict:
+    """One human verdict on a decay candidate, ledgered the same way merge candidates are."""
+    if action not in DECAY_ACTIONS:
+        raise ValueError(f'unknown decay verdict; expected one of {", ".join(DECAY_ACTIONS)}')
+    key = f'decay:{memory_id}'
+    changed = None
+    if action == 'stale':
+        record = store.get(memory_id)
+        if record is None:
+            raise KeyError(memory_id)
+        changed = MemoryLifecycle(store).mark_stale(
+            memory_id, expected_version=record.version, idempotency_key=f'verdict:{key}',
+            reason='human verdict: marked stale')
+    queue.record_verdict(key, action, [memory_id], score=0.0, note=note)
+    return {'candidate_key': key, 'action': action,
+            'changed_id': changed.id if changed else None,
+            'changed_version': changed.version if changed else None}
+
 
 def adjudicate(candidate, action: str, *, store: MemoryStore, queue,
                target_id: str | None = None, note: str = '') -> dict:

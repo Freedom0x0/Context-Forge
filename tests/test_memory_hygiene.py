@@ -333,7 +333,7 @@ def test_hygiene_apply_runs_only_the_two_unattended_tiers(tmp_path, monkeypatch)
     assert (payload["exact_applied"], payload["conflicts_annotated"]) == (1, 0)
     assert store.get("twin").draft.status == "archived"
     assert store.get("solo").draft.status == "active"
-    assert "no undo command wired yet" in applied.output[applied.output.rindex("}") + 1:]
+    assert "forge hygiene-undo" in applied.output[applied.output.rindex("}") + 1:]
     assert store.get("keep").draft.status == "active"
     assert store.get("solo").draft.status == "active"
 
@@ -598,7 +598,7 @@ def test_review_refuses_a_pipe_because_a_model_must_not_judge_its_own_memory(tmp
 def test_review_ledgers_a_named_archive(tmp_path, monkeypatch, capsys):
     cli, store, lifecycle = _review_setup(tmp_path, monkeypatch, 'walk.db', ["a", "beta-one"])
 
-    cli._adjudicate_interactively(store, lifecycle, threshold=0.9)
+    cli._adjudicate_interactively(store, lifecycle, threshold=0.9, days=90)
 
     out = capsys.readouterr().out
     assert "refused" not in out
@@ -609,9 +609,108 @@ def test_review_ledgers_a_named_archive(tmp_path, monkeypatch, capsys):
 def test_an_unread_answer_is_not_recorded_as_a_decision(tmp_path, monkeypatch, capsys):
     cli, store, lifecycle = _review_setup(tmp_path, monkeypatch, 'garbage.db', ["x"])
 
-    cli._adjudicate_interactively(store, lifecycle, threshold=0.9)
+    cli._adjudicate_interactively(store, lifecycle, threshold=0.9, days=90)
 
     out = capsys.readouterr().out
     assert "left unledgered" in out
     assert cli._store().verdict_counts() == {}
     assert store.get("beta-one").draft.status == "active"
+
+
+def test_undo_reverses_an_archived_duplicate_and_does_nothing_on_a_dry_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    seed(store, 'a', body='shared policy')
+    seed(store, 'b', body='shared policy')
+    merge = MemoryMerge(store)
+    merge.apply_exact(merge.report().exact_duplicates[0], idempotency_key='merge-1')
+    assert store.get('b').draft.status == 'archived'
+    archived_version = store.get('b').version
+
+    import context_forge.cli as cli
+    from typer.testing import CliRunner
+
+    dry = CliRunner().invoke(cli.app, ['hygiene-undo', 'b'])
+    assert dry.exit_code == 0, dry.output
+    assert json.loads(dry.output[:dry.output.rindex('}') + 1])['dry_run'] is True
+    assert store.get('b').draft.status == 'archived'          # nothing applied
+
+    applied = CliRunner().invoke(cli.app, ['hygiene-undo', 'b', '--apply'])
+    assert applied.exit_code == 0, applied.output
+    assert json.loads(applied.output)['status'] == 'active'
+    assert store.get('b').draft.status == 'active'
+    noted = store.relations('b', version=archived_version, include_revoked=True)
+    assert [item for item in noted if item['kind'] == 'duplicate_of'
+            and item['revoked_event'] is not None]
+
+    again = CliRunner().invoke(cli.app, ['hygiene-undo', 'b', '--apply'])
+    assert again.exit_code != 0                                # nothing left to reverse
+
+
+def test_undo_reverses_a_consolidation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    episodes(store)
+    lifecycle = MemoryLifecycle(store)
+    created = lifecycle.consolidate(lifecycle.consolidation_candidates(min_sources=3)[0])
+    assert store.get(created.id).draft.status == 'active'
+
+    import context_forge.cli as cli
+    from typer.testing import CliRunner
+
+    applied = CliRunner().invoke(cli.app, ['hygiene-undo', created.id, '--apply'])
+    assert applied.exit_code == 0, applied.output
+
+    assert json.loads(applied.output)['status'] == 'archived'
+    assert store.get(created.id).draft.status == 'archived'
+    # The abstraction's `derived_from` edges are revoked, not silently left pointing at members.
+    noted = store.relations(created.id, version=created.version, include_revoked=True)
+    assert [item for item in noted if item['kind'] == 'derived_from'
+            and item['revoked_event'] is not None]
+
+
+def test_a_decay_verdict_stales_the_memory_and_keeps_it_out_of_recall(tmp_path):
+    from context_forge.memory_lifecycle import adjudicate_decay
+    from context_forge.queue import JobStore
+
+    store = MemoryStore.initialize(tmp_path / 'g4.db')
+    seed(store, 'aged', body='shared policy')
+    queue = JobStore(tmp_path / 'queue.db')
+
+    adjudicate_decay('aged', 'stale', store=store, queue=queue)
+
+    assert store.get('aged').draft.status == 'stale'
+    assert store.search('shared policy', project='demo') == []
+    assert queue.verdict_counts() == {'stale': 1}
+
+
+def test_a_preference_is_refused_a_stale_verdict_and_nothing_is_ledgered(tmp_path):
+    """'Nobody used it' does not apply to a taste: only confirmation counts, so the verdict
+    is refused rather than quietly accepted — and a refused verdict must not be counted."""
+    from context_forge.memory_lifecycle import adjudicate_decay
+    from context_forge.queue import JobStore
+
+    store = MemoryStore.initialize(tmp_path / 'pref.db')
+    seed(store, 'taste', body='dark mode please', role='preference')
+    queue = JobStore(tmp_path / 'queue.db')
+
+    with pytest.raises(ValueError, match='preference time is judged'):
+        adjudicate_decay('taste', 'stale', store=store, queue=queue)
+    with pytest.raises(ValueError, match='unknown decay verdict'):
+        adjudicate_decay('taste', 'delete', store=store, queue=queue)
+
+    assert queue.verdict_counts() == {}
+    assert store.get('taste').draft.status == 'active'
+
+
+def test_review_walks_decay_items_after_merge_candidates(tmp_path, monkeypatch, capsys):
+    cli, store, lifecycle = _review_setup(tmp_path, monkeypatch, 'g4loop.db', ["k", "s"])
+    seed(store, 'aged', body='aged policy')
+    backdate(store, 'aged')
+
+    cli._adjudicate_interactively(store, lifecycle, threshold=0.9, days=90)
+
+    out = capsys.readouterr().out
+    assert '[G3 1/1]' in out and '[G4 1/1]' in out
+    assert cli._store().verdict_counts() == {'keep': 1, 'stale': 1}
+    assert store.get('aged').draft.status == 'stale'

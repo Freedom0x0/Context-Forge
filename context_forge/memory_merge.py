@@ -350,18 +350,25 @@ class MemoryMerge:
         if record is None:
             raise KeyError(memory_id)
         restored = record.draft.model_copy(update={'status': 'active'})
+        # A `put` replaces the version's relation set, so every note the archived row carried
+        # has to be carried forward — except the duplicate edge this undo is revoking.
         result = self.store.put(memory_id, restored, expected_version=expected_version,
                                 idempotency_key=idempotency_key, actor='human',
-                                reason='undo duplicate canonicalization')
+                                reason='undo duplicate canonicalization',
+                                relations=tuple(self._outgoing_relations(record,
+                                                                         skip_relation_id=relation_id)))
         self.store.revoke_relation(relation_id, expected_version=result.version,
                                    idempotency_key=idempotency_key + ':relation',
                                    reason='undo duplicate canonicalization', actor='human')
         return result
 
-    def _outgoing_relations(self, record: MemoryRecord) -> list[Relation]:
+    def _outgoing_relations(self, record: MemoryRecord,
+                            skip_relation_id: str | None = None) -> list[Relation]:
         relations = []
         for item in self.store.relations(record.id, record.version):
             if item['memory_id'] != record.id or item['version'] != record.version:
+                continue
+            if skip_relation_id is not None and item['id'] == skip_relation_id:
                 continue
             relations.append(Relation(target_id=item['target_id'], target_version=item['target_version'],
                                       kind=item['kind'], evidence_ids=tuple(item['evidence_ids']),
