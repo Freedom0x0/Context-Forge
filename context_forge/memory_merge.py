@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Iterator, NamedTuple, Sequence
 
-from .memory import MemoryStore, canonical_json, tokenize
+from .memory import MemoryStore, canonical_json, folded_body, tokenize
 from .memory_models import MemoryRecord, Relation
 
 
@@ -41,7 +41,7 @@ class MergeReport:
 
 
 def normalized_text(record: MemoryRecord) -> str:
-    return ' '.join(record.draft.body.casefold().split())
+    return folded_body(record.draft.body)
 
 
 def token_similarity(left_text: str, right_text: str) -> float:

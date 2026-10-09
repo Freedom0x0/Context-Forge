@@ -1,4 +1,6 @@
-SCHEMA_VERSION = 7
+# 8 folds case in canonical_fingerprint: no new DDL, but every stored fingerprint must be
+# recomputed from snapshot_json, which is what MemoryStore.migrate() already does for it.
+SCHEMA_VERSION = 8
 
 CORE = """
 CREATE TABLE memories (

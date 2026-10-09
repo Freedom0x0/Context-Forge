@@ -51,11 +51,19 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
 
 
+def folded_body(body: str) -> str:
+    """The one definition of "same wording": casefolded, whitespace collapsed.
+
+    The write gate's fingerprint and the merge report both need it, and a split between
+    them would mean two answers to "is this the same assertion".
+    """
+    return ' '.join(body.casefold().split())
+
+
 def canonical_fingerprint(draft: MemoryDraft) -> str:
     """Exact assertion + decision-boundary fingerprint; never an entity ID."""
-    body = re.sub(r'\s+', ' ', draft.body.strip())
     value = {
-        'kind': draft.kind, 'role': draft.role, 'body': body,
+        'kind': draft.kind, 'role': draft.role, 'body': folded_body(draft.body),
         'applicability': [item.model_dump(mode='json') for item in draft.applicability],
         'scope': draft.scope.model_dump(mode='json'),
         'space': draft.space.model_dump(mode='json'),
@@ -577,7 +585,7 @@ class MemoryStore:
         if version == SCHEMA_VERSION:
             report['unchanged'] = -1
             return report
-        if version not in (1, 2, 3, 4, 5):
+        if not 1 <= version < SCHEMA_VERSION:
             raise MemoryStoreError(f'cannot migrate memory schema {version} to {SCHEMA_VERSION}')
         if not dry_run:
             report['backup'] = str(cls._online_backup(path))

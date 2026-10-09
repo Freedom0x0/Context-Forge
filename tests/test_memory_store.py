@@ -11,7 +11,7 @@ from context_forge.memory import (
     SourceConflict, VersionConflict,
 )
 from context_forge.memory_models import (
-    AccessPolicy, Applicability, MemoryDraft, Provenance, Relation, Scope, Source,
+    AccessPolicy, Applicability, MemoryDraft, MemorySpace, Provenance, Relation, Scope, Source,
 )
 from context_forge.memory_schema import SCHEMA_VERSION
 
@@ -360,3 +360,66 @@ def test_put_preserves_created_at_and_fingerprint_column_order(store):
     assert loaded.created_at == record.created_at
     assert loaded.created_at[:4].isdigit()
     assert store.find_exact(canonical_fingerprint(record.draft)).id == record.id
+
+
+def test_fingerprint_folds_case_and_spacing_but_still_separates_boundaries():
+    """Case and whitespace are wording; kind, privacy and source projects are not."""
+    folded = canonical_fingerprint(draft(body='SQLite 事务 要回滚'))
+
+    assert canonical_fingerprint(draft(body='   sqlite   事务\n要回滚  ')) == folded
+    assert canonical_fingerprint(draft(body='SQLite 事务 要回滚', kind='rule')) != folded
+    assert canonical_fingerprint(draft(body='SQLite 事务 要回滚',
+                                       space=MemorySpace(owner='default', privacy='private'))) != folded
+    # Provenance is deliberately outside the fingerprint: the same assertion learned twice
+    # in two projects is one memory, and the write gate must not fork it.
+    assert canonical_fingerprint(MemoryDraft(
+        body='SQLite 事务 要回滚', status='active',
+        provenance=Provenance(projects=('other',)))) == folded
+
+
+def test_find_exact_reaches_a_memory_written_with_different_case(store):
+    """The hole this closes: 'SQLite …' and 'sqlite …' used to land as two active memories."""
+    put(store, 'upper', draft(body='SQLite 事务 要回滚'))
+
+    hit = store.find_exact(canonical_fingerprint(draft(body='sqlite 事务 要回滚')))
+
+    assert hit is not None and hit.id == 'upper'
+
+
+def test_migrate_recomputes_fingerprints_from_the_snapshot(tmp_path):
+    """The fingerprint is a derived cache: authority stays in snapshot_json, so a definition
+    change is one more backfill, not a data migration."""
+    path = tmp_path / 'memory.db'
+    store = MemoryStore.initialize(path)
+    record = put(store, 'mixed-case', draft(body='SQLite 事务 要回滚'))
+    expected = canonical_fingerprint(record.draft)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE memory_versions SET canonical_fingerprint=''")
+        connection.execute('PRAGMA user_version=7')
+    assert expected != ''
+
+    report = MemoryStore.migrate(path, dry_run=True)
+    assert (report['from'], report['to'], report['dry_run']) == (7, SCHEMA_VERSION, True)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute('SELECT canonical_fingerprint FROM memory_versions').fetchone()[0] == ''
+
+    MemoryStore.migrate(path, dry_run=False)
+    with sqlite3.connect(path) as connection:
+        stored = connection.execute('SELECT canonical_fingerprint FROM memory_versions').fetchone()[0]
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+    assert stored == expected
+
+
+@pytest.mark.parametrize('version', [6, 7])
+def test_migrate_accepts_every_schema_older_than_the_current_one(tmp_path, version):
+    """A hard-coded list of accepted versions rots on the next bump: v6 could not reach v7."""
+    path = tmp_path / 'memory.db'
+    put(MemoryStore.initialize(path), 'one', draft())
+    with sqlite3.connect(path) as connection:
+        connection.execute(f'PRAGMA user_version={version}')
+
+    with pytest.raises(MemoryStoreError, match='initialize/migrate'):
+        MemoryStore(path)                       # ordinary open must not migrate
+
+    report = MemoryStore.migrate(path, dry_run=False)
+    assert (report['from'], report['to']) == (version, SCHEMA_VERSION)

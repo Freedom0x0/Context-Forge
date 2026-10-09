@@ -6,6 +6,7 @@ import pytest
 
 from context_forge.memory import MemoryStore, MemoryStoreError
 from context_forge.memory_models import MemoryDraft, Provenance
+from context_forge.memory_schema import SCHEMA_VERSION
 from context_forge.provider_http import PROMPT_VERSION, _PROMPT
 from context_forge.risk import classify_risk, risk_of
 
@@ -95,7 +96,7 @@ def test_v4_database_gains_a_backfilled_risk_column(tmp_path: Path):
 
     report = MemoryStore.migrate(path, dry_run=False)
 
-    assert report['to'] == 7
+    assert report['to'] == SCHEMA_VERSION
     with sqlite3.connect(path) as connection:
         assert dict(connection.execute(
             'SELECT memory_id, risk FROM memory_versions').fetchall()) == {

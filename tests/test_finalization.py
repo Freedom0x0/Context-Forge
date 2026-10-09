@@ -144,3 +144,36 @@ def test_projection_failure_keeps_committed_receipt_for_retry(tmp_path: Path):
     assert saved.status == "committed"
     assert "disk full" in saved.error
     assert receipt.finalization_id in [item.finalization_id for item in queue.pending_receipts()]
+
+
+def made_of(body, session):
+    source = Source(identity=f"episode:{session}:1:1", kind="observation",
+                    session_id=session, excerpt=body)
+    return {"schema_version": 1, "candidates": [{
+        "candidate_id": "cache", "evidence_refs": [source.identity],
+        "draft": MemoryDraft(body=body, status="active",
+                             provenance=Provenance(sessions=(session,)), sources=(source,))
+        .model_dump(mode="json"),
+    }], "deferred_topics": [], "no_memory_reason": None}
+
+
+def test_a_case_variant_lands_on_the_same_memory(tmp_path):
+    """One assertion written twice, differing only in case, must not fork a second record."""
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    for index, body in enumerate(("SQLite 事务要回滚", "sqlite 事务要回滚")):
+        session = f"s{index}"
+        transcript = tmp_path / f"{session}.jsonl"
+        transcript.write_text('{"message":"cache fix"}\n', encoding="utf-8")
+        collector.collect(session, transcript, "demo", "claude_code")
+        receipt = collector.request_finalize(session, end_kind="manual",
+                                             event_id=f"manual-{index}")
+        FinalizationService(queue, memory, Gateway(made_of(body, session))).finalize(
+            receipt.finalization_id)
+
+    records = list(memory.current_records())
+    assert len(records) == 1
+    assert records[0].version == 2
+    assert {item.identity for item in records[0].draft.sources} == {"episode:s0:1:1",
+                                                                   "episode:s1:1:1"}

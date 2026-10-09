@@ -8,6 +8,7 @@ import pytest
 
 from context_forge.memory import MemoryStore
 from context_forge.memory_models import MemoryDraft, Provenance, Source
+from context_forge.memory_schema import SCHEMA_VERSION
 
 BODY = 'cache keys must include the tenant id'
 
@@ -123,7 +124,7 @@ def test_v5_database_gains_dimensions_and_the_aggregate(tmp_path: Path):
 
     report = MemoryStore.migrate(path, dry_run=False)
 
-    assert report['to'] == 7
+    assert report['to'] == SCHEMA_VERSION
     assert {'host', 'model', 'prompt_version'} <= set(columns(path))
     row = memory_row(path)
     assert (row['host'], row['model'], row['prompt_version']) == ('codex', 'test-model',
