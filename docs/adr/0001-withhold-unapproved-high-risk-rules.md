@@ -54,8 +54,10 @@ accepted — 2026-10-09
   `context_forge_memory_get`——那条路同样扣正文（`get()` 和 `search()` 走同一个判断），但少一个入口少一次试探。
 
 一处漏写在这里：`summary` 是唯一可能带出指令内容的保留字段。风险判定读的是 `body`，不读 `summary`
-（risk.py:59），所以模型如果把整句话抄进 `summary`，这条路就漏，而且**现在没有任何检查会报出来**——
-写入门不看 summary，报表里没有这一项。真要堵是往 `requires_confirmation` 里再看一次 `summary`，本轮没做。
+（risk.py:59），而沉淀提示词把整个 draft 的 JSON schema 发给模型（provider_http.py:267），`summary` 就是其中一个可写字段。
+所以模型把整句指令抄进 `summary` 是可能发生的，发生了就随召回漏出去，**而且现在没有任何检查会报**。
+`note` 里写了"不要按摘要猜测正文"，那是对宿主要求，不是拦截。真要堵是把 `requires_confirmation` 的判定
+同时读 `summary`，本轮没做。
 
 ## 重复换取为什么要计数，以及为什么两个门必须一样严
 
