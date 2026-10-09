@@ -1,6 +1,7 @@
 # 8 folds case in canonical_fingerprint: no new DDL, but every stored fingerprint must be
 # recomputed from snapshot_json, which is what MemoryStore.migrate() already does for it.
-SCHEMA_VERSION = 8
+# 9 adds pending_confirmations (the high-risk approval ledger): DDL only, no derived data.
+SCHEMA_VERSION = 9
 
 CORE = """
 CREATE TABLE memories (
@@ -115,6 +116,13 @@ CREATE TABLE precipitation_migrations (
  batch_id TEXT PRIMARY KEY, status TEXT NOT NULL, plan_json TEXT NOT NULL,
  created_at TEXT NOT NULL, rolled_back_at TEXT
 );
+CREATE TABLE pending_confirmations (
+ token TEXT PRIMARY KEY, memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ request_id TEXT, session_id TEXT, reason TEXT NOT NULL,
+ issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+ approved_at TEXT, approved_from_tty INTEGER, used_at TEXT,
+ FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
+);
 """
 
 PROJECTIONS = """
@@ -181,5 +189,18 @@ CREATE TABLE IF NOT EXISTS signal_counts (
  month TEXT NOT NULL, memory_id TEXT NOT NULL, version INTEGER NOT NULL,
  signal TEXT NOT NULL, events INTEGER NOT NULL,
  PRIMARY KEY(month,memory_id,version,signal)
+);
+"""
+
+# 9: a server-side ledger for high-risk confirmations. The token is a random handle, not a
+# digest of content, so a host cannot mint one; approval and use are two separate columns
+# because a human approving is not the same event as a host exchanging it.
+V9 = """
+CREATE TABLE IF NOT EXISTS pending_confirmations (
+ token TEXT PRIMARY KEY, memory_id TEXT NOT NULL, version INTEGER NOT NULL,
+ request_id TEXT, session_id TEXT, reason TEXT NOT NULL,
+ issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+ approved_at TEXT, approved_from_tty INTEGER, used_at TEXT,
+ FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
 """

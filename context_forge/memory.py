@@ -18,7 +18,7 @@ from .memory_models import (
     DEFAULT_OWNER, Actor, Level, MemoryApplication, MemoryDraft, MemoryRecord,
     Relation, Scope, derive_level, split_legacy_scopes,
 )
-from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6
+from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6, V9
 from .risk import risk_of
 from .rules import glob_match
 
@@ -91,6 +91,9 @@ RETRIEVAL_STAGES = ('retrieved', 'tool_returned', 'presented', 'referenced', 'ap
 # Being shown a memory is not using it: the first three stages are written by the recall
 # path itself, so a host reporting back may only name what it did with what it was shown.
 MARKABLE_STAGES = ('referenced', 'applied', 'validated')
+# How long a high-risk confirmation stays answerable. Long enough to walk to a terminal,
+# short enough that an old approval cannot be dug up for a new request.
+CONFIRMATION_TTL_SECONDS = 600
 # Widening is bounded by which operator is allowed, never by how many terms may be
 # dropped: a term that matches no document is shed for free, and matching terms are only
 # ever given up together by switching the whole query to a union.
@@ -657,6 +660,7 @@ class MemoryStore:
                 if name not in memory_columns:
                     connection.execute(ddl)
             _exec_script(connection, V6)
+            _exec_script(connection, V9)
             for row in connection.execute(
                 'SELECT m.id, v.snapshot_json FROM memories m '
                 'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version').fetchall():
@@ -763,6 +767,97 @@ class MemoryStore:
                 (fingerprint,),
             ).fetchone()
             return self._record(connection, row['memory_id'], row['version']) if row else None
+
+    def issue_confirmation(self, memory_id: str, version: int, *, reason: str,
+                           request_id: str | None = None, session_id: str | None = None,
+                           ttl_seconds: int = CONFIRMATION_TTL_SECONDS) -> str:
+        """Hand out an approval handle for one memory version.
+
+        A uuid4, never a digest of content: a token the model can compute is a token the model
+        can approve for itself. The row is the server-side state F3 asked for — an answer that
+        lives only in the response text can be replayed, forged or never read by a human.
+        """
+        token = str(uuid.uuid4())
+        moment = now()
+        expiry = (datetime.fromisoformat(moment) + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._connection(write=True) as connection:
+            if connection.execute('SELECT 1 FROM memory_versions WHERE memory_id=? AND version=?',
+                                  (memory_id, version)).fetchone() is None:
+                raise KeyError((memory_id, version))
+            connection.execute(
+                'INSERT INTO pending_confirmations (token,memory_id,version,request_id,session_id,'
+                'reason,issued_at,expires_at) VALUES (?,?,?,?,?,?,?,?)',
+                (token, memory_id, version, request_id, session_id, reason, moment, expiry))
+        return token
+
+    def pending_confirmations(self) -> list[dict]:
+        """Open requests joined to the text a human has to read before answering.
+
+        Joining on `current_version` is what makes a version change expire the request: the row
+        stops being about the memory as it now stands, and no cleanup job is involved.
+        """
+        with self._connection() as connection:
+            rows = connection.execute(
+                'SELECT c.token,c.memory_id,c.version,c.reason,c.issued_at,c.expires_at,'
+                'c.session_id,v.snapshot_json FROM pending_confirmations c '
+                'JOIN memories m ON m.id=c.memory_id AND m.current_version=c.version '
+                'JOIN memory_versions v ON v.memory_id=c.memory_id AND v.version=c.version '
+                'WHERE c.approved_at IS NULL AND c.used_at IS NULL AND c.expires_at > ? '
+                'ORDER BY c.issued_at,c.token', (now(),)).fetchall()
+        opened = []
+        for row in rows:
+            draft = MemoryDraft.model_validate_json(row['snapshot_json'])
+            opened.append({'token': row['token'], 'memory_id': row['memory_id'],
+                           'version': row['version'], 'reason': row['reason'],
+                           'issued_at': row['issued_at'], 'expires_at': row['expires_at'],
+                           'session_id': row['session_id'], 'kind': draft.kind,
+                           'risk': risk_of(draft), 'summary': draft.summary or draft.body[:120],
+                           'body': draft.body})
+        return opened
+
+    def approve_confirmation(self, token: str, *, from_tty: bool,
+                            idempotency_key: str | None = None) -> MemoryRecord:
+        """A human answers a request; a publication approval also lifts it out of candidate.
+
+        Every check is server-side: the row exists and is still the current version, nobody has
+        answered it, it has not expired, and the answer came from a terminal. Approval never
+        touches a record that is no longer candidate, so answering late cannot stomp a newer state.
+        """
+        if not from_tty:
+            raise PermissionError('an approval must be typed in a terminal, not piped')
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                'SELECT c.token,c.memory_id,c.version,c.approved_at,c.used_at,c.expires_at,'
+                'm.current_version FROM pending_confirmations c '
+                'JOIN memories m ON m.id=c.memory_id WHERE c.token=?', (token,)).fetchone()
+            if row is None:
+                raise KeyError(token)
+            if row['approved_at'] is not None or row['used_at'] is not None:
+                raise PermissionError('this token was already answered')
+            if row['expires_at'] <= now():
+                raise PermissionError('this token expired; run the recall again to get a new one')
+            if row['current_version'] != row['version']:
+                raise PermissionError('the memory changed version; this approval no longer applies')
+            record = self._record(connection, row['memory_id'], row['version'])
+            if record is None:
+                raise KeyError((row['memory_id'], row['version']))
+            if record.draft.status == 'candidate':
+                record = self._put(connection, row['memory_id'],
+                                   record.draft.model_copy(update={'status': 'active'}),
+                                   expected_version=record.version,
+                                   idempotency_key=idempotency_key or f'approve:{token}',
+                                   actor='human', reason='high-risk rule approved in a terminal')
+            connection.execute('UPDATE pending_confirmations SET approved_at=?,approved_from_tty=1 '
+                               'WHERE token=?', (now(), token))
+            return record
+
+    def confirmation_audit_trail(self, limit: int = 50) -> list[dict]:
+        """Recent answers, with the tty flag: what was approved, when and how."""
+        with self._connection() as connection:
+            return [dict(row) for row in connection.execute(
+                'SELECT token,memory_id,version,reason,issued_at,expires_at,approved_at,'
+                'approved_from_tty,used_at FROM pending_confirmations '
+                'ORDER BY issued_at DESC LIMIT ?', (max(1, limit),))]
 
     def tombstone_session_sources(self, session_id: str, *, reason: str = 'session deleted') -> int:
         """Remove retained excerpts for a deleted session while preserving identities."""

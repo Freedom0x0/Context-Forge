@@ -510,6 +510,48 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
     typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@app.command("approve")
+def approve(token: str = typer.Option(None, "--token", help="the handle from a recall or the list"),
+            apply: bool = typer.Option(False, "--apply")) -> None:
+    """Show high-risk rules waiting on a human, or approve one. Terminal only."""
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    import sys
+
+    open_requests = store.pending_confirmations()
+    if token is None:
+        if not open_requests:
+            typer.echo("nothing awaiting approval")
+            return
+        for item in open_requests:
+            typer.echo(f"{item['token']}  {item['memory_id']}@{item['version']}"
+                       f"  {item['risk']}/{item['kind']}  until {item['expires_at'][11:19]}"
+                       f"\n    {item['summary']}")
+        typer.echo(f"{len(open_requests)} awaiting approval; "
+                   "approve with: forge approve --token <handle> --apply")
+        return
+    selected = next((item for item in open_requests if item['token'] == token), None)
+    if selected is None:
+        raise typer.BadParameter('that token is not awaiting approval (answered, expired, '
+                                 'or the memory changed version since)')
+    typer.echo(f"{selected['memory_id']}@{selected['version']}  {selected['reason']}")
+    typer.echo(f"--- full text being published -------------------------------\n{selected['body']}\n---")
+    if not apply:
+        typer.echo("dry run; nothing written. add --apply, then type the challenge code.")
+        return
+    if not sys.stdin.isatty():
+        typer.echo('approving needs a terminal: a model must not sign off on its own rule')
+        raise typer.Exit(code=2)
+    challenge = selected['token'].replace('-', '')[-6:]
+    if _ask(f"type the last 6 characters of the handle ({challenge[:2]}****) to publish: ").strip() != challenge:
+        typer.echo("challenge did not match; nothing was published")
+        raise typer.Exit(code=2)
+    record = store.approve_confirmation(selected['token'], from_tty=True)
+    typer.echo(f"approved: {record.id}@{record.version} status={record.draft.status}")
+
+
 @app.command("hygiene-undo")
 def hygiene_undo(memory_id: str,
                  apply: bool = typer.Option(False, "--apply"),

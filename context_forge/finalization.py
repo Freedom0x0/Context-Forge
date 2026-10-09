@@ -8,6 +8,7 @@ from .domain import FinalizationOutput
 from .memory import MemoryStore, canonical_fingerprint, canonical_json, digest
 from .memory_models import MemoryDraft, Provenance, Relation
 from .queue import JobStore
+from .risk import risk_of
 from .transcript import sanitize_text
 
 
@@ -64,6 +65,9 @@ class FinalizationService:
                     relations=tuple(Relation.model_validate(item)
                                     for item in payload.get("relations", [])),
                 )
+                if record.draft.status == 'candidate' and record.draft.kind == 'rule'                         and record.draft.risk == 'high':
+                    self.memory.issue_confirmation(
+                        record.id, record.version, reason='high-risk rule awaiting approval')
                 self.queue.complete_finalization_operation(
                     operation["operation_key"], {"memory_id": record.id, "version": record.version},
                 )
@@ -126,6 +130,12 @@ class FinalizationService:
             # it is the only way anyone learns the model keeps re-proposing a rejected idea.
             vetoed = bool(exact is not None and (exact.draft.status in {'archived', 'disabled'}
                                                  or exact.draft.suppressed))
+            # Knowledge is loose, rules are strict (problem 4): a high-risk rule waits for a
+            # human at a terminal instead of being published by the model that wrote it. It stays
+            # `candidate`, which recall already refuses, and the wait is announced rather than
+            # silent because the next step issues a confirmation for exactly this version.
+            if draft.kind == 'rule' and risk_of(draft) == 'high':
+                draft = draft.model_copy(update={'status': 'candidate'})
             payload = {"draft": draft.model_dump(mode="json"), "expected_version": expected,
                        "relations": [item.model_dump(mode="json") for item in candidate.relations]}
             operation_key = f"{finalization_id}:memory:{ordinal}"

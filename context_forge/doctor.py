@@ -178,6 +178,40 @@ def check_egress() -> tuple[str, bool, str]:
     return ('egress', True, 'no model transport; transcripts never leave this machine')
 
 
+def check_confirmations() -> tuple[str, bool, str]:
+    """High-risk rules parked for a human.
+
+    A fresh wait is normal — the point of the gate is that a person answers. Two things are not:
+    a request that expired with nobody answering (the rule is stuck invisible), and an approval
+    recorded without a terminal, which should be unreachable through the API and is therefore
+    worth printing if it ever appears.
+    """
+    from .config import runtime_dir
+    from .memory import MemoryStore, MemoryStoreError, now
+
+    path = runtime_dir() / "memory.db"
+    if not path.exists():
+        return ("confirmations", True, "no memory database yet")
+    try:
+        store = MemoryStore(path, readonly=True)
+        pending = store.pending_confirmations()
+        trail = store.confirmation_audit_trail(limit=200)
+    except MemoryStoreError as error:
+        return ("confirmations", False, f"unreadable memory database: {error}")
+    moment = now()
+    stalled = [row for row in trail
+               if row['approved_at'] is None and row['used_at'] is None and row['expires_at'] <= moment]
+    off_terminal = [row for row in trail if row['approved_at'] and not row['approved_from_tty']]
+    problems = []
+    if stalled:
+        problems.append(f"{len(stalled)} approval(s) expired unanswered")
+    if off_terminal:
+        problems.append(f"{len(off_terminal)} approval(s) recorded without a terminal")
+    if problems:
+        return ("confirmations", False, "; ".join(problems) + f"; {len(pending)} awaiting now")
+    return ("confirmations", True, f"{len(pending)} awaiting approval")
+
+
 def check_host_silence(days: int = 7) -> tuple[str, bool, str]:
     """A host whose transcripts stopped being collected has probably broken (8a.3)."""
     from .config import runtime_dir
@@ -394,6 +428,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_scheduled(),
         check_egress(),
         check_host_silence(),
+        check_confirmations(),
         check_memory(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,

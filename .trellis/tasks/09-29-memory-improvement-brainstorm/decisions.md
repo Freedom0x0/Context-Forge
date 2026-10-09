@@ -212,6 +212,33 @@
 - 未做：README「v1.0 做到了什么」第 23 条（保守整理）现在**不完整但不算假**（没说人审档与撤销），
   等他点头再改；比率口径仍挂问题 1。
 
+**【F4 第一阶段实施结果 2026-10-09】高危沉淀闸门 + 服务端待批台账**
+
+- 落地范围 = **沉淀时那一半**：`_plan` 里 `kind=='rule' and risk_of(draft)=='high'` → 状态改 `candidate`
+  （召回 SQL 天然拒绝 candidate，不新造可见性机制），`finalize()` 写完就在同一版本上
+  `issue_confirmation`。**为什么必须在同一个流程里签发**：否则规则停在没人看得见的地方，就是第 0 层
+  当时拒绝"永久关进黑屋"的那个理由。
+- 台账 `pending_confirmations`（**schema 8 → 9**，纯 DDL、无派生数据回填）：
+  `token` uuid4 PRIMARY KEY、`memory_id`+`version`、`request_id`、`session_id`、`reason`、
+  `issued_at`、`expires_at`、`approved_at`、`approved_from_tty`、`used_at`。
+  F3 原表没有 `approved_at`——那是 F3→F4 改成"两步"（人批准 ≠ 宿主换取）后必须加的列，本轮补齐。
+- 四条校验全在服务端：存在、未过期（TTL 600 s）、没人答过、**版本没变**。版本失效不靠清理任务，
+  靠 `JOIN memories ON current_version=c.version` 这个连接条件——旧请求自动不再是"关于现在这条记忆"。
+- `approve_confirmation(from_tty=False)` 直接 `PermissionError`；CLI 侧 `forge approve` 默认只读，
+  `--token` 打印将要发布的**全文**（本地终端，不算出境），`--apply` 才要求 tty + **回读挑战码**，
+  三者任一不满足都**一个字都不写**。审计出口 = `doctor.check_confirmations()`：
+  "过期无人答"与"没有终端也算批准"两类都会报 False。
+- 三处我自己写错、被测试/工具挡住的：① INSERT 又一次列数与占位符不齐（11 列给了 10 个值），
+  已改成**显式列名**（同一张表不能两次踩同一个坑）；② `typer.Exit` 的属性是 `exit_code` 不是 `code`，
+  查了 `dir()` 才写；③ 我留了一条重复断言，批准成功后又要求状态是 candidate。
+- 变异验证 7 处全红：不设闸门 / 批准不看 tty / 允许重复答 / 不校验过期 / 版本变了不作废 /
+  **token 改成内容派生** / 挑战码不比对。全量 **378 passed**。
+- **F4 还剩第二半（未做，需单独点头）**：召回侧对已发布的高危规则**扣正文**——
+  返回 `confirmation_required` + 摘要 + 新 token，宿主必须再调 `context_forge_memory_confirm(token)`
+  换正文。它会改召回响应的形状（宿主可见），所以不和本阶段混在一次提交里。
+  文档里那句"拿不到正文即无法执行"目前仍是**目标**，不是现状。
+
+
 
 
 
