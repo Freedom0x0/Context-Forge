@@ -22,7 +22,7 @@ Context Forge 是一个 local-first 的 Agent 记忆基础设施。它不修改�
 - **结果追踪**：区分 retrieved、tool_returned、presented、referenced、applied、validated；曝光不会自动提高可信度。
 - **保守整理**：完全重复且决策边界一致时才自动归档；相似内容只生成候选，不擅自判断同义、冲突或替代。
 - **可恢复**：版本、来源、关系和事件事务一致；支持 FTS 重建、SQLite 在线备份/恢复和旧 vault 导入。
-- **高危闸门**：确定性分类器判为 `risk=high` 的规则停在 `candidate`，人在终端批准后才可召回。**闸门也管已经发布的那一半**：召回遇到从未被批准过的高危规则时扣掉正文，只返回 `confirmation_required`、摘要和服务端句柄；人在终端批准（`forge approve`）后，宿主调 `context_forge_memory_confirm(token)` 才拿到可执行文本。两个后果要写在这里：1) **召回响应形状变了**——`body` 可能是 `null`，连 `sources`/`applicability`/`scope`/`provenance`/`explanation` 一起不返回；2) **一个版本批一次**，改写即重新待批。待批请求是服务端随机句柄（不是内容的派生物，模型算不出第二个）：10 分钟有效、一次性（重复换取会被记进台账并由 `forge doctor` 打印）、记忆换版即作废。这条是**执行闸门，不是保密闸门**：它挡"没人读过就执行"，不挡"在本机读"；理由与边界见 `docs/adr/0001-withhold-unapproved-high-risk-rules.md`。
+- **高危闸门**：确定性分类器判为 `risk=high` 的规则停在 `candidate`，人在终端批准后才可召回。**闸门也管已经发布的那一半**：召回遇到从未被批准过的高危规则时扣掉正文，只返回 `confirmation_required`、摘要和服务端句柄；人在终端批准（`forge approve`）后，宿主调 `context_forge_memory_confirm(token)` 才拿到可执行文本。两个后果：1) **召回响应形状变了**——`body` 可能是 `null`，连 `sources`/`applicability`/`scope`/`provenance`/`explanation` 一起不返回；2) **一个版本批一次**，改写即重新待批。待批请求是服务端随机句柄（不是内容的派生物，模型算不出第二个）：10 分钟有效、一次性（重复换取会被记进台账并由 `forge doctor` 打印）、记忆换版即作废。这条是**执行闸门，不是保密闸门**：它挡"没人读过就执行"，不挡"在本机读"；理由与边界见 `docs/adr/0001-withhold-unapproved-high-risk-rules.md`。
 - **宿主接入**：读侧宿主无关——任何会说 MCP 的宿主读的都是同一个 `memory.db`，装一次 server 即可。写侧目前只认 Claude Code：T1（watcher 读 `~/.claude/projects` 的 transcript）与 T2（SessionEnd/PreCompact hook）两条**确定性**通路。因此共享是单向的：CC 沉淀的记忆别的宿主能搜到，别的宿主干的活不会自动入库。MCP 工具那条路（T3）只作人工补录的支线，任何宿主的默认沉淀都不得只依赖它。
 
 ### 明确不做
