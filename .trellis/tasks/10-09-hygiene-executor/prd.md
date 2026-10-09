@@ -36,7 +36,12 @@
   （归档的输家回 active，且**那条关系被撤销**），带 `derived_from` 出边的走 `undo_consolidation`。
   默认 dry-run 只打印计划，`--apply` 才写。幂等键 `undo:{id}@{version}`（身份派生，不含日期）。
   认不出的记忆报 BadParameter，而不是随便撤销一个。
-- 判决回流到问题 1 的反对率报表：账已在 queue.db，但报表从 memory.db 组装 ⇒ **本轮不做跨库比率**。
+- **第 6 步：判决已并入报表（A 方案）**。`MemoryEffectiveness(store, queue)` 多一个 `verdicts` 段
+  = `{counts, total}`，**只给绝对数不给比率**（沿用"样本 < 20 不出百分比"那条纪律）。
+  没有队列句柄的调用方（如 `doctor`）拿到空段而不是假的 0。CLI `memory-report` 与 MCP
+  `context_forge_memory_effectiveness` 两处都接，且 MCP 那处有测试（否则"只有 CLI 看得见"）。
+- **比率本身仍未定义**：`keep` 与 `merge/archive/suppress/stale` 之间怎么算"自动档开太宽/太窄"，
+  是问题 1 的口径题，不在本任务里发明。
 
 ## 验收
 
@@ -47,13 +52,15 @@
 - [x] 每步都有变异验证（第 1 步 5 处、第 2 步 3 处、第 3 步 5 处，全被抓到）
 - [x] 撤销命令 `hygiene-undo`：默认 dry-run、`--apply` 才写、被撤销的关系有断言
 - [x] G4 人审：`adjudicate_decay(keep|stale)` + review 循环第二段（先 G3 后 G4；`q` 中止后续阶段）
-- [ ] 判决计入反对率报表（跨库口径待定）
+- [x] 判决计入报表：`verdicts` 段跨库读入（CLI + MCP 两处都有测试覆盖）
+- [ ] 反对率的**比率口径**（keep vs 动手）仍未定义，留给问题 1
 
 ## 全量测试
 
-第 3 步 358 passed；第 4、5 步（`hygiene-undo` 与 G4 人审）完成时 **363 passed**。
-变异验证累计：第 1 步 5 处、第 2 步 3 处、第 3 步 5 处、第 4/5 步 5 处（撤回去 dry-run、
-撤销不解除关系、G4 不校验动作名、被拒判决仍记账、G4 阶段被跳过），全被抓到。
+第 3 步 358 passed；第 4、5 步（`hygiene-undo` 与 G4 人审）363；第 6 步（报表跨库读判决）**366 passed**。
+变异验证累计：第 1 步 5 处、第 2 步 3 处、第 3 步 5 处、第 4/5 步 7 处、第 6 步 4 处
+（有队列也不读、CLI 不给句柄、出口漏段、MCP 不给句柄），全被抓到。
+第 6 步的 MCP 那条**第一轮抓不到**，补了 `test_the_mcp_effectiveness_tool_sees_verdicts_too` 才红。
 
 - **第 4 步** `forge hygiene-undo`（默认 dry-run）。
 - **第 5 步** G4：`adjudicate_decay(memory_id, keep|stale)`，review 循环加第二段；

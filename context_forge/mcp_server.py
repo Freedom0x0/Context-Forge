@@ -165,7 +165,7 @@ def create_server():
     def context_forge_memory_effectiveness(days: int = 90) -> dict:
         """The three P3 reports: applications, anomaly and tidy candidates."""
         from .memory_effectiveness import MemoryEffectiveness
-        return MemoryEffectiveness(_memory()).report(days=days).as_dict()
+        return MemoryEffectiveness(_memory(), _store()).report(days=days).as_dict()
 
     @server.tool()
     def context_forge_memory_hygiene(days: int = 90, min_sources: int = 3,

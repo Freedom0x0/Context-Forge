@@ -22,6 +22,10 @@ class EffectivenessReport:
     # from raw events that are still kept or from an aggregate that outlives them.
     signals: dict[str, object] = field(default_factory=dict)
     buckets: tuple[dict, ...] = ()
+    # Human verdicts on hygiene candidates live in queue.db, everything else here reads
+    # memory.db. Counts only, no rates: the discipline the bucket report already follows is
+    # that a small sample must not be turned into a percentage.
+    verdicts: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -31,6 +35,7 @@ class EffectivenessReport:
             'exposure_vs_adoption': self.exposure_vs_adoption,
             'signals': self.signals,
             'buckets': list(self.buckets),
+            'verdicts': self.verdicts,
         }
 
 
@@ -55,8 +60,11 @@ def _age_days(created_at: str) -> int:
 class MemoryEffectiveness:
     """Read-only application / anomaly / tidy reports over retrieval events."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(self, store: MemoryStore, queue=None) -> None:
         self.store = store
+        # Optional: verdicts come from queue.db. A caller without a queue handle simply
+        # gets no `verdicts` section rather than a misleading zero.
+        self.queue = queue
 
     def _counts(self) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         stages: dict[str, dict[str, int]] = {}
@@ -129,4 +137,11 @@ class MemoryEffectiveness:
                      'window_months': window,
                      'totals': self.store.signal_totals(window)},
             buckets=tuple(self.store.bucket_report(months=window)),
+            verdicts=self._verdicts(),
         )
+
+    def _verdicts(self) -> dict:
+        if self.queue is None:
+            return {}
+        counts = self.queue.verdict_counts()
+        return {'counts': counts, 'total': sum(counts.values())}

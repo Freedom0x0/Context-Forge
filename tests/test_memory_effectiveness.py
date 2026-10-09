@@ -284,6 +284,64 @@ def test_cli_exports_the_three_reports(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload) == {"applications", "anomaly_candidates", "tidy_candidates",
-                            "exposure_vs_adoption", "signals", "buckets"}
+                            "exposure_vs_adoption", "signals", "buckets", "verdicts"}
+    assert payload["verdicts"] == {"counts": {}, "total": 0}
     assert set(payload["signals"]) == {"aggregated_through", "window_months", "totals"}
     assert payload["exposure_vs_adoption"]["adoption"] == 0
+
+
+def test_the_report_reads_human_verdicts_across_the_two_databases(tmp_path, monkeypatch):
+    """Verdicts live in queue.db and everything else here in memory.db: the report is the one
+    place allowed to look at both, and a caller without a queue gets no section at all."""
+    from context_forge.memory_lifecycle import adjudicate_decay
+    from context_forge.queue import JobStore
+    from context_forge.memory_effectiveness import MemoryEffectiveness
+
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    queue = JobStore(tmp_path / "queue.db")
+    seed(store, "aged", evidence_level="supported")
+
+    assert MemoryEffectiveness(store).report().as_dict()['verdicts'] == {}
+
+    adjudicate_decay("aged", "stale", store=store, queue=queue)
+    payload = MemoryEffectiveness(store, queue).report().as_dict()
+
+    assert payload["verdicts"] == {"counts": {"stale": 1}, "total": 1}
+    assert store.get("aged").draft.status == "stale"
+
+
+def test_the_mcp_effectiveness_tool_sees_verdicts_too(tmp_path, monkeypatch):
+    """The host-facing surface must not be the incomplete one: same ledger as the CLI shows."""
+    import sys
+    import types
+
+    from context_forge.memory_lifecycle import adjudicate_decay
+    from context_forge.queue import JobStore
+
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    queue = JobStore(tmp_path / "queue.db")
+    seed(store, "aged", evidence_level="supported")
+    adjudicate_decay("aged", "stale", store=store, queue=queue)
+
+    class FakeMCP:
+        def __init__(self, name):
+            self.tools = {}
+
+        def tool(self):
+            def register(function):
+                self.tools[function.__name__] = function
+                return function
+            return register
+
+    fastmcp = types.ModuleType("mcp.server.fastmcp")
+    fastmcp.FastMCP = FakeMCP
+    monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
+    monkeypatch.setitem(sys.modules, "mcp.server", types.ModuleType("mcp.server"))
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
+    import context_forge.mcp_server as mcp_server
+    monkeypatch.setattr(mcp_server, "_memory", lambda: store)
+    monkeypatch.setattr(mcp_server, "_store", lambda: queue)
+
+    payload = mcp_server.create_server().tools["context_forge_memory_effectiveness"]()
+
+    assert payload["verdicts"] == {"counts": {"stale": 1}, "total": 1}

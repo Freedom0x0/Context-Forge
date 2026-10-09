@@ -469,7 +469,7 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
     from .memory_effectiveness import MemoryEffectiveness
     import json as _json
 
-    typer.echo(_json.dumps(MemoryEffectiveness(store).report(days=days).as_dict(),
+    typer.echo(_json.dumps(MemoryEffectiveness(store, _store()).report(days=days).as_dict(),
                            ensure_ascii=False, indent=2))
 
 
