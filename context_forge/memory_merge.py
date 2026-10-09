@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from typing import Iterator, NamedTuple, Sequence
 
 from .memory import MemoryStore, canonical_json, tokenize
 from .memory_models import MemoryRecord, Relation
@@ -66,8 +67,43 @@ def _boundary(record: MemoryRecord) -> str:
     })
 
 
-def _similarity(left: MemoryRecord, right: MemoryRecord) -> float:
-    return token_similarity(_normalized(left), _normalized(right))
+def _jaccard(left: frozenset, right: frozenset) -> float:
+    """The same Jaccard ratio, from tokens already split once per record."""
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+class _Profile(NamedTuple):
+    """One record measured once. Recomputing these per pair was the merge report's cost."""
+
+    position: int
+    record: MemoryRecord
+    kind: str
+    text: str
+    boundary: str
+    tokens: frozenset
+
+
+def _profiles(records: Sequence[MemoryRecord]) -> list[_Profile]:
+    profiles = []
+    for position, record in enumerate(records):
+        text = normalized_text(record)
+        profiles.append(_Profile(position, record, record.draft.kind, text,
+                                 _boundary(record), frozenset(tokenize(text))))
+    return profiles
+
+
+def _group(profiles: Sequence[_Profile], key) -> dict:
+    """Bucket records by a precomputed key so pairs only form inside buckets."""
+    grouped: dict = {}
+    for item in profiles:
+        grouped.setdefault(key(item), []).append(item)
+    return grouped
+
+
+def _pairs_within(groups: Sequence[Sequence[_Profile]]) -> Iterator[tuple[_Profile, _Profile]]:
+    for members in groups:
+        yield from combinations(members, 2)
 
 
 def _applicability_conflict(left: MemoryRecord, right: MemoryRecord) -> bool:
@@ -96,27 +132,34 @@ class MemoryMerge:
     def report(self, *, similarity_threshold: float = 0.6) -> MergeReport:
         if not 0 <= similarity_threshold <= 1:
             raise ValueError('similarity threshold must be between zero and one')
-        records = [record for record in self.store.current_records()
-                   if record.draft.status not in {'archived', 'disabled'} and not record.draft.suppressed]
-        exact = []
-        overlaps = []
-        for left, right in combinations(records, 2):
-            if left.draft.kind != right.draft.kind:
-                continue
-            same_text = _normalized(left) == _normalized(right)
-            same_boundary = _boundary(left) == _boundary(right)
-            if same_text and same_boundary:
-                exact.append(MergeCandidate(left.id, right.id, 'duplicate_of', 1.0,
-                                            'normalized content and decision boundary are identical', True))
-                continue
-            if left.draft.kind == 'rule' and not same_boundary:
-                continue
-            score = _similarity(left, right)
-            if score >= similarity_threshold:
-                overlaps.append(MergeCandidate(left.id, right.id, 'overlaps', round(score, 6),
-                                               'token similarity is a review candidate, not proof'))
-        broad = tuple(record.id for record in records if record.draft.scope.visibility == 'global')
-        return MergeReport(len(records), tuple(exact), tuple(overlaps), broad)
+        profiles = _profiles(self._live_records())
+        exact: list[tuple[int, int, MergeCandidate]] = []
+        matched: set[tuple[int, int]] = set()
+        for members in _group(profiles, lambda item: (item.kind, item.text, item.boundary)).values():
+            for left, right in combinations(members, 2):
+                matched.add((left.position, right.position))
+                exact.append((left.position, right.position, MergeCandidate(
+                    left.record.id, right.record.id, 'duplicate_of', 1.0,
+                    'normalized content and decision boundary are identical', True)))
+        overlaps: list[tuple[int, int, MergeCandidate]] = []
+        for kind, members in _group(profiles, lambda item: item.kind).items():
+            # Rules were never compared across differing boundaries; keep that by grouping on it.
+            groups = list(_group(members, lambda item: item.boundary).values()) \
+                if kind == 'rule' else [members]
+            for left, right in _pairs_within(groups):
+                if (left.position, right.position) in matched:
+                    continue
+                score = _jaccard(left.tokens, right.tokens)
+                if score >= similarity_threshold:
+                    overlaps.append((left.position, right.position, MergeCandidate(
+                        left.record.id, right.record.id, 'overlaps', round(score, 6),
+                        'token similarity is a review candidate, not proof')))
+        exact.sort(key=lambda item: item[:2])
+        overlaps.sort(key=lambda item: item[:2])
+        broad = tuple(item.record.id for item in profiles
+                      if item.record.draft.scope.visibility == 'global')
+        return MergeReport(len(profiles), tuple(pair[2] for pair in exact),
+                           tuple(pair[2] for pair in overlaps), broad)
 
     def merge_candidates(self, threshold: float = 0.9) -> tuple[MergeCandidate, ...]:
         """High-similarity pairs split into merge and conflict proposals.
@@ -127,28 +170,31 @@ class MemoryMerge:
         """
         if not 0 <= threshold <= 1:
             raise ValueError('similarity threshold must be between zero and one')
-        records = [record for record in self.store.current_records()
-                   if record.draft.status not in {'archived', 'disabled'} and not record.draft.suppressed]
-        proposals = []
-        for left, right in combinations(records, 2):
-            if left.draft.kind != right.draft.kind:
-                continue
-            score = _similarity(left, right)
-            if score < threshold:
-                continue
-            if _applicability_conflict(left, right):
-                proposals.append(MergeCandidate(
-                    left.id, right.id, 'conflicts_with', round(score, 6),
-                    'high similarity with contradictory applicability; do not merge', False))
-            elif _normalized(left) == _normalized(right) and _boundary(left) == _boundary(right):
-                proposals.append(MergeCandidate(
-                    left.id, right.id, 'duplicate_of', round(score, 6),
-                    'normalized content and decision boundary are identical', True))
-            else:
-                proposals.append(MergeCandidate(
-                    left.id, right.id, 'overlaps', round(score, 6),
-                    'boundary-compatible overlap; review before merging', False))
-        return tuple(proposals)
+        profiles = _profiles(self._live_records())
+        proposals: list[tuple[int, int, MergeCandidate]] = []
+        for members in _group(profiles, lambda item: item.kind).values():
+            for left, right in combinations(members, 2):
+                score = _jaccard(left.tokens, right.tokens)
+                if score < threshold:
+                    continue
+                if _applicability_conflict(left.record, right.record):
+                    proposals.append((left.position, right.position, MergeCandidate(
+                        left.record.id, right.record.id, 'conflicts_with', round(score, 6),
+                        'high similarity with contradictory applicability; do not merge', False)))
+                elif left.text == right.text and left.boundary == right.boundary:
+                    proposals.append((left.position, right.position, MergeCandidate(
+                        left.record.id, right.record.id, 'duplicate_of', round(score, 6),
+                        'normalized content and decision boundary are identical', True)))
+                else:
+                    proposals.append((left.position, right.position, MergeCandidate(
+                        left.record.id, right.record.id, 'overlaps', round(score, 6),
+                        'boundary-compatible overlap; review before merging', False)))
+        proposals.sort(key=lambda item: item[:2])
+        return tuple(pair[2] for pair in proposals)
+
+    def _live_records(self) -> list[MemoryRecord]:
+        return [record for record in self.store.current_records()
+                if record.draft.status not in {'archived', 'disabled'} and not record.draft.suppressed]
 
     def apply_conflict(self, candidate: MergeCandidate, *, idempotency_key: str):
         """Annotate a contradictory pair with a `conflicts_with` relation.
