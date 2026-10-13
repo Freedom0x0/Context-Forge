@@ -13,9 +13,13 @@
 ## Acceptance Criteria
 
 - [x] 问题 1（沉淀质量评估）定案：事后投票三层机制
-- [ ] 问题 2–9 逐题定案或明确挂起
-- [ ] `decisions.md` 完整反映所有讨论结论
+- [x] 问题 2–9 逐题定案或明确挂起（见 `decisions.md` 各「状态」行）
+- [x] `decisions.md` 完整反映所有讨论结论（含 2026-09-29 晚「跨题关联与实施分层」与 2026-09-30 F5 补丁）
 
 ## Notes
 
 - 问题 1 的隐式票采集依赖问题 2 打通，二者顺序已在讨论中确认。
+- 本任务产出为决策记录，非实现；各题的落地已拆成独立任务（3→hygiene-executor、
+  4/9→risk-classifier、5→hybrid-recall、8b→per-db-instance-lock、8c→inferred-finalization-wiring、
+  10→scheduled-run-ledger 等）。挂起项：问题 7 出库闸门（待云端立项）、问题 9 第 4 条（待用户选边）。
+  2026-10-13 状态归一审核：产出完整，可归档。
