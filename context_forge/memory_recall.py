@@ -147,7 +147,8 @@ class MemoryRecall:
                         result.memory.id, result.memory.version, request_id=request_id, stage=stage,
                         session_id=session_id,
                         idempotency_key=f'{request_id}:{stage}:{result.memory.id}:{result.memory.version}',
-                        explanation={'query': query, 'project': project, 'changed_path': changed_path},
+                        explanation={'query': query, 'project': project, 'changed_path': changed_path,
+                                     'channel': result.score.channel},
                     )
                 except MemoryStoreError:
                     pass

@@ -231,6 +231,9 @@ class ScoreBreakdown:
     conflict_penalty: float
     admitted_by: Level
     explanation: str
+    # Which channel reached this record (bm25 / widened / semantic), structured so a consumer
+    # never has to parse the Chinese explanation string (design §7).
+    channel: str = 'bm25'
 
 
 @dataclass(frozen=True)
@@ -503,7 +506,7 @@ def relevance(memory: MemoryRecord, ctx: RetrievalContext,
     return ScoreBreakdown(
         total=total, match=match, applicability=applicability, provenance_bonus=bonus,
         evidence=evidence, freshness=freshness, feedback=feedback, text=text,
-        conflict_penalty=penalty, admitted_by=derive_level(memory.draft),
+        conflict_penalty=penalty, admitted_by=derive_level(memory.draft), channel=channel,
         explanation=_explain(memory.draft, ctx, applicability=applicability, bonus=bonus,
                              evidence=evidence, freshness=freshness, feedback=feedback,
                              text=text, risks=risks, match_note=match_note, channel=channel,
@@ -1325,6 +1328,21 @@ class MemoryStore:
                                  'note': '' if enough else f'样本不足（<{min_sample}），只给绝对数'})
         return rows
 
+    def channel_mix(self) -> dict[str, int]:
+        """Recall-row counts per channel, read from the structured retrieval-event payload.
+
+        Counts only, never a rate: a handful of recalls is not a distribution — the same
+        discipline `bucket_report` follows. Rows recorded before the channel field existed —
+        or via the legacy rollback hatch, which writes an empty string — fall under
+        `unknown` rather than being silently dropped.
+        """
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT COALESCE(NULLIF(json_extract(explanation_json,'$.channel'),''),'unknown') "
+                'AS channel, '
+                'COUNT(*) AS n FROM retrieval_events GROUP BY channel ORDER BY channel').fetchall()
+        return {row['channel']: row['n'] for row in rows}
+
     def record_feedback(self, memory_id: str, *, outcome: str, idempotency_key: str,
                         note: str = '', actor: Actor = 'human') -> MemoryRecord:
         """Record human / attributable negative feedback on a memory.
@@ -1772,6 +1790,7 @@ class MemoryStore:
                 (memory_id for memory_id, _ in rows),
                 text_scores([-rank for _, rank in rows])))
             semantic_scores: dict[str, float] = {}
+            semantic_note = ''
             # Optional semantic candidates supplement lexical results. Invalid, drifted
             # (embedding_model mismatch — design §5) or unavailable vectors are ignored,
             # preserving lexical-only behavior.
@@ -1779,7 +1798,9 @@ class MemoryStore:
                 try:
                     query_blob = self.embedder.encode(query)
                     query_vector = unpack_vector(query_blob, dimensions=self.embedder.dimensions)
-                    if query_vector:
+                    if not query_vector:
+                        semantic_note = '语义通道未启用（向量维度不符）'
+                    else:
                         import math
                         qnorm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
                         for candidate in connection.execute(
@@ -1802,9 +1823,11 @@ class MemoryStore:
                                 rows.append((memory_id, -score))
                                 channel_notes[memory_id] = f'语义相似 {score:.2f}'
                                 channel_labels[memory_id] = 'semantic'
-                except Exception:
-                    # Query-time provider failure falls back to channels 1+2 (lexical only).
-                    pass
+                except Exception as error:
+                    # Query-time provider failure falls back to channels 1+2 (lexical only). The
+                    # downgrade is recorded per result instead of swallowed, so a recalled set that
+                    # silently lost its semantic channel is visible (design §5).
+                    semantic_note = f'语义通道未启用（{type(error).__name__}）'
             effective_limit = min(limit or 100, 100) if single_han else limit
             ids = [memory_id for memory_id, _ in rows]
             views = self._boundary_views(connection, ids)
@@ -1863,7 +1886,8 @@ class MemoryStore:
                 rescored.append((record, relevance(
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],
                     feedback=weights.get(record.id, DEFAULT_WEIGHT) - DEFAULT_WEIGHT,
-                    match_note=channel_notes.get(record.id, ''),
+                    match_note=' '.join(part for part in (
+                        channel_notes.get(record.id, ''), semantic_note) if part),
                     channel=channel_labels.get(record.id, 'bm25'),
                     lexical_score=lexical_scores.get(record.id),
                     semantic_score=semantic_scores.get(record.id),

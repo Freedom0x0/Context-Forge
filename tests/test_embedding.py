@@ -221,3 +221,104 @@ def test_v7_migration_backup_restore_returns_records(tmp_path):
 
     assert restored.get('m').draft.body == 'SQLite 事务回滚'
     assert restored.get('m').draft.provenance.projects == ('demo',)
+
+
+# --- channel label as a structural fact + semantic-degrade visibility (design §5/§7) -----
+
+class FailingEmbedder(HashingEmbedder):
+    """Configured embedder whose query-time inference fails: the request must degrade, not die."""
+
+    def encode(self, text):
+        raise RuntimeError('provider offline')
+
+
+class WrongDimensionEmbedder(HashingEmbedder):
+    """Returns a blob that does not unpack to the declared width — a silent, non-raising failure."""
+
+    def encode(self, text):
+        return b'\x00\x00\x00\x00'
+
+
+def _channel_token(explanation):
+    found = re.search(r'通道=(\w+)', explanation)
+    return found.group(1) if found else None
+
+
+def test_query_time_semantic_failure_is_visible_and_keeps_lexical_results(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    store.embedder = None
+    _recall(store, 'proxy timeout policy alpha', 'a')
+    _recall(store, 'proxy timeout policy beta', 'b')
+
+    lexical_ids = [record.id for record, _ in store.search_scored('proxy timeout policy', project='demo')]
+    assert lexical_ids == ['a', 'b']
+
+    store.embedder = FailingEmbedder()          # configured, but every query fails
+    degraded = store.search_scored('proxy timeout policy', project='demo')
+
+    assert [record.id for record, _ in degraded] == lexical_ids       # AC3: same ids, same order
+    assert degraded
+    for _record, breakdown in degraded:
+        assert '语义通道未启用' in breakdown.explanation                # AC1: marker present
+
+
+def test_dimension_mismatch_marks_the_semantic_channel_as_not_enabled(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    store.embedder = None
+    _recall(store, 'proxy timeout policy', 'lex')
+
+    store.embedder = WrongDimensionEmbedder()   # encode() returns bytes of the wrong width
+    degraded = store.search_scored('proxy timeout policy', project='demo')
+
+    assert [record.id for record, _ in degraded] == ['lex']
+    assert '语义通道未启用' in degraded[0][1].explanation
+
+
+def test_lexical_only_mode_carries_no_degrade_marker(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    assert store.embedder is None
+    _recall(store, 'proxy timeout policy', 'lex')
+
+    for _record, breakdown in store.search_scored('proxy timeout policy', project='demo'):
+        assert '语义通道未启用' not in breakdown.explanation            # AC2: no false alarm
+        assert breakdown.channel == 'bm25'                            # AC4: structured label
+        assert _channel_token(breakdown.explanation) == 'bm25'        # AC4: agrees with the string
+
+
+def test_score_channel_agrees_with_the_explanation_token(tmp_path):
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    store.embedder = HashingEmbedder()
+    _recall(store, 'proxy timeout policy', 'lex')
+    _recall(store, 'quarterly revenue forecast', 'sem')
+
+    found = {record.id: breakdown for record, breakdown in
+             store.search_scored('knitting pattern', project='demo')}
+
+    assert found['sem'].channel == 'semantic'                        # AC4: semantic is structural
+    assert _channel_token(found['sem'].explanation) == 'semantic'
+
+
+def test_channel_mix_counts_recalls_by_channel_and_reaches_the_report(tmp_path):
+    from context_forge.memory_recall import MemoryRecall
+    from context_forge.memory_effectiveness import MemoryEffectiveness
+
+    store = MemoryStore.initialize(tmp_path / 'memory.db')
+    store.embedder = None
+    _recall(store, 'proxy timeout policy', 'lex')
+    MemoryRecall(store).search('proxy timeout policy', project='demo', request_id='r-lex')
+
+    store.embedder = HashingEmbedder()
+    _recall(store, 'quarterly revenue forecast', 'sem')             # embedding stored on write
+    MemoryRecall(store).search('knitting pattern', project='demo', request_id='r-sem')
+
+    mix = store.channel_mix()
+    assert mix == {'bm25': 1, 'semantic': 1}                         # AC5: counted per channel
+    assert MemoryEffectiveness(store).report().channels == mix       # AC5: same dict on the report
+
+    # The legacy rollback hatch records an empty channel; it must fold into `unknown`,
+    # not open a spurious '' bucket.
+    MemoryRecall(store).search('proxy timeout policy', project='demo',
+                               request_id='r-legacy', legacy_filter=True)
+    mix = store.channel_mix()
+    assert '' not in mix and mix.get('unknown', 0) >= 1
+    assert mix['bm25'] == 1 and mix['semantic'] == 1

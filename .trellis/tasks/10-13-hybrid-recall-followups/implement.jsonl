@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/memory-recall.md", "reason": "三通道管道、四段解释、通道标注与 text=max(词法,语义) 的契约（含查询期失败的既有说明）"}
+{"file": ".trellis/spec/backend/memory-store.md", "reason": "检索事件落库、派生数据、失败计数不进主链路"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "语义通道查询期失败的降级边界（不静默、不改结果）"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "闸门必须读它名字所指之事；每个守卫的变异记录必须真能变红"}

@@ -1,4 +1,4 @@
-{"file": "spec/backend/memory-store.md", "reason": "v11 embedding cache columns, explicit migrate() shape, BLOB validity"}
-{"file": "spec/backend/memory-recall.md", "reason": "staged recall path, boundary/admission, channel labelling"}
-{"file": "spec/backend/database-guidelines.md", "reason": "derived-cache columns are not a second source of truth"}
-{"file": "spec/backend/quality-guidelines.md", "reason": "a gate must read the thing it is named for; mutation-proven checks"}
+{"file": ".trellis/spec/backend/memory-store.md", "reason": "v11 embedding cache columns, explicit migrate() shape, BLOB validity"}
+{"file": ".trellis/spec/backend/memory-recall.md", "reason": "staged recall path, boundary/admission, channel labelling"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "derived-cache columns are not a second source of truth"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "a gate must read the thing it is named for; mutation-proven checks"}

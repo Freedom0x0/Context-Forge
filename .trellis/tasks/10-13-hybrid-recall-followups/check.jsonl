@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/memory-recall.md", "reason": "核对通道标注接线是否与设计的对外可见性要求一致，且未破坏纯词法一致性"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对新增守卫是否已变异验证、降级标记是否真能变红"}

@@ -30,6 +30,9 @@ class EffectivenessReport:
     # Per-host collection health from queue.db: the silence duration beside the
     # scan-failure buckets (8a.3). Same side as verdicts — counts, not rates.
     host_health: dict[str, object] = field(default_factory=dict)
+    # How many recalls each channel reached (bm25 / widened / semantic), from the
+    # structured `channel` in retrieval events. Counts only, no rates (design §7).
+    channels: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -42,6 +45,7 @@ class EffectivenessReport:
             'verdicts': self.verdicts,
             'workflow_metrics': self.workflow_metrics,
             'host_health': self.host_health,
+            'channels': self.channels,
         }
 
 
@@ -151,6 +155,7 @@ class MemoryEffectiveness:
             verdicts=self._verdicts(),
             workflow_metrics=self.workflow_metrics(),
             host_health=self._host_health(),
+            channels=self.store.channel_mix(),
         )
 
     def _host_health(self) -> dict[str, dict[str, object]]:
