@@ -26,11 +26,11 @@
 
 ## Acceptance Criteria
 
-- [ ] 三种 provider 配置下 doctor 输出正确，各有一条测试
-- [ ] remote 情形下 detail 里出现**具体的 provider 标识**，而不是笼统的"已配置"
-- [ ] doctor 该项在 none/offline 时判为 ok（不能把"没有出境"报成故障）
-- [ ] README/docs 里那句威胁模型与 doctor 输出一致
-- [ ] 无新增依赖、无新增配置项
+- [x] 三种 provider 配置下 doctor 输出正确，各有一条测试
+- [x] remote 情形下 detail 里出现**具体的 provider 标识**，而不是笼统的"已配置"
+- [x] doctor 该项在 none/offline 时判为 ok（不能把"没有出境"报成故障）
+- [x] README/docs 里那句威胁模型与 doctor 输出一致
+- [x] 无新增依赖、无新增配置项
 
 ## Out of Scope
 
