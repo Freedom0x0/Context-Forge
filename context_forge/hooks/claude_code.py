@@ -24,10 +24,45 @@ from ..queue import JobStore
 def handle_payload(payload: dict, *, store: JobStore | None = None) -> SessionLifecycleEvent | None:
     """Translate a supported host hook payload into the generic lifecycle protocol."""
     name = payload.get("hook_event_name")
-    if name not in {"SessionEnd", "PreCompact"}:
+    if name not in {"SessionStart", "SessionEnd", "PreCompact", "PreToolUse",
+                    "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"}:
+        return None
+    session_id = str(payload.get("session_id", "")).strip()
+    if name == "SessionStart":
+        if not session_id:
+            return None
+        if store is None:
+            from ..config import runtime_dir
+            store = JobStore(runtime_dir() / "queue.db")
+        from .liveness import register_current_claude_session
+        register_current_claude_session(session_id, store)
+        store.record_session_liveness(session_id, initialize_tool_tracking=True)
+        return None
+    if name in {"UserPromptSubmit", "Stop"}:
+        if session_id:
+            if store is None:
+                from ..config import runtime_dir
+                store = JobStore(runtime_dir() / "queue.db")
+            from .liveness import register_current_claude_session
+            register_current_claude_session(session_id, store)
+            store.record_session_liveness(session_id, initialize_tool_tracking=True)
+        return None
+    if name in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
+        if not session_id:
+            return None
+        if store is None:
+            from ..config import runtime_dir
+            store = JobStore(runtime_dir() / "queue.db")
+        tool_use_id = payload.get("tool_use_id")
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            store.record_tool_activity(session_id, None, active=False)
+        else:
+            store.record_tool_activity(
+                session_id, tool_use_id,
+                active=name == "PreToolUse",
+            )
         return None
     transcript = Path(str(payload.get("transcript_path", ""))).expanduser()
-    session_id = str(payload.get("session_id", "")).strip()
     if not session_id or not transcript.is_file():
         raise ValueError("session_id and an existing transcript_path are required")
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -92,12 +127,11 @@ def main() -> int:
         payload = {}
     if payload.get("hook_event_name", "SessionEnd") == "SessionStart":
         print(_format_status_line())
-    else:
-        try:
-            handle_payload(payload)
-        except (ValueError, OSError) as exc:
-            print(f"[context-forge] hook rejected: {exc}", file=sys.stderr)
-            return 1
+    try:
+        handle_payload(payload)
+    except (ValueError, OSError) as exc:
+        print(f"[context-forge] hook rejected: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

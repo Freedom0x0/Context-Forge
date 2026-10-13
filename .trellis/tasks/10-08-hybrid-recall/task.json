@@ -3,7 +3,7 @@
   "name": "hybrid-recall",
   "title": "混合召回：词法放宽 + 可选语义通道",
   "description": "问题 5 的实施：BM25 全 AND + 关键词放宽 + 可选语义 top-K 三路并集汇入现有打分管道；向量是加速器不是写入前置",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "关键词放宽已提交；语义通道未提交且无召回路径测试",
   "meta": {
     "source": "09-29-memory-improvement-brainstorm",
     "layer": "3"

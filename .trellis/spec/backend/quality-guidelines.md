@@ -342,6 +342,54 @@ Pin the **source text of the two functions**, not the module. A module-level gre
 
 ---
 
+## Resident-watcher contracts
+
+These are the invariants of the one long-running process (`forge watch-transcripts`, also
+launched by the Windows VBS autostart). They are easy to undo by "simplifying" one call site.
+
+### Liveness must come from the lock, not the heartbeat
+
+`doctor.check_watcher` must read **who holds `runtime_dir()/watcher.lock`** (`watcher.lock_holder_pid()`),
+never the heartbeat file. The heartbeat writes `{"pid","at"}` on every pass and the last writer wins —
+with two processes running it reports whichever wrote most recently and calls the other one healthy.
+That is exactly `A gate must read the thing it is named for`: "is the watcher running" is a question
+about mutual exclusion, and only the lock answers it. A leftover lock file with **no holder** must read
+as *not running* — never as alive.
+
+### The instance lock is per-library, never global
+
+`watcher.lock_path()` is `config.runtime_dir()/"watcher.lock"`. `runtime_dir()` honours
+`CONTEXT_FORGE_HOME`, and that is what keeps the test suite, alternate profiles, and this repo's own
+concurrency tests from deadlocking each other. A global path here is a self-inflicted outage, not a
+stricter guard. The acquire must happen **before anything mutating** in `run()` (baseline writes,
+`scan_once`, `scheduled.run_due`, `process_pending_finalizations`) — a losing instance must not write
+anything at all. Known residual: `--all-history` calls `reset_baseline()` in `cli.py` before
+`watch_run()`, so that flag can still scribble before losing the race.
+
+### Windows byte-range locks deny *reads* of the locked byte
+
+```python
+# WRONG: the holder cannot read its own pid back from another handle
+lock_byte_0(fd); write_pid_at_offset_0(fd)   # reads from a second handle raise PermissionError
+
+# RIGHT: lock byte 0 for exclusion, keep the payload at offset 1
+lock_byte_0(fd); write_pid_at_offset_1(fd)   # locked byte range is denied, the rest stays readable
+```
+
+`msvcrt.locking` denies reads of the byte range it covers, and the failure is a `PermissionError` that
+reads-then-returns-None if swallowed — which degrades silently into "no holder". `fcntl.flock` on POSIX
+has no such behaviour, so the offset-1 scheme must be used unconditionally or the two platforms diverge.
+
+### A cumulative counter is a sticky gate — say so where the count lives
+
+`scan_failures` accumulates for the life of the derived DB and never resets, so `count > 0` fails
+`doctor.check_host_silence` **forever**. That is intended (the acceptance criteria say "跨轮累积" and
+"fail when a count exists"), but a future reader will read a bare counter as a rolling window. State the
+semantics on the accessor, and note that a *windowed* count needs per-event rows — not a reset knob.
+Same family as the `DEFAULT + delta` rule above: the trap is in what the number means, not in the code.
+
+---
+
 ## Code Review Checklist
 
 - [ ] New field on a shared input object: wired through **all** consumers (grep the name)?
@@ -357,4 +405,7 @@ Pin the **source text of the two functions**, not the module. A module-level gre
 - [ ] Any substitution of a proxy for the design's stated metric: is it recorded **in the threshold text, before** the implementation, not only in the report?
 - [ ] Any architectural separation that behaviour can't distinguish on current data: pinned via `inspect.getsource` on the two functions?
 - [ ] Any "rebuild on mismatch" branch: has a legacy-shape test?
+- [ ] Any liveness/watcher check: does it read the **lock holder**, not the last-written heartbeat?
+- [ ] Any new lock/mutex path: scoped under `runtime_dir()` (per-library), acquired before any write?
+- [ ] Any cumulative counter that feeds a gate: are its never-reset semantics stated on the accessor?
 - [ ] Comment density matches the surrounding code; no comments explaining deleted code?

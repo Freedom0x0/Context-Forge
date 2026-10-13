@@ -105,26 +105,29 @@ def check_provider(settings: Settings | None) -> tuple[str, bool, str]:
 
 
 def check_watcher() -> tuple[str, bool, str]:
-    """Is the transcript watcher installed, and is it alive?
+    """Is the transcript watcher installed, and is it actually running?
 
     Precipitation no longer depends on Claude Code hooks, so a dead
-    watcher means nothing gets saved. This is the check that catches it.
+    watcher means nothing gets saved. Liveness is read from the lock
+    holder, not a heartbeat: the process holding the per-runtime-dir lock
+    is by construction the one true instance. A leftover lock file with no
+    holder reads as "not running", never as alive.
     """
     from .autostart import status
+    from .watcher import lock_holder_pid
 
     info = status()
     if not info["installed"]:
         return ("watcher", False,
                 "autostart missing — run `forge install-hook`")
+    pid = lock_holder_pid()
+    if pid is not None:
+        return ("watcher", True, f"watcher 在跑（pid={pid}）")
     age = info["age_seconds"]
     if age is None:
-        return ("watcher", False,
-                "no heartbeat yet — start it or log in again")
-    if not info["alive"]:
-        return ("watcher", False,
-                f"last beat {age:.0f}s ago (launcher is installed; "
-                f"it restarts at next logon)")
-    return ("watcher", True, f"alive, last beat {age:.0f}s ago")
+        return ("watcher", False, "未运行（尚无 heartbeat）")
+    return ("watcher", False,
+            f"未运行（最后心跳 {age:.0f}s 前；launcher 已安装，下次登录重启）")
 
 
 def check_scheduled(period_seconds: int = 86400) -> tuple[str, bool, str]:
@@ -217,14 +220,21 @@ def check_confirmations() -> tuple[str, bool, str]:
 
 
 def check_host_silence(days: int = 7) -> tuple[str, bool, str]:
-    """A host whose transcripts stopped being collected has probably broken (8a.3)."""
+    """A host whose transcripts stopped being collected has probably broken (8a.3).
+
+    Two failure halves sit side by side: how long a host has been silent, and
+    how many of its transcripts the collector could not parse. Silence alone
+    cannot tell "host broke" from "user stopped"; a rising failure count can.
+    """
     from .config import runtime_dir
 
     path = runtime_dir() / 'queue.db'
     if not path.exists():
         return ('host-silence', True, 'queue not initialised')
-    activity = JobStore(path).host_activity()
-    if not activity:
+    store = JobStore(path)
+    activity = store.host_activity()
+    failures = store.scan_failures()
+    if not activity and not failures:
         return ('host-silence', True, 'no episodes collected for any host yet')
     now = _now()
     problems: list[str] = []
@@ -238,6 +248,9 @@ def check_host_silence(days: int = 7) -> tuple[str, bool, str]:
         details.append(f'{host} last collected {age}d ago ({info["episodes"]} episodes)')
         if age > days:
             problems.append(f'{host} silent for {age}d (> {days}d)')
+    for host, by_reason in failures.items():
+        rendered = ', '.join(f'{reason}={count}' for reason, count in sorted(by_reason.items()))
+        problems.append(f'{host} scan failures: {rendered}')
     if problems:
         return ('host-silence', False, '; '.join(problems))
     return ('host-silence', True, '; '.join(details))
@@ -305,6 +318,22 @@ def check_memory() -> tuple[str, bool, str]:
             f"曝光 {exposure['exposure']} / 采用 {exposure['adoption']} "
             f"(ratio {exposure['ratio']}); 未使用待复核 {len(report.anomaly_candidates)}, "
             f"整理候选 {len(report.tidy_candidates)}")
+
+
+def check_local_embedding() -> tuple[str, bool, str]:
+    """Report whether the configured local semantic model is cached and usable."""
+    settings = load_settings()
+    if settings is None or not settings.embedding_model:
+        return ("local-embedding", True, "disabled; lexical retrieval remains active")
+    try:
+        from .embedding import EmbeddingError, LocalEmbedder
+        LocalEmbedder(settings.embedding_model,
+                      dimensions=settings.embedding_dimensions).encode("Context Forge local model check")
+    except Exception as exc:
+        return ("local-embedding", False,
+                f"{exc}; install `.[semantic]` and cache the model locally")
+    return ("local-embedding", True,
+            f"{settings.embedding_model} cached locally ({settings.embedding_dimensions} dimensions)")
 
 
 def check_memory_sync(vault_root: Path | None) -> list[str]:
@@ -434,6 +463,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_host_silence(),
         check_confirmations(),
         check_memory(),
+        check_local_embedding(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,
          "; ".join(sync_warnings) if sync_warnings else "vault and memory.db agree"),

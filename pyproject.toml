@@ -11,6 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0,<2.0"]
+semantic = ["numpy>=1.26", "sentence-transformers>=3,<4"]
+liveness = ["psutil>=5.9,<8"]
 
 [project.scripts]
 forge = "context_forge.cli:app"

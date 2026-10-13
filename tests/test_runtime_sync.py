@@ -373,3 +373,4 @@ def test_worker_uses_receipt_finalization_without_legacy_runtime_sync():
         "pydantic>=2.0,<3.0", "typer>=0.12,<1.0", "python-frontmatter>=1.1,<2.0",
     ]
     assert project["optional-dependencies"]["mcp"] == ["mcp>=1.0,<2.0"]
+    assert project["optional-dependencies"]["liveness"] == ["psutil>=5.9,<8"]

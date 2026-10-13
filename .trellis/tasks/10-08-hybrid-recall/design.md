@@ -1,5 +1,10 @@
 # Design — 混合召回（第 3 层）
 
+> **Current implementation decision (2026-10-12):** the embedding provider is local
+> `sentence-transformers` with `all-MiniLM-L6-v2` (384 dimensions), loaded only from
+> the local cache. The remote Voyage exploration below is historical research and is
+> not an active implementation path.
+
 依据：`decisions.md` 的 **问题 5**、**F 段⑤**（embedding 出境）、**8a 红线**。本文只写设计，不含实现。
 
 ---
@@ -22,7 +27,7 @@
 
 ## 2. 三件因实测而变的设计结论
 
-1. **numpy 进 optional extra，向量通道是可选件**：`semantic = ["numpy>=1.26"]`。不把它变成硬依赖，否则 `pip install context-forge` 就背离 local-first 的轻量安装。
+1. **本地模型进 optional extra，向量通道不阻塞主链路**：`semantic = ["numpy>=1.26", "sentence-transformers>=3,<4"]`。模型只从缓存加载。
 2. **不提供"纯 Python 语义扫描"这条降级路**。1000 条就要 232 ms，已经吃掉整个召回预算——一条"能跑但慢到不能用"的降级路是假降级，只会掩盖问题。**降级只有一档**：没有 numpy 或没配 embedding → 走纯词法（= 现状行为，功能完整）。
 3. **今天的收益是召回质量，不是速度**。317 条规模下所有性能护栏（缓存、上限、失效检测）都是为增长准备的，所以取"简单 + 可失效"，**不预先上 sqlite-vec / HNSW**。
 
@@ -97,25 +102,14 @@
 
 ## 6. 出境约束（F⑤ 的具体形式）
 
-- 送进 embedding 的文本 = `sanitize_text(body + ' ' + summary)`，与提取模型同一份脱敏、同一套三态；
-- `doctor.check_egress()` 现在只报提取通路 → 本任务**必须把 embedding endpoint 一并列出**，
-  否则等于新开一条没人看见的出境路；
-- embedding 未配置 → 出境面不变（不多一条路）。
-
-**配置契约（2026-10-08 定，因为 Anthropic 根本没有 embeddings 产品）**：
-embedding 通路**绝不复用**提取模型的 `ANTHROPIC_*` / `remote_api_url` 配置——沿用同一条配置去猜
-embedding 端点，只会得到一个 404 或者打错端点。单开三项，与提取通路彼此独立：
+- 送进 embedding 的文本是 `sanitize_text(summary + '\n' + body)`。
+- embedding 只在本机运行，不新增出境 endpoint；`doctor` 报告本地模型缓存状态。
+- 模型下载是显式用户动作；运行时设置 Hugging Face offline，缓存缺失时回退词法，不触发联网下载。
 
 | 配置项 | 含义 | 默认 |
 |---|---|---|
-| `embedding_base_url` | OpenAI 兼容的 `/v1/embeddings` 所在基址 | 空 = 语义通道关闭 |
-| `embedding_api_key` | 该基址的密钥，**只走环境变量或本地配置，不入库、不进 Git**（同提取通路那条约束）；本地 Ollama 可空 | 空 |
-| `embedding_model` | 模型名，同时决定向量维度 | 空 |
-| `embedding_dimensions` | **请求的维度**（Voyage-4 可选 256/512/1024/2048）——同模型可选维度，所以维度不能只由模型名推出；§3 的 BLOB 长度失效校验需要它做对照 | 空 = 用模型默认 |
-
-按这个形状就能一套代码四种落地（详见 §10 的已验证端点）：OpenAI 远端、本地 Ollama（**不出境**）、
-Voyage、以及任何 OpenAI 兼容网关。**差异只允许出现在请求体的附加字段上**（如 Voyage 的 `input_type`），
-响应解析统一走 `data[i].embedding`，不为某个 provider 分叉整条管道。
+| `embedding_model` | 本地 sentence-transformers 模型名 | `all-MiniLM-L6-v2` |
+| `embedding_dimensions` | 本地向量维度，用于 BLOB 长度校验 | `384` |
 
 ---
 
@@ -161,41 +155,15 @@ Voyage、以及任何 OpenAI 兼容网关。**差异只允许出现在请求体�
 
 ---
 
-## 10. 端点事实（2026-10-08 本机探测 + 官方文档核对）
+## 10. Local model operation
 
-**本机现状（实测，不是估计）**
-
-- `ollama` 不在 PATH；`http://127.0.0.1:11434/api/tags` **连接超时** → 本地无 embedding 进程。
-- 提取通路是 Anthropic 形状（`provider_http.py`：`x-api-key` 头、默认基址 `api.anthropic.com`）。
-- Anthropic **自己没有 embeddings 端点**，官方文档把嵌入这件事指向第三方（用户告知：首选 Voyage AI）。
-  ⚠️ 我没能读到原文——`docs.anthropic.com/.../embeddings` 重定向后被区域封锁
-  （307 → `anthropic.com/app-unavailable-in-region`）。所以这条按"用户提供的信息"记录，**不是我验证的**。
-
-**第三方端点（今日读官方文档核过，✅ = 文档原文确认）**
-
-| provider | 端点 | 请求字段 | 响应 | 备注 |
-|---|---|---|---|---|
-| Ollama 原生 | ✅ `POST /api/embed` | `model`, `input` | ✅ `embeddings` | 本地跑 = **不出境**，是最省心的默认路 |
-| Ollama 兼容层 | ✅ `POST /v1/embeddings` | 未逐字段核对 | — | 与 OpenAI 同形状 |
-| Voyage | ✅ `POST https://api.voyageai.com/v1/embeddings` | ✅ `input`, `model`, `input_type` | ✅ `data[].embedding` 未解析过 | 比 OpenAI 多一个 `input_type`；模型如 `voyage-4` |
-| OpenAI | ⚠️ 未在本机/文档逐字段核对 | 行业事实是 `input`/`model` | ⚠️ | 换 provider 时的默认假设 |
-
-**仍未验证，不得当事实写进代码**：各家的批量上限、向量维度、错误体形状，以及 `data[i].embedding`
-这个解析在 Voyage 与 OpenAI 上是否真的完全一致。所以接通路的第一步**不是写代码**，是一次**只读探针**：
-拿一条与真实记忆无关的假字符串打一次 `/v1/embeddings`，把维度与响应字段名抄下来，再决定解析层。
-探针不写库、不迁移、不碰真实数据。
-
-**2026-10-08 补：路线定为远端 Voyage（用户不装 Ollama）**，核到的官方文档数字：
-
-| 项 | 数字 | 对本设计的影响 |
-|---|---|---|
-| 端点 | `POST https://api.voyageai.com/v1/embeddings` | 与我们钉的 OpenAI 兼容形状一致 |
-| 请求字段 | `input`, `model`, `input_type`（可为 `null`/`query`/`document`） | **写入用 `document`、查询用 `query`**，同一份代码差一个字段——正是 §6 说的"差异只在请求体附加字段" |
-| 批量上限 | **1,000 条文本/请求** | `reindex-embeddings` 回填要分批，314 条历史一次就够 |
-| 维度 | Voyage-4 系列可选 **256/512/1024/2048** | ⚠️ **必须新增第四项配置或把维度写死在探针结论里**：§3 定的是"维度不进 BLOB、由 `embedding_model` 决定"，而同一模型可选维度 → 没有登记的维度就没法做长度失效校验 |
-| 响应 | 文档同时出现 `embeddings` 与 `total_tokens`，OpenAI 形状是 `data[i].embedding` | **正是探针要解决的那件事**：SDK 属性名 ≠ 原始 JSON 字段名，不能猜 |
-| 价格 | 每百万 token **$0.02–$0.18**，免费额度 **50M–200M token** | 314 条全量回填约 10–20 万 token → **不到一美分**；一万条量级仍在免费额度内 |
-| 归属 | ⚠️ 纠正一处听起来像事实的错误：Anthropic 文档推荐 Voyage **不等于** Anthropic 拥有 Voyage | 2025-02 报道是 **MongoDB 以 2.2 亿美元收购 Voyage**（新闻源，非官方文档）；别在文档里写"Anthropic 的 embedding 服务" |
-
-一次边界后果要用户明确授权：接 Voyage = **出境面从 1 条变成 2 条**（提取通路之外多一份"记忆正文的向量请求"）。
-红线次序不变：`doctor.check_egress()` 先把 Voyage 列出来 → 只读探针 → 才谈 schema 与写入。
+- Model: `sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions.
+- Optional dependencies: `pip install -e ".[semantic]"`.
+- Explicitly populate the local Hugging Face cache with
+  `python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"`.
+- Runtime loading is offline-only. A missing dependency or cache leaves embeddings NULL and
+  lexical recall available; `forge doctor` reports model availability.
+- Existing rows are not silently re-embedded. After installing the model, run
+  `forge reindex-embeddings`; this updates only derived cache columns, not memory versions.
+- The optional semantic evaluation skips when the model is unavailable. The current machine has
+  no local model cache, so semantic quality still requires a cached-model evaluation run.

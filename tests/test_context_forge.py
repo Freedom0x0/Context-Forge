@@ -780,9 +780,18 @@ def test_scan_once_advances_inferred_ends(tmp_path: Path, monkeypatch) -> None:
     old = datetime.now(timezone.utc) - timedelta(hours=1)
     store.save_episode(store.latest_episode("s9").model_copy(
         update={"last_activity_at": old.isoformat()}))
-    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0)
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0,
+                      process_alive=False, active_tools=False)
 
     assert store.latest_episode("s9").state == "inferred_pending"
+
+
+def test_watcher_liveness_adapter_keeps_unavailable_state_unknown() -> None:
+    from context_forge.watcher import liveness_evidence
+
+    assert liveness_evidence() == (None, None)
+    assert liveness_evidence(process_alive=False, active_tools=False) == (False, False)
+    assert liveness_evidence(process_alive="false", active_tools=False) == (None, False)
 
 
 def test_scan_once_skips_fresh_transcript(tmp_path: Path, monkeypatch) -> None:
@@ -835,6 +844,32 @@ def test_scan_once_incremental_episode_on_append(tmp_path: Path, monkeypatch) ->
     watcher.scan_once(store, vault, Spy(), settle_seconds=0, baseline=0)
     assert seen == []
     assert store.latest_episode("s3").collected_through_line == 4
+
+
+def test_new_transcript_activity_cancels_inferred_close(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "C--work-demo"
+    tx = _write_cc_transcript(projects / "s-active.jsonl", r"C:\work\demo",
+                              "first", "answer")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0)
+    episode = store.latest_episode("s-active")
+    old = datetime.now(timezone.utc) - timedelta(hours=2)
+    store.save_episode(episode.model_copy(update={
+        "state": "inferred_pending", "last_activity_at": old.isoformat()}))
+    with tx.open("a", encoding="utf-8") as handle:
+        handle.write(_json_line("user", "new activity"))
+
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0,
+                      process_alive=False, active_tools=False)
+
+    assert store.latest_episode("s-active").state == "open"
+    assert store.pending_receipts() == []
 
 
 def test_autostart_install_uninstall(tmp_path: Path, monkeypatch) -> None:
@@ -899,21 +934,27 @@ def test_autostart_status_accepts_live_windows_pid(tmp_path: Path, monkeypatch) 
 
 
 def test_doctor_reports_watcher_state(tmp_path: Path, monkeypatch) -> None:
-    import json
     import os
-    import time
     from context_forge import autostart, doctor
+    from context_forge.watcher import WatcherLock
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
     monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
-    monkeypatch.setattr(autostart, "heartbeat_path",
-                        lambda: tmp_path / "hb")
+    monkeypatch.setattr(autostart, "heartbeat_path", lambda: tmp_path / "hb")
     name, ok, _ = doctor.check_watcher()
     assert name == "watcher"
     assert ok is False                   # nothing installed in tmp
     autostart.install()
-    assert doctor.check_watcher()[1] is False   # installed but no beat
-    (tmp_path / "hb").write_text(
-        json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8")
-    assert doctor.check_watcher()[1] is True    # alive
+    assert doctor.check_watcher()[1] is False   # installed but no lock holder
+    lock = WatcherLock()
+    lock.acquire()
+    try:
+        ok, detail = doctor.check_watcher()[1], doctor.check_watcher()[2]
+        assert ok is True                          # holder is running
+        assert f"pid={os.getpid()}" in detail      # and is named
+    finally:
+        lock.release()
+    # A leftover lock file with no holder must read as "not running".
+    assert doctor.check_watcher()[1] is False
 
 
 def _fake_repo(tmp_path: Path, monkeypatch) -> None:

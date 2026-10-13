@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,6 +51,7 @@ class JobStore:
         CREATE TABLE IF NOT EXISTS rule_feedback (
           id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL,
           session_id TEXT, outcome TEXT NOT NULL, note TEXT,
+          request_id TEXT,
           created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS rule_hit_events (
@@ -68,6 +70,18 @@ class JobStore:
           payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
           error TEXT, created_at TEXT NOT NULL, consumed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS session_liveness (
+          session_id TEXT PRIMARY KEY, pid INTEGER, process_create_time REAL,
+          observed_at REAL NOT NULL, tool_tracking_ready INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS session_active_tools (
+          session_id TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+          PRIMARY KEY(session_id, tool_use_id)
+        );
+        CREATE TABLE IF NOT EXISTS session_processes (
+          session_id TEXT PRIMARY KEY, pid INTEGER NOT NULL,
+          process_created_at REAL NOT NULL, registered_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS session_episodes (
           session_id TEXT NOT NULL, segment INTEGER NOT NULL DEFAULT 1,
           project TEXT, transcript_path TEXT NOT NULL,
@@ -82,10 +96,21 @@ class JobStore:
           step TEXT PRIMARY KEY, last_success_at TEXT, last_error TEXT,
           last_error_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS scan_failures (
+          host TEXT NOT NULL, reason TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 0, last_at TEXT,
+          PRIMARY KEY(host, reason)
+        );
         CREATE TABLE IF NOT EXISTS hygiene_verdicts (
           candidate_key TEXT PRIMARY KEY, action TEXT NOT NULL, ids_json TEXT NOT NULL,
           score REAL NOT NULL, note TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS precipitation_verdicts (
+          review_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+          decision TEXT NOT NULL CHECK(decision IN ('approved','rejected')),
+          modified INTEGER NOT NULL CHECK(modified IN (0,1)),
+          created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS episode_checkpoints (
           checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
@@ -139,6 +164,10 @@ class JobStore:
         if "vetoed" not in operation_columns:
             self.db.execute(
                 "ALTER TABLE finalization_operations ADD COLUMN vetoed INTEGER NOT NULL DEFAULT 0")
+        self.db.commit()
+        feedback_columns = {row[1] for row in self.db.execute('PRAGMA table_info(rule_feedback)')}
+        if 'request_id' not in feedback_columns:
+            self.db.execute('ALTER TABLE rule_feedback ADD COLUMN request_id TEXT')
         self.db.commit()
 
     def enqueue_event(self, event: SessionEvent) -> bool:
@@ -200,12 +229,93 @@ class JobStore:
         ).fetchone()
         return EpisodeRecord(**dict(row)) if row else None
 
+    def register_session_process(self, session_id: str, pid: int,
+                                 process_created_at: float) -> None:
+        if not session_id or pid < 1 or process_created_at <= 0:
+            raise ValueError('valid session id and process identity required')
+        with self.db:
+            self.db.execute(
+                'INSERT INTO session_processes(session_id,pid,process_created_at,registered_at) '
+                'VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET '
+                'pid=excluded.pid,process_created_at=excluded.process_created_at,'
+                'registered_at=excluded.registered_at',
+                (session_id, pid, process_created_at, _now()),
+            )
+
+    def session_process_identity(self, session_id: str) -> dict | None:
+        row = self.db.execute(
+            'SELECT session_id,pid,process_created_at,registered_at '
+            'FROM session_processes WHERE session_id=?', (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def active_episodes(self) -> list[EpisodeRecord]:
         rows = self.db.execute(
             "SELECT * FROM session_episodes WHERE state IN ('open','inferred_pending') "
             "ORDER BY last_activity_at,session_id,segment"
         ).fetchall()
         return [EpisodeRecord(**dict(row)) for row in rows]
+
+    def record_session_liveness(self, session_id: str, *, pid: int | None = None,
+                                process_create_time: float | None = None,
+                                observed_at: float | None = None,
+                                initialize_tool_tracking: bool = False) -> None:
+        """Persist exact host identity and/or refresh lifecycle evidence."""
+        observed_at = _time.time() if observed_at is None else observed_at
+        with self.db:
+            self.db.execute(
+                "INSERT INTO session_liveness(session_id,pid,process_create_time,observed_at,tool_tracking_ready) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                "pid=COALESCE(excluded.pid,session_liveness.pid), "
+                "process_create_time=COALESCE(excluded.process_create_time,session_liveness.process_create_time), "
+                "observed_at=excluded.observed_at, "
+                "tool_tracking_ready=CASE WHEN excluded.tool_tracking_ready=1 THEN 1 ELSE session_liveness.tool_tracking_ready END",
+                (session_id, pid, process_create_time, observed_at, int(initialize_tool_tracking)),
+            )
+
+    def record_tool_activity(self, session_id: str, tool_use_id: str | None, *,
+                             active: bool, observed_at: float | None = None) -> bool:
+        """Track concurrent tool calls by id; return whether evidence is complete."""
+        observed_at = _time.time() if observed_at is None else observed_at
+        with self.db:
+            row = self.db.execute(
+                "SELECT tool_tracking_ready FROM session_liveness WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if not tool_use_id:
+                self.db.execute(
+                    "UPDATE session_liveness SET tool_tracking_ready=0,observed_at=? WHERE session_id=?",
+                    (observed_at, session_id),
+                )
+                return False
+            if active:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO session_active_tools(session_id,tool_use_id) VALUES(?,?)",
+                    (session_id, tool_use_id),
+                )
+            else:
+                self.db.execute(
+                    "DELETE FROM session_active_tools WHERE session_id=? AND tool_use_id=?",
+                    (session_id, tool_use_id),
+                )
+            self.db.execute(
+                "UPDATE session_liveness SET observed_at=? WHERE session_id=?",
+                (observed_at, session_id),
+            )
+            return bool(row["tool_tracking_ready"])
+
+    def session_liveness(self, session_id: str) -> dict[str, object] | None:
+        row = self.db.execute(
+            "SELECT * FROM session_liveness WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        active = self.db.execute(
+            "SELECT 1 FROM session_active_tools WHERE session_id=? LIMIT 1", (session_id,)
+        ).fetchone() is not None
+        return {**dict(row), "active_tools": active if row["tool_tracking_ready"] else None}
 
     def list_episodes(self) -> list[EpisodeRecord]:
         return [EpisodeRecord(**dict(row)) for row in self.db.execute(
@@ -222,6 +332,36 @@ class JobStore:
                 for row in self.db.execute(
                     'SELECT host, COUNT(*) AS episodes, MAX(last_activity_at) AS last_activity '
                     'FROM session_episodes GROUP BY host ORDER BY host')}
+
+    def record_scan_failure(self, host: str, reason: str,
+                            now: datetime | None = None) -> None:
+        """One transcript that could not be collected this pass (8a.3's failure half).
+
+        `reason` is a fixed category, never an exception string: a free-text
+        dimension shatters the bucket the alarm reads. The file is still skipped;
+        this only leaves a trace.
+        """
+        moment = (now or datetime.now(timezone.utc)).isoformat()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO scan_failures(host,reason,count,last_at) VALUES (?,?,1,?) "
+                "ON CONFLICT(host,reason) DO UPDATE SET "
+                "count=scan_failures.count+1, last_at=excluded.last_at",
+                (host, reason, moment),
+            )
+
+    def scan_failures(self) -> dict[str, dict[str, int]]:
+        """Parse failures per host per category, read next to the silence duration.
+
+        Cumulative since the queue was created: there is no reset or decay, so a
+        count > 0 fails `doctor.check_host_silence` indefinitely. That is the
+        intended "has this host ever misbehaved" signal, not a rolling window.
+        """
+        out: dict[str, dict[str, int]] = {}
+        for row in self.db.execute(
+                "SELECT host,reason,count FROM scan_failures ORDER BY host,reason"):
+            out.setdefault(row["host"], {})[row["reason"]] = row["count"]
+        return out
 
     def scheduled_due(self, step: str, now: datetime, period_seconds: int) -> bool:
         row = self.db.execute(
@@ -557,11 +697,26 @@ class JobStore:
             self.db.execute("UPDATE reviews SET status=?, updated_at=? WHERE id=?", (status, _now(), review_id))
 
     def add_rule_feedback(self, rule_id: str, outcome: str, note: str | None = None,
-                          session_id: str | None = None) -> None:
+                          session_id: str | None = None,
+                          request_id: str | None = None) -> None:
         with self.db:
             self.db.execute(
-                "INSERT INTO rule_feedback(rule_id, session_id, outcome, note, created_at) VALUES (?, ?, ?, ?, ?)",
-                (rule_id, session_id, outcome, note, _now()),
+                "INSERT INTO rule_feedback(rule_id, session_id, outcome, note, request_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (rule_id, session_id, outcome, note, request_id, _now()),
+            )
+
+    def record_precipitation_verdict(self, review_id: str, session_id: str, *,
+                                     decision: str, modified: bool) -> None:
+        if decision not in {'approved', 'rejected'}:
+            raise ValueError('decision must be approved or rejected')
+        with self.db:
+            self.db.execute(
+                'INSERT INTO precipitation_verdicts(review_id,session_id,decision,modified,created_at) '
+                'VALUES (?,?,?,?,?) ON CONFLICT(review_id) DO UPDATE SET '
+                'session_id=excluded.session_id,decision=excluded.decision, '
+                'modified=excluded.modified,created_at=excluded.created_at',
+                (review_id, session_id, decision, int(modified), _now()),
             )
 
     def record_rule_hit(self, rule_id: str, project: str, reason: str,

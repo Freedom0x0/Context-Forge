@@ -12,6 +12,9 @@ Applies to the standalone long-term memory foundation in `context_forge/memory*.
 - `get(id, version=None)`, `history(id)`, `events(id)` and `relations(id, ...)` inspect durable state.
 - `search(query, project=..., changed_path=None, limit=8, byte_budget=65536, owner=...)` returns visible current records.
 - `MemoryStore.migrate(path, dry_run=True)` is the only schema upgrade path besides `initialize`; ordinary opens raise.
+- Workflow metrics use attributable ledgers: precipitation confirmation/modification comes from
+  explicit queue verdicts, while recall error labels require a matching rule-hit session and
+  request-linked feedback. Missing or unlinked labels are excluded from rates.
 - `rebuild_fts()`, `backup(target)`, `restore(backup, target)` and `export_markdown(target)` manage derived data and recovery.
 - `import_vault(root, feedback_db=None, dry_run=True, namespace=None, snapshot_order=0)` provides explicit legacy migration.
 

@@ -36,9 +36,15 @@ remote_model = ""               # 留空走 ANTHROPIC_DEFAULT_SONNET_MODEL 等
 # 本地 provider 配置（model_provider = "local" 时使用）
 local_api_url = "http://localhost:11434"
 local_model = "llama3"
+
+# 本地语义向量（只读本地缓存，不联网下载）
+embedding_model = "all-MiniLM-L6-v2"
+embedding_dimensions = 384
 ```
 
 未配置 provider 时 capture / vault / search 仍然可用。
+语义模型未安装或未缓存时自动回退到词法检索；安装 `.[semantic]` 并在本地缓存模型后，运行
+`forge reindex-embeddings` 为已有记忆生成向量。
 
 ## Claude Code hook 接入
 

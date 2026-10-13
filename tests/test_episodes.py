@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from typer.testing import CliRunner
 from context_forge.domain import SessionLifecycleEvent
 from context_forge.episodes import EpisodeCollector
 from context_forge.queue import EventConflict, JobStore
+from context_forge.vault import Vault
+from context_forge.gateways import NoOpGateway
 
 
 def lifecycle_event(**updates):
@@ -34,6 +37,43 @@ def test_lifecycle_event_is_request_idempotent(tmp_path: Path):
 
     with pytest.raises(EventConflict):
         store.ingest_session_event(lifecycle_event(reason="changed"))
+
+
+def test_lifecycle_event_liveness_is_optional_and_typed():
+    from context_forge.hooks.liveness import from_payload
+
+    base = lifecycle_event().model_dump()
+    assert from_payload(base).process_alive is None
+    assert from_payload(base).active_tools is None
+    base.update(process_alive=False, active_tools=False)
+    assert from_payload(base).process_alive is False
+    assert from_payload(base).active_tools is False
+    base.update(process_alive="false", active_tools=0)
+    assert from_payload(base).process_alive is None
+    assert from_payload(base).active_tools is None
+
+
+def test_session_start_registers_exact_process_identity(tmp_path, monkeypatch):
+    from context_forge.hooks import claude_code, liveness
+
+    store = JobStore(tmp_path / "queue.db")
+    monkeypatch.setattr(liveness, "claude_process_identity", lambda: (1234, 45.5))
+    assert claude_code.handle_payload(
+        {"hook_event_name": "SessionStart", "session_id": "s1"}, store=store) is None
+    identity = store.session_process_identity("s1")
+    assert (identity["session_id"], identity["pid"], identity["process_created_at"]) == (
+        "s1", 1234, 45.5)
+    assert identity["registered_at"]
+
+
+def test_session_start_without_reliable_ancestor_keeps_liveness_unknown(tmp_path, monkeypatch):
+    from context_forge.hooks import claude_code, liveness
+
+    store = JobStore(tmp_path / "queue.db")
+    monkeypatch.setattr(liveness, "claude_process_identity", lambda: None)
+    claude_code.handle_payload(
+        {"hook_event_name": "SessionStart", "session_id": "s2"}, store=store)
+    assert store.session_process_identity("s2") is None
 
 
 def test_collector_appends_only_complete_new_lines(tmp_path: Path):
@@ -164,6 +204,109 @@ def test_repeated_hook_session_end_reuses_first_observed_at(tmp_path: Path):
     assert len(store.pending_receipts()) == 1
 
 
+def test_claude_hook_liveness_roundtrip_to_watcher_and_ttl(tmp_path: Path, monkeypatch):
+    from context_forge import watcher
+    from context_forge.hooks import liveness
+    from context_forge.hooks.claude_code import handle_payload
+
+    transcript = tmp_path / "live-session.jsonl"
+    transcript.write_text('{"type":"assistant","message":{"content":[]}}\n',
+                          encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    monkeypatch.setattr(liveness, "register_current_claude_session",
+                        lambda session_id, queue: queue.register_session_process(
+                            session_id, 4321, 100.0))
+    handle_payload({"hook_event_name": "SessionStart", "session_id": "s-live"},
+                   store=store)
+    handle_payload({"hook_event_name": "PreToolUse", "session_id": "s-live",
+                    "tool_use_id": "tool-1"}, store=store)
+
+    # Even though transcript looks idle, hook-backed tool evidence says active.
+    monkeypatch.setattr(watcher, "_session_process_alive", lambda sid, queue: True)
+    assert watcher.probe_session_liveness(transcript, "s-live", store) == (True, True)
+    handle_payload({"hook_event_name": "PostToolUse", "session_id": "s-live",
+                    "tool_use_id": "tool-1"}, store=store)
+    assert watcher.probe_session_liveness(transcript, "s-live", store) == (True, False)
+    assert watcher.probe_session_liveness(
+        transcript, "s-live", store, now=store.session_liveness("s-live")["observed_at"] + 86401,
+    ) == (True, None)
+
+
+def test_watcher_consumes_hook_tool_evidence_conservatively(tmp_path: Path, monkeypatch):
+    from context_forge import watcher
+    from context_forge.hooks import liveness
+    from context_forge.hooks.claude_code import handle_payload
+
+    projects = tmp_path / "projects" / "project"
+    transcript = projects / "s-watch.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"type":"assistant","message":{"content":[]}}\n',
+                          encoding="utf-8")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(liveness, "register_current_claude_session",
+                        lambda sid, queue: queue.register_session_process(sid, 7654, 200.0))
+    monkeypatch.setattr(watcher, "_session_process_alive", lambda sid, queue: False)
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+    collector = EpisodeCollector(store)
+    episode = collector.collect("s-watch", transcript, "project", "claude_code")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
+    handle_payload({"hook_event_name": "SessionStart", "session_id": "s-watch"},
+                   store=store)
+    handle_payload({"hook_event_name": "PreToolUse", "session_id": "s-watch",
+                    "tool_use_id": "pending-tool"}, store=store)
+
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0)
+    assert store.latest_episode("s-watch").state == "open"
+
+    handle_payload({"hook_event_name": "PostToolUse", "session_id": "s-watch",
+                    "tool_use_id": "pending-tool"}, store=store)
+    # Old enough for suspected close, but transcript/tool hooks provide evidence.
+    current = time.time()
+    store.save_episode(store.latest_episode("s-watch").model_copy(update={
+        "last_activity_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    }))
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0, now=current)
+    assert store.latest_episode("s-watch").state == "inferred_pending"
+
+    state = store.session_liveness("s-watch")
+    watcher.scan_once(store, vault, NoOpGateway(), settle_seconds=0, baseline=0,
+                      now=state["observed_at"] + 86401)
+    assert store.latest_episode("s-watch").state == "inferred_pending"
+
+
+def test_tool_liveness_unknown_without_session_start_or_tool_id(tmp_path: Path):
+    from context_forge.hooks.claude_code import handle_payload
+    from context_forge import watcher
+
+    store = JobStore(tmp_path / "queue.db")
+    handle_payload({"hook_event_name": "PreToolUse", "session_id": "unknown",
+                    "tool_use_id": "tool-1"}, store=store)
+    transcript = tmp_path / "unknown.jsonl"
+    transcript.write_text('{"type":"assistant","message":{"content":[]}}\n',
+                          encoding="utf-8")
+    assert watcher.probe_session_liveness(transcript, "unknown", store) == (None, None)
+
+    handle_payload({"hook_event_name": "SessionStart", "session_id": "unknown"},
+                   store=store)
+    handle_payload({"hook_event_name": "PreToolUse", "session_id": "unknown"},
+                   store=store)
+    assert watcher.probe_session_liveness(transcript, "unknown", store)[1] is None
+
+
+def test_claude_hook_install_includes_liveness_events(tmp_path: Path):
+    import json
+    from context_forge import install_hook
+
+    settings = tmp_path / "settings.json"
+    install_hook.install(settings)
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    for event in ("SessionStart", "UserPromptSubmit", "Stop", "PreToolUse",
+                  "PostToolUse", "PostToolUseFailure"):
+        assert hooks[event]
+
+
 def test_inferred_end_requires_pending_and_grace_period(tmp_path: Path):
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"message":"one"}\n', encoding="utf-8")
@@ -173,11 +316,13 @@ def test_inferred_end_requires_pending_and_grace_period(tmp_path: Path):
     old = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
 
-    first = collector.advance_inferred(old + timedelta(minutes=30))
+    first = collector.advance_inferred(old + timedelta(minutes=30), process_alive=False,
+                                       active_tools=False)
     assert first == []
     assert store.latest_episode("s1").state == "inferred_pending"
 
-    second = collector.advance_inferred(old + timedelta(minutes=60))
+    second = collector.advance_inferred(old + timedelta(minutes=60), process_alive=False,
+                                        active_tools=False)
     assert len(second) == 1
     assert second[0].end_kind == "inferred"
     # Inferred closes are counted separately so the guess stays visible (8c).
@@ -198,9 +343,11 @@ def test_inferred_close_is_suppressed_while_a_tool_is_outstanding(tmp_path: Path
     old = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
 
-    assert collector.advance_inferred(old + timedelta(minutes=30)) == []
+    assert collector.advance_inferred(old + timedelta(minutes=30), process_alive=False,
+                                     active_tools=True) == []
     assert store.latest_episode("s1").state == "open"
-    assert collector.advance_inferred(old + timedelta(hours=2), new_activity=True) == []
+    assert collector.advance_inferred(old + timedelta(hours=2), new_activity=True,
+                                     process_alive=False, active_tools=True) == []
     assert store.latest_episode("s1").state == "open"
 
 
@@ -213,7 +360,8 @@ def test_new_activity_shortens_the_grace_wait(tmp_path: Path):
     old = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
 
-    receipts = collector.advance_inferred(old + timedelta(minutes=31), new_activity=True)
+    receipts = collector.advance_inferred(old + timedelta(minutes=31), new_activity=True,
+                                          process_alive=False, active_tools=False)
 
     assert len(receipts) == 1 and receipts[0].end_kind == "inferred"
 
@@ -228,8 +376,26 @@ def test_missing_transcript_is_skipped_instead_of_finalizing(tmp_path: Path):
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
     transcript.unlink()
 
-    assert collector.advance_inferred(old + timedelta(hours=1)) == []
-    assert store.latest_episode("s1").state == "open"
+    assert collector.advance_inferred(old + timedelta(hours=1), process_alive=False,
+                                      active_tools=False) == []
+
+
+def test_inferred_end_requires_explicit_liveness_evidence(tmp_path: Path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    episode = collector.collect("s-live", transcript, "demo", "claude_code")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
+
+    assert collector.advance_inferred(old + timedelta(hours=2)) == []
+    assert store.latest_episode("s-live").state == "open"
+    assert collector.advance_inferred(old + timedelta(hours=2), process_alive=True,
+                                      active_tools=False) == []
+    assert collector.advance_inferred(old + timedelta(hours=2), process_alive=False,
+                                      active_tools=False) == []
+    assert store.latest_episode("s-live").state == "inferred_pending"
 
 
 def test_append_cancels_inferred_pending(tmp_path: Path):

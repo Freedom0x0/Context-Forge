@@ -50,7 +50,15 @@ def _memory():
     from .config import runtime_dir
     from .memory import MemoryStore
     path = runtime_dir() / "memory.db"
-    return MemoryStore(path, readonly=False) if path.exists() else None
+    if not path.exists():
+        return None
+    settings = load_settings()
+    embedder = None
+    if settings and settings.embedding_model:
+        from .embedding import LocalEmbedder
+        embedder = LocalEmbedder(settings.embedding_model,
+                                 dimensions=settings.embedding_dimensions)
+    return MemoryStore(path, readonly=False, embedder=embedder)
 
 
 def _vault() -> Vault:
@@ -66,19 +74,11 @@ def event_ingest() -> None:
     """Ingest one generic lifecycle event as JSON from stdin."""
     import json
     import sys
-    from .domain import SessionLifecycleEvent
-    from .episodes import EpisodeCollector
+    from .hooks.generic import handle_event
 
-    event = SessionLifecycleEvent.model_validate(json.load(sys.stdin))
+    event = handle_event(json.load(sys.stdin), store=_store())
     store = _store()
-    result = store.ingest_session_event(event)
-    collector = EpisodeCollector(store)
-    collector.collect(event.session_id, Path(event.transcript_path), None, event.source)
-    if event.type == "pre_compact":
-        collector.checkpoint(event)
-    else:
-        collector.request_finalize(event.session_id, end_kind="explicit", event_id=event.event_id)
-    typer.echo(result)
+    typer.echo(event.event_id)
 
 
 @session_app.command("finalize")
@@ -167,6 +167,9 @@ def init(vault_path: Path) -> None:
     from .config import runtime_dir
     MemoryStore.initialize(runtime_dir() / "memory.db")
     typer.echo(f"wrote {cfg_path} (vault = {settings.root})")
+    typer.echo("local embeddings: all-MiniLM-L6-v2 (offline/cache only); "
+               "install with `pip install -e '.[semantic]'` and run "
+               "`forge reindex-embeddings` after the model is cached")
 
 
 @app.command("install-hook")
@@ -471,6 +474,34 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
 
     typer.echo(_json.dumps(MemoryEffectiveness(store, _store()).report(days=days).as_dict(),
                            ensure_ascii=False, indent=2))
+
+
+@app.command("reindex-embeddings")
+def reindex_embeddings() -> None:
+    """Generate local cached vectors for current memories; never calls a remote API."""
+    store = _memory()
+    if store is None:
+        raise typer.BadParameter("memory database is not initialized")
+    if store.embedder is None:
+        raise typer.BadParameter("local embedding model is disabled in config")
+    result = store.reindex_embeddings(store.embedder)
+    import json as _json
+    typer.echo(_json.dumps(result, indent=2))
+
+
+@app.command("precipitation-verdict")
+def precipitation_verdict(review_id: str,
+                           session_id: str = typer.Option(..., "--session"),
+                           decision: str = typer.Option(..., "--decision",
+                                                       help="approved or rejected"),
+                           modified: bool = typer.Option(False, "--modified")) -> None:
+    """Record a human review verdict for one precipitated review artifact."""
+    try:
+        _store().record_precipitation_verdict(
+            review_id, session_id, decision=decision, modified=modified)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo("recorded")
 
 
 @app.command("hygiene")

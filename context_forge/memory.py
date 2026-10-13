@@ -18,9 +18,11 @@ from .memory_models import (
     DEFAULT_OWNER, Actor, Level, MemoryApplication, MemoryDraft, MemoryRecord,
     Relation, Scope, derive_level, split_legacy_scopes,
 )
-from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6, V9
+from .memory_schema import PROJECTIONS, SCHEMA, SCHEMA_VERSION, V3, V4, V6, V9, V11
 from .risk import requires_confirmation, risk_of
 from .rules import glob_match
+from .embedding import unpack_vector
+from .transcript import sanitize_text
 
 
 class MemoryStoreError(RuntimeError):
@@ -542,9 +544,10 @@ def _actor(actor: Actor) -> str:
 class MemoryStore:
     """An existing database handle; connections live for one operation only."""
 
-    def __init__(self, path: Path, *, readonly: bool = True):
+    def __init__(self, path: Path, *, readonly: bool = True, embedder=None):
         self.path = Path(path).resolve()
         self.readonly = readonly
+        self.embedder = embedder
         with self._connection():
             pass
 
@@ -685,6 +688,11 @@ class MemoryStore:
             if 'replay_attempts' not in confirmation_columns:
                 connection.execute('ALTER TABLE pending_confirmations ADD COLUMN replay_attempts '
                                    'INTEGER NOT NULL DEFAULT 0')
+            version_columns = {row[1] for row in connection.execute('PRAGMA table_info(memory_versions)')}
+            if 'embedding_model' not in version_columns:
+                connection.execute("ALTER TABLE memory_versions ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
+            if 'embedding' not in version_columns:
+                connection.execute("ALTER TABLE memory_versions ADD COLUMN embedding BLOB")
             for row in connection.execute(
                 'SELECT m.id, v.snapshot_json FROM memories m '
                 'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version').fetchall():
@@ -782,6 +790,35 @@ class MemoryStore:
         with self._connection() as connection:
             return [self._record(connection, row['id'])
                     for row in connection.execute('SELECT id FROM memories ORDER BY id')]
+
+    def reindex_embeddings(self, embedder) -> dict[str, int]:
+        """Rebuild current-version local vectors without changing memory versions."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                'SELECT m.id,v.version,v.snapshot_json FROM memories m '
+                'JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version '
+                'ORDER BY m.id').fetchall()
+        prepared: list[tuple[str, int, bytes]] = []
+        failed = 0
+        for row in rows:
+            try:
+                draft = MemoryDraft.model_validate_json(row['snapshot_json'])
+                text = sanitize_text(draft.summary + '\n' + draft.body)
+                prepared.append((row['id'], row['version'], embedder.encode(text)))
+            except Exception:
+                failed += 1
+        updated = 0
+        with self._connection(write=True) as connection:
+            for memory_id, version, vector in prepared:
+                result = connection.execute(
+                    'UPDATE memory_versions SET embedding_model=?,embedding=? '
+                    'WHERE memory_id=? AND version=? AND EXISTS '
+                    '(SELECT 1 FROM memories WHERE id=? AND current_version=?)',
+                    (embedder.identity, vector, memory_id, version, memory_id, version),
+                )
+                updated += result.rowcount
+        return {'total': len(rows), 'updated': updated, 'failed': failed,
+                'stale': len(prepared) - updated}
 
     def find_exact(self, fingerprint: str) -> MemoryRecord | None:
         with self._connection() as connection:
@@ -1334,13 +1371,26 @@ class MemoryStore:
     def put(self, memory_id: str, draft: MemoryDraft, *, expected_version: int,
             idempotency_key: str, actor: Actor = 'model', reason: str,
             relations: tuple[Relation, ...] = ()) -> MemoryRecord:
+        embedding_model = ''
+        embedding = None
+        if self.embedder is not None:
+            try:
+                clean_text = sanitize_text(draft.summary + '\n' + draft.body)
+                embedding = self.embedder.encode(clean_text)
+                embedding_model = self.embedder.identity
+            except Exception:
+                # Embeddings are optional derived data; the authoritative write still proceeds.
+                embedding = None
         with self._connection(write=True) as connection:
             return self._put(connection, memory_id, draft, expected_version=expected_version,
-                             idempotency_key=idempotency_key, actor=actor, reason=reason, relations=relations)
+                             idempotency_key=idempotency_key, actor=actor, reason=reason,
+                             relations=relations, embedding_model=embedding_model,
+                             embedding=embedding)
 
     def _put(self, connection: sqlite3.Connection, memory_id: str, draft: MemoryDraft, *,
              expected_version: int, idempotency_key: str, actor: Actor, reason: str,
-             relations: tuple[Relation, ...] = ()) -> MemoryRecord:
+             relations: tuple[Relation, ...] = (), embedding_model: str = '',
+             embedding: bytes | None = None) -> MemoryRecord:
         if not memory_id or not idempotency_key or not reason or expected_version < 0:
             raise ValueError('id, idempotency key, reason and nonnegative expected_version required')
         draft = MemoryDraft.model_validate(draft.model_dump())
@@ -1392,10 +1442,10 @@ class MemoryStore:
                 raise VersionConflict(memory_id)
         connection.execute(
             'INSERT INTO memory_versions '
-            '(memory_id,version,snapshot_json,created_at,canonical_fingerprint,risk) '
-            'VALUES (?,?,?,?,?,?)',
+            '(memory_id,version,snapshot_json,created_at,canonical_fingerprint,risk,embedding_model,embedding) '
+            'VALUES (?,?,?,?,?,?,?,?)',
             (memory_id, version, canonical_json(draft.model_dump(mode='json')),
-             timestamp, canonical_fingerprint(draft), draft.risk),
+             timestamp, canonical_fingerprint(draft), draft.risk, embedding_model, embedding),
         )
         for source_id in sorted({source.identity for source in draft.sources}):
             connection.execute('INSERT INTO memory_version_sources VALUES (?,?,?)', (memory_id, version, source_id))
@@ -1653,6 +1703,36 @@ class MemoryStore:
                     rows.sort(key=lambda item: (item[1], item[0]))
             else:
                 return []
+            # Optional semantic candidates supplement lexical results. Invalid or
+            # unavailable vectors are ignored, preserving lexical-only behavior.
+            if self.embedder is not None and tokens:
+                try:
+                    query_blob = self.embedder.encode(query)
+                    query_vector = unpack_vector(query_blob, dimensions=self.embedder.dimensions)
+                    if query_vector:
+                        import math
+                        qnorm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
+                        seen = {memory_id for memory_id, _ in rows}
+                        semantic = []
+                        for candidate in connection.execute(
+                                "SELECT m.id,v.embedding,v.embedding_model FROM memories m "
+                                "JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version "
+                                "WHERE m.status IN ('active','conflicted') AND m.suppressed=0"):
+                            if candidate['embedding_model'] != self.embedder.identity:
+                                continue
+                            vector = unpack_vector(candidate['embedding'], dimensions=self.embedder.dimensions)
+                            if not vector:
+                                continue
+                            norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+                            score = sum(a * b for a, b in zip(query_vector, vector)) / (qnorm * norm)
+                            semantic.append((candidate['id'], score))
+                        semantic.sort(key=lambda item: (-item[1], item[0]))
+                        for memory_id, score in semantic[:50]:
+                            if memory_id not in seen:
+                                rows.append((memory_id, -score))
+                                channel_notes[memory_id] = f'语义相似 {score:.2f}'
+                except Exception:
+                    pass
             effective_limit = min(limit or 100, 100) if single_han else limit
             ids = [memory_id for memory_id, _ in rows]
             views = self._boundary_views(connection, ids)

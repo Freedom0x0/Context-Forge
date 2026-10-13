@@ -47,6 +47,12 @@ def test_recognised_providers_are_exactly_the_vocabulary():
     assert PROVIDER_NAMES == ('none', 'offline', 'fake', 'local', 'remote')
 
 
+def test_default_embedding_model_is_local_and_fixed_dimension():
+    configured = settings()
+    assert configured.embedding_model == 'all-MiniLM-L6-v2'
+    assert configured.embedding_dimensions == 384
+
+
 def test_local_provider_keeps_text_on_the_machine(isolated):
     write_config(isolated, model_provider='local')
 

@@ -3,7 +3,7 @@
   "name": "memory-improvement-brainstorm",
   "title": "长期记忆机制改进决策脑暴",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "problems 1-9 已在 decisions.md 定案，待确认后归档",
   "meta": {}
 }

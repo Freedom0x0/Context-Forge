@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Mapping
 
 from .domain import EpisodeCheckpoint, EpisodeRecord, FinalizationReceipt, SessionLifecycleEvent
 from .queue import JobStore, _now
@@ -81,14 +82,16 @@ class EpisodeCollector:
 
     def advance_inferred(self, now: datetime | None = None, *,
                          new_activity: bool = False,
+                         process_alive: bool | None = None,
+                         active_tools: bool | None = None,
+                         liveness_by_session: Mapping[str, tuple[bool | None, bool | None]] | None = None,
                          pending_after: timedelta = PENDING_AFTER,
                          grace: timedelta = GRACE) -> list[FinalizationReceipt]:
-        """Close episodes nobody reported the end of, using file evidence only.
+        """Close an unreported episode only with explicit liveness evidence.
 
-        Guessing wrong is cheap here: `collect()` opens a new segment for lines
-        that arrive after finalization, so an over-eager close splits a session in
-        two instead of losing it — which is why no process-level evidence is
-        required to run this.
+        Unknown process/tool state is deliberately treated as active. A quiet
+        transcript is not proof that the host exited, and finalization must not
+        split a live session or freeze an in-flight tool result.
 
         `new_activity` means a transcript appeared this pass: the user is clearly
         around, so anything already suspected can be closed without the grace wait.
@@ -96,9 +99,16 @@ class EpisodeCollector:
         now = now or datetime.now(timezone.utc)
         receipts: list[FinalizationReceipt] = []
         for episode in self.store.active_episodes():
+            session_evidence = (liveness_by_session or {}).get(episode.session_id)
+            session_process = (process_alive if process_alive is not None else
+                               session_evidence[0] if session_evidence else None)
+            session_tools = (active_tools if active_tools is not None else
+                             session_evidence[1] if session_evidence else None)
             last = datetime.fromisoformat(episode.last_activity_at)
             silence = now - last
             suspected = episode.state == "inferred_pending"
+            if session_process is not False or session_tools is not False:
+                continue
             if not suspected and silence < pending_after:
                 continue
             if suspected and not new_activity and silence < grace:

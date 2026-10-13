@@ -26,6 +26,10 @@ class EffectivenessReport:
     # memory.db. Counts only, no rates: the discipline the bucket report already follows is
     # that a small sample must not be turned into a percentage.
     verdicts: dict[str, object] = field(default_factory=dict)
+    workflow_metrics: dict[str, object] = field(default_factory=dict)
+    # Per-host collection health from queue.db: the silence duration beside the
+    # scan-failure buckets (8a.3). Same side as verdicts — counts, not rates.
+    host_health: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -36,6 +40,8 @@ class EffectivenessReport:
             'signals': self.signals,
             'buckets': list(self.buckets),
             'verdicts': self.verdicts,
+            'workflow_metrics': self.workflow_metrics,
+            'host_health': self.host_health,
         }
 
 
@@ -55,6 +61,11 @@ def _age_days(created_at: str) -> int:
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - created).days
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
 class MemoryEffectiveness:
@@ -138,7 +149,161 @@ class MemoryEffectiveness:
                      'totals': self.store.signal_totals(window)},
             buckets=tuple(self.store.bucket_report(months=window)),
             verdicts=self._verdicts(),
+            workflow_metrics=self.workflow_metrics(),
+            host_health=self._host_health(),
         )
+
+    def _host_health(self) -> dict[str, dict[str, object]]:
+        """Per-host last-collected time beside its scan-failure buckets (8a.3).
+
+        A host that only ever failed has no episode row, so failure-only hosts
+        are merged in too — otherwise the very case the count exists to catch
+        (format changed, nothing ever collected) would be invisible.
+        """
+        if self.queue is None:
+            return {}
+        activity = self.queue.host_activity()
+        failures = self.queue.scan_failures()
+        return {
+            host: {
+                'episodes': activity.get(host, {}).get('episodes', 0),
+                'last_activity_at': activity.get(host, {}).get('last_activity_at'),
+                'scan_failures': failures.get(host, {}),
+            }
+            for host in sorted(set(activity) | set(failures))
+        }
+
+    def workflow_metrics(self) -> dict[str, object]:
+        """Return observable end-to-end workflow metrics.
+
+        Rates deliberately include their denominators and use ``None`` when there is
+        no sample.  This keeps an empty database distinguishable from a perfect one.
+        """
+        applications = self.store.applications()
+        confirmed = sum(1 for item in applications if item.get('attribution') == 'confirmed')
+        modified = sum(
+            1 for item in applications
+            if item.get('actual_outcome') and item.get('expected_outcome')
+            and item['actual_outcome'].strip() != item['expected_outcome'].strip()
+        )
+        retrievals = self.store.retrieval_events()
+        exposure = sum(1 for item in retrievals if item.get('stage') in EXPOSURE_STAGES)
+        negative_feedback = [item for item in self.store.feedback()
+                             if item.get('outcome') in {'irrelevant', 'harmful'}]
+
+        # A repeated error is a harmful outcome for a memory that has already had
+        # a previous harmful outcome. This is conservative and fully attributable.
+        harmful_by_memory: dict[str, int] = {}
+        for item in self.store.feedback():
+            if item.get('outcome') == 'harmful':
+                harmful_by_memory[item['memory_id']] = harmful_by_memory.get(item['memory_id'], 0) + 1
+        harmful_events = sum(harmful_by_memory.values())
+        repeated_errors = sum(max(0, count - 1) for count in harmful_by_memory.values())
+
+        precipitation_total = precipitation_approved = precipitation_modified = 0
+        repeated_errors = 0
+        harmful_events = 0
+        false_recall = 0
+        labelled_hits = 0
+        revocation_hours: list[float] = []
+        if self.queue is not None:
+            verdicts = self.queue.db.execute(
+                'SELECT decision,modified FROM precipitation_verdicts').fetchall()
+            precipitation_total = len(verdicts)
+            precipitation_approved = sum(1 for row in verdicts if row['decision'] == 'approved')
+            precipitation_modified = sum(1 for row in verdicts if row['modified'])
+
+            hits = self.queue.db.execute(
+                'SELECT rule_id,session_id,occurred_at FROM rule_hit_events ORDER BY occurred_at').fetchall()
+            feedback = self.queue.db.execute(
+                "SELECT rule_id,session_id,outcome,request_id,created_at FROM rule_feedback "
+                "WHERE outcome IN ('helpful','harmful','irrelevant') ORDER BY created_at"
+            ).fetchall()
+            # A feedback label is usable only when tied to a recall request and hit.
+            # Collapse duplicate reports for a rule/request so retries do not inflate rates.
+            hit_requests = {(row['rule_id'], row['session_id']) for row in hits if row['session_id']}
+            labelled: dict[tuple[str, str], str] = {}
+            labelled_times: dict[tuple[str, str], datetime] = {}
+            for row in feedback:
+                if not row['session_id'] or not row['request_id']:
+                    continue
+                key = (row['rule_id'], row['request_id'])
+                if (row['rule_id'], row['session_id']) in hit_requests:
+                    labelled[key] = row['outcome']
+                    try:
+                        labelled_times[key] = _parse_time(row['created_at'])
+                    except (TypeError, ValueError):
+                        pass
+            labelled_hits = len(labelled)
+            false_recall = sum(outcome == 'irrelevant' for outcome in labelled.values())
+            harmful_keys = sorted(
+                (key for key, outcome in labelled.items() if outcome == 'harmful'),
+                key=lambda key: labelled_times.get(key, datetime.max.replace(tzinfo=timezone.utc)),
+            )
+            harmful_events = len(harmful_keys)
+            harmed_rules: set[str] = set()
+            for rule_id, _request_id in harmful_keys:
+                repeated_errors += int(rule_id in harmed_rules)
+                harmed_rules.add(rule_id)
+
+            hits = self.queue.db.execute(
+                'SELECT rule_id, occurred_at FROM rule_hit_events ORDER BY occurred_at').fetchall()
+            hit_times: dict[str, list[datetime]] = {}
+            for hit in hits:
+                try:
+                    hit_times.setdefault(hit['rule_id'], []).append(_parse_time(hit['occurred_at']))
+                except (TypeError, ValueError):
+                    continue
+            revoked = self.queue.db.execute(
+                "SELECT rule_id, created_at FROM rule_feedback WHERE outcome='revoked'"
+            ).fetchall()
+            for item in revoked:
+                try:
+                    end = _parse_time(item['created_at'])
+                    starts = [stamp for stamp in hit_times.get(item['rule_id'], ()) if stamp <= end]
+                    start = max(starts) if starts else None
+                    if start is not None and end >= start:
+                        revocation_hours.append((end - start).total_seconds() / 3600)
+                except (TypeError, ValueError):
+                    continue
+        else:
+            revocation_status = 'unavailable: queue store not provided'
+        if self.queue is not None:
+            revocation_status = 'available'
+
+        def rate(n: int, d: int) -> float | None:
+            return round(n / d, 6) if d else None
+
+        return {
+            'precipitation_confirmation': {
+                'status': 'available' if self.queue is not None else 'unavailable: queue store not provided',
+                'confirmed': precipitation_approved,
+                'total': precipitation_total,
+                'rate': rate(precipitation_approved, precipitation_total),
+            },
+            'application_attribution_confirmation': {'confirmed': confirmed, 'total': len(applications),
+                                                      'rate': rate(confirmed, len(applications))},
+            'modification': {'modified': modified, 'total': len(applications),
+                             'rate': rate(modified, len(applications)),
+                             'status': 'proxy: actual_outcome differs from expected_outcome',
+                             'precipitation_modified': precipitation_modified,
+                             'precipitation_total': precipitation_total,
+                             'precipitation_rate': rate(precipitation_modified, precipitation_total)},
+            'repeat_error': {'status': 'available' if self.queue is not None else
+                             'unavailable: queue store not provided',
+                             'repeated': repeated_errors, 'harmful_feedback_events': harmful_events,
+                             'rate': rate(repeated_errors, harmful_events)},
+            'false_recall': {'status': 'available' if self.queue is not None else
+                             'unavailable: queue store not provided',
+                             'false': false_recall, 'labelled_hits': labelled_hits,
+                             'rate': rate(false_recall, labelled_hits), 'exposures': exposure},
+            'rule_revocation_time': {
+                'status': revocation_status,
+                'samples': len(revocation_hours),
+                'mean_hours': round(sum(revocation_hours) / len(revocation_hours), 6)
+                if revocation_hours else None,
+            },
+        }
 
     def _verdicts(self) -> dict:
         if self.queue is None:

@@ -3,7 +3,7 @@
   "name": "inferred-finalization-wiring",
   "title": "接上 inferred 终结：只看文件的 B+D 推断",
   "description": "advance_inferred 零生产调用者；删外部参数，30+30 静默 + 新活动提前收尾，注册为第二个 scheduled step",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "已提交部分完成；工作区 liveness 改动重加 process_alive/active_tools，推翻 PRD 前提，PRD 需回改",
   "meta": {
     "source": "09-29-memory-improvement-brainstorm",
     "layer": "1"

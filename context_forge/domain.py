@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 def utc_now() -> datetime:
@@ -165,6 +165,9 @@ class SessionLifecycleEvent(BaseModel):
     observed_at: str = Field(min_length=1)
     final_line_count: int | None = Field(default=None, ge=0)
     reason: str = Field(min_length=1)
+    # Missing means unknown, never evidence that the session is idle.
+    process_alive: StrictBool | None = None
+    active_tools: StrictBool | None = None
 
 
 class EpisodeRecord(BaseModel):

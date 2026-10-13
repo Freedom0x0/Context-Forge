@@ -17,7 +17,14 @@ from .rules import RuleMatcher
 def _memory():
     from .config import runtime_dir
     from .memory import MemoryStore
-    return MemoryStore(runtime_dir() / "memory.db", readonly=False)
+    from .config import load_settings
+    settings = load_settings()
+    embedder = None
+    if settings and settings.embedding_model:
+        from .embedding import LocalEmbedder
+        embedder = LocalEmbedder(settings.embedding_model,
+                                 dimensions=settings.embedding_dimensions)
+    return MemoryStore(runtime_dir() / "memory.db", readonly=False, embedder=embedder)
 
 
 def _recall():
@@ -235,10 +242,13 @@ def create_server():
 
     @server.tool()
     def context_forge_record_feedback(rule_id: str, outcome: str,
-                                      note: str = "") -> str:
+                                      note: str = "", request_id: str = "",
+                                      session_id: str = "") -> str:
         if outcome not in {"helpful", "harmful", "irrelevant", "unknown"}:
             raise ValueError("invalid feedback outcome")
-        _store().add_rule_feedback(rule_id, outcome, note or None)
+        _store().add_rule_feedback(rule_id, outcome, note or None,
+                                   session_id=session_id or None,
+                                   request_id=request_id or None)
         return "recorded"
 
     return server

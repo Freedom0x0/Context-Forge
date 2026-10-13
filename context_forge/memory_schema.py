@@ -3,7 +3,8 @@
 # 9 adds pending_confirmations (the high-risk approval ledger): DDL only, no derived data.
 # 10 adds replay_attempts to that ledger: a host re-exchanging a used handle is an anomaly
 # worth counting server-side, because the exception alone would leave no trace of the attempt.
-SCHEMA_VERSION = 10
+# 11 adds optional, rebuildable local embedding cache columns.
+SCHEMA_VERSION = 11
 
 CORE = """
 CREATE TABLE memories (
@@ -25,6 +26,8 @@ CREATE TABLE memory_versions (
  snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)), canonical_fingerprint TEXT NOT NULL,
  created_at TEXT NOT NULL,
  risk TEXT NOT NULL DEFAULT 'normal',
+ embedding_model TEXT NOT NULL DEFAULT '',
+ embedding BLOB,
  PRIMARY KEY(memory_id,version)
 );
 CREATE TABLE memory_sources (
@@ -207,4 +210,9 @@ CREATE TABLE IF NOT EXISTS pending_confirmations (
  approved_at TEXT, approved_from_tty INTEGER, used_at TEXT,
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
+"""
+
+V11 = """
+ALTER TABLE memory_versions ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_versions ADD COLUMN embedding BLOB;
 """

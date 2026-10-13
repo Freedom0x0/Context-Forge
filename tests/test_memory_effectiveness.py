@@ -164,6 +164,82 @@ def test_application_report_counts_known_sequence(tmp_path):
         "referenced": 2, "applied": 1, "validated": 1, "revoked": 1}
 
 
+def test_workflow_metrics_keep_denominators_and_rates(tmp_path):
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    seed(store, "m")
+    store.record_application(application("m", app_id="a1", attribution="confirmed"))
+    store.record_application(application("m", app_id="a2", attribution="plausible",
+                                        actual="different result"))
+    store.record_retrieval("m", 1, request_id="r", stage="presented", idempotency_key="x1")
+    store.record_feedback("m", outcome="harmful", idempotency_key="f1", note="bad")
+    store.record_feedback("m", outcome="harmful", idempotency_key="f2", note="bad again")
+    store.record_feedback("m", outcome="irrelevant", idempotency_key="f3", note="wrong recall")
+    metrics = MemoryEffectiveness(store).workflow_metrics()
+    assert metrics["precipitation_confirmation"]["status"].startswith("unavailable")
+    assert metrics["application_attribution_confirmation"] == {
+        "confirmed": 1, "total": 2, "rate": 0.5}
+    assert metrics["modification"]["modified"] == 2
+    assert metrics["repeat_error"]["status"].startswith("unavailable")
+    assert metrics["false_recall"]["status"].startswith("unavailable")
+    assert metrics["rule_revocation_time"]["samples"] == 0
+
+
+def test_workflow_metrics_use_human_verdicts_and_request_linked_feedback(tmp_path):
+    from context_forge.queue import JobStore
+
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    queue = JobStore(tmp_path / "queue.db")
+    seed(memory, "rule")
+    queue.record_precipitation_verdict("review-1", "session-1",
+                                       decision="approved", modified=True)
+    queue.record_precipitation_verdict("review-2", "session-2",
+                                       decision="rejected", modified=False)
+    queue.record_rule_hit("rule", "demo", "matched", session_id="session-1")
+    queue.add_rule_feedback("rule", "irrelevant", "wrong for this task",
+                            session_id="session-1", request_id="recall-1")
+    queue.record_rule_hit("rule", "demo", "matched", session_id="session-2")
+    queue.add_rule_feedback("rule", "harmful", "caused repeat failure",
+                            session_id="session-2", request_id="recall-2")
+    queue.record_rule_hit("rule", "demo", "matched", session_id="session-3")
+    queue.add_rule_feedback("rule", "harmful", "same failure again",
+                            session_id="session-3", request_id="recall-3")
+
+    metrics = MemoryEffectiveness(memory, queue).workflow_metrics()
+    assert metrics["precipitation_confirmation"] == {
+        "status": "available", "confirmed": 1, "total": 2, "rate": 0.5}
+    assert metrics["modification"]["precipitation_modified"] == 1
+    assert metrics["repeat_error"]["repeated"] == 1
+    assert metrics["repeat_error"]["harmful_feedback_events"] == 2
+    assert metrics["false_recall"]["false"] == 1
+    assert metrics["false_recall"]["labelled_hits"] == 3
+    assert metrics["false_recall"]["rate"] == pytest.approx(1 / 3)
+
+
+def test_rule_revocation_latency_uses_most_recent_prior_hit(tmp_path):
+    from datetime import timedelta
+    from context_forge.queue import JobStore, _now
+
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    queue = JobStore(tmp_path / "queue.db")
+    end = datetime.now(timezone.utc)
+    old_hit = (end - timedelta(days=30)).isoformat()
+    recent_hit = (end - timedelta(minutes=10)).isoformat()
+    revoked_at = end.isoformat()
+    queue.record_rule_hit("rule", "demo", "first", session_id="s1")
+    queue.db.execute("UPDATE rule_hit_events SET occurred_at=? WHERE rule_id='rule'", (old_hit,))
+    queue.record_rule_hit("rule", "demo", "last", session_id="s2")
+    queue.db.execute(
+        "UPDATE rule_hit_events SET occurred_at=? WHERE rule_id='rule' AND session_id='s2'",
+        (recent_hit,),
+    )
+    queue.add_rule_feedback("rule", "revoked", "unsafe", session_id="s2")
+    queue.db.execute("UPDATE rule_feedback SET created_at=? WHERE outcome='revoked'", (revoked_at,))
+
+    metrics = MemoryEffectiveness(memory, queue).workflow_metrics()
+    assert metrics["rule_revocation_time"]["samples"] == 1
+    assert metrics["rule_revocation_time"]["mean_hours"] == pytest.approx(1 / 6, abs=0.01)
+
+
 # P3.t5b -- GUARD: a non-confirmed application changes nothing
 def test_unconfirmed_application_changes_nothing(tmp_path):
     store = MemoryStore.initialize(tmp_path / "memory.db")
@@ -284,8 +360,10 @@ def test_cli_exports_the_three_reports(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload) == {"applications", "anomaly_candidates", "tidy_candidates",
-                            "exposure_vs_adoption", "signals", "buckets", "verdicts"}
+                            "exposure_vs_adoption", "signals", "buckets", "verdicts",
+                            "workflow_metrics", "host_health"}
     assert payload["verdicts"] == {"counts": {}, "total": 0}
+    assert payload["host_health"] == {}
     assert set(payload["signals"]) == {"aggregated_through", "window_months", "totals"}
     assert payload["exposure_vs_adoption"]["adoption"] == 0
 

@@ -28,6 +28,11 @@ class Settings(BaseModel):
     local_api_url: str = "http://localhost:11434"
     local_model: str = "llama3"
 
+    # Local semantic channel defaults to a cached-only model. If the optional
+    # dependency or model files are absent, writes and recall remain lexical-only.
+    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_dimensions: int = 384
+
     @property
     def root(self) -> Path:
         return (self.vault_path / self.knowledge_dir).resolve()

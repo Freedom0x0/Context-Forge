@@ -31,12 +31,14 @@ def _absolute_forge_command() -> str:
     return "python -m context_forge.hooks.claude_code"
 
 
-# Only SessionStart is wired: it prints the status line CC shows
-# above the input box. Precipitation is the watcher's job, so
-# SessionEnd / PreCompact hooks would be dead weight.
+# SessionStart records exact per-session process identity for inferred-end safety
+# and prints the status line. SessionEnd / PreCompact feed the existing lifecycle path.
 HOOK_COMMAND = "python -m context_forge.hooks.claude_code"
-HOOK_EVENTS: tuple[str, ...] = ("SessionEnd", "PreCompact")
-SESSION_START_COMMAND = _absolute_forge_command()
+HOOK_EVENTS: tuple[str, ...] = ("SessionEnd", "PreCompact", "PreToolUse",
+                               "PostToolUse", "PostToolUseFailure",
+                               "UserPromptSubmit", "Stop")
+SESSION_START_EVENT = "SessionStart"
+SESSION_START_COMMAND = HOOK_COMMAND
 
 
 def _settings_path(target: Path | None) -> Path:
@@ -90,7 +92,7 @@ def install(target: Path | None = None) -> dict[str, int]:
 
     for event in HOOK_EVENTS:
         _add_or_update(hooks_root.setdefault(event, []), HOOK_COMMAND)
-    _add_or_update(hooks_root.setdefault("SessionStart", []),
+    _add_or_update(hooks_root.setdefault(SESSION_START_EVENT, []),
                   SESSION_START_COMMAND)
     _save(path, payload)
 
@@ -122,5 +124,5 @@ def status(target: Path | None = None) -> dict[str, object]:
     path = _settings_path(target)
     hooks = _load(path).get("hooks", {})
     installed = {event: bool(_owned_entries(hooks.get(event, [])))
-                 for event in (*HOOK_EVENTS, "SessionStart")}
+                 for event in (*HOOK_EVENTS, SESSION_START_EVENT)}
     return {"path": str(path), "events": installed, "ok": all(installed.values())}

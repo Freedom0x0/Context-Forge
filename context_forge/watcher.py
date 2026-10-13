@@ -17,6 +17,7 @@ hook-driven path behave identically.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -37,6 +38,46 @@ def transcript_root() -> Path:
 # A host adapter is this pair: the root to scan and the name to record. Adding a
 # host must not mean adding another collection pipeline.
 HOST = "claude_code"
+
+
+def liveness_evidence(*, process_alive: bool | None = None,
+                      active_tools: bool | None = None) -> tuple[bool | None, bool | None]:
+    """Normalize host-probe values without treating missing evidence as false.
+
+    The current Claude transcript watcher has no session-scoped process/tool
+    probe. Generic host integrations may supply both values explicitly; until
+    then, the safe default is unknown and inferred finalization remains blocked.
+    """
+    return (
+        process_alive if isinstance(process_alive, bool) else None,
+        active_tools if isinstance(active_tools, bool) else None,
+    )
+
+
+def _session_process_alive(session_id: str, store: JobStore) -> bool | None:
+    """Check the exact process registered by this session's SessionStart hook."""
+    from .hooks.liveness import process_alive_for_session
+    return process_alive_for_session(session_id, store)
+
+
+def probe_session_liveness(transcript: Path, session_id: str, store: JobStore, *,
+                           now: float | None = None,
+                           ttl_seconds: float = 86400.0) -> tuple[bool | None, bool | None]:
+    """Use exact PID identity and fresh hook-maintained tool evidence.
+
+    Transcript shape is deliberately ignored: a quiet file cannot distinguish
+    an idle turn from a tool call that has not yet produced a result.
+    """
+    process_alive = _session_process_alive(session_id, store)
+    state = store.session_liveness(session_id)
+    if state is None:
+        return process_alive, None
+    observed = float(state["observed_at"])
+    current = time.time() if now is None else now
+    if current - observed > ttl_seconds:
+        return process_alive, None
+    tools = state["active_tools"]
+    return process_alive, bool(tools) if isinstance(tools, bool) else None
 
 
 def baseline_path() -> Path:
@@ -104,7 +145,9 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
               max_attempts: int = 3,
               baseline: float | None = None,
               now: float | None = None,
-              memory_store=None) -> int:
+              memory_store=None,
+              process_alive: bool | None = None,
+              active_tools: bool | None = None) -> int:
     """Process every transcript that has settled with new content.
 
     Transcripts last touched before `baseline` are ignored, so a fresh
@@ -118,10 +161,12 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
     floor = ensure_baseline() if baseline is None else baseline
     processed = 0
     new_activity = False
+    session_liveness: dict[str, tuple[bool | None, bool | None]] = {}
     for transcript in sorted(root.glob("*/*.jsonl")):
         try:
             mtime = transcript.stat().st_mtime
         except OSError:
+            store.record_scan_failure(HOST, 'unreadable')
             continue
         if mtime < floor:
             continue  # predates the watcher; never replay history
@@ -129,24 +174,168 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
             continue  # still being written, or user is mid-session
         total = count_complete_lines(transcript)
         session_id = transcript.stem
+        process, tools = probe_session_liveness(transcript, session_id, store,
+                                                now=current)
+        session_liveness[session_id] = (process, tools)
         episode = store.latest_episode(session_id)
-        if episode is None:
-            new_activity = True
         collected = episode.collected_through_line if episode else 0
         if total <= collected:
+            if total == 0:
+                # No complete line ever: a host that changed its transcript
+                # format looks exactly like this, and like "user stopped".
+                store.record_scan_failure(HOST, 'empty')
             continue
         meta = read_session_meta(transcript)
         if meta is None:
+            store.record_scan_failure(HOST, 'no-meta')
             continue
         _, project = meta
         from .episodes import EpisodeCollector
         EpisodeCollector(store).collect(session_id, transcript, project, HOST)
+        new_activity = True
         processed += 1
+    # Probe active episodes even when their transcript has no new lines.  This
+    # is what lets a quiet, exited Claude process eventually be inferred closed.
+    known = {tx.stem for tx in root.glob("*/*.jsonl")}
+    for episode in store.active_episodes():
+        if episode.session_id in known:
+            tx = Path(episode.transcript_path)
+            if tx.is_file():
+                process, tools = probe_session_liveness(
+                    tx, episode.session_id, store, now=current)
+                session_liveness[episode.session_id] = (process, tools)
     # Sessions nobody reported the end of only close here; every pass is cheap
     # because the timestamp gate runs before any file is read.
     from .episodes import EpisodeCollector
-    EpisodeCollector(store).advance_inferred(new_activity=new_activity)
+    alive, tools_active = liveness_evidence(
+        process_alive=process_alive, active_tools=active_tools)
+    EpisodeCollector(store).advance_inferred(
+        new_activity=new_activity, process_alive=alive, active_tools=tools_active,
+        liveness_by_session=session_liveness)
     return processed
+
+
+class WatcherAlreadyRunning(RuntimeError):
+    """Another process already holds the watcher lock for this runtime dir."""
+
+    def __init__(self, pid: int | None) -> None:
+        self.pid = pid
+        super().__init__(f"已有实例在运行（pid={pid if pid is not None else '未知'}）")
+
+
+def lock_path() -> Path:
+    from .config import runtime_dir
+    return runtime_dir() / "watcher.lock"
+
+
+def _read_pid(path: Path) -> int | None:
+    # Byte 0 is the locked region; on Windows a read there is denied, so the
+    # writer puts the pid from offset 1 and we read from there too.
+    try:
+        handle = os.fdopen(os.open(path, os.O_RDWR), "r+b", buffering=0)
+    except OSError:
+        return None
+    try:
+        handle.seek(1)
+        return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+    finally:
+        handle.close()
+
+
+def _lock_byte(handle) -> None:
+    """msvcrt.locking locks a byte range, so byte 0 must exist."""
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+
+
+def _write_pid(handle) -> None:
+    handle.seek(1)
+    handle.write(str(os.getpid()).ljust(20).encode("utf-8"))
+
+
+def _try_lock(handle) -> None:
+    """Take an exclusive lock on byte 0; raise OSError if already held."""
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class WatcherLock:
+    """Exclusive, per-runtime-dir lock held for the process's lifetime.
+
+    The lock is a real file handle, not a pid file: the OS releases it when
+    the process dies, so crashes leave no stale lock to guess about.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path or lock_path()
+        self._handle = None
+
+    def acquire(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.fdopen(
+            os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600), "r+b", buffering=0)
+        try:
+            _lock_byte(handle)
+            _try_lock(handle)
+        except OSError as exc:  # held by another process
+            holder = _read_pid(self._path)
+            handle.close()
+            raise WatcherAlreadyRunning(holder) from exc
+        _write_pid(handle)
+        self._handle = handle
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            _unlock(handle)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+
+
+def lock_holder_pid() -> int | None:
+    """Pid currently holding the lock, or None when nobody holds it.
+
+    A leftover lock file with no live holder reads as None — the file is not
+    the lock, the open handle is. Probes by trying to take the lock itself.
+    """
+    path = lock_path()
+    if not path.exists():
+        return None
+    try:
+        handle = os.fdopen(os.open(path, os.O_RDWR), "r+b", buffering=0)
+    except OSError:
+        return None
+    try:
+        try:
+            _try_lock(handle)
+        except OSError:
+            return _read_pid(path)  # someone else holds it
+        _unlock(handle)             # free: hand it straight back
+        return None
+    finally:
+        handle.close()
 
 
 def heartbeat_path() -> Path:
@@ -185,8 +374,20 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
         settle_seconds: float = DEFAULT_SETTLE,
         max_attempts: int | None = None,
         memory_store=None) -> None:
-    """Poll forever. Ctrl+C / SIGTERM exits cleanly."""
+    """Poll forever. Ctrl+C / SIGTERM exits cleanly.
+
+    One resident instance per runtime dir: a second launch fails loudly with
+    the holder's pid and a non-zero exit instead of running in parallel. Both
+    `forge watch-transcripts` and the VBS launcher reach this same acquire.
+    """
     import signal
+
+    lock = WatcherLock()
+    try:
+        lock.acquire()
+    except WatcherAlreadyRunning as exc:
+        print(f"[watcher] {exc}")
+        raise SystemExit(1)
 
     def _sigterm(signum, frame):  # noqa: ARG001
         raise KeyboardInterrupt
@@ -204,29 +405,32 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
     print(f"[watcher] watching {transcript_root()} "
           f"(every {interval_seconds:g}s, settle {settle_seconds:g}s)")
     try:
-        while True:
-            _beat()
-            processed = 0
-            try:
-                processed = scan_once(store, vault, gateway,
-                                      settle_seconds=settle_seconds,
-                                      max_attempts=max_attempts,
-                                      memory_store=memory_store)
-                if memory_store is not None:
-                    from .memory_projection import MemoryProjector
-                    from .worker import process_pending_finalizations
-                    process_pending_finalizations(
-                        store, gateway or NoOpGateway(), memory_store,
-                        MemoryProjector(memory_store, vault.root),
-                    )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
-            try:
-                from . import scheduled
-                for name in scheduled.run_due(store, memory_store=memory_store):
-                    print(f"[scheduled] {name} ran")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[scheduled] ledger error: {type(exc).__name__}: {exc}")
-            time.sleep(interval_seconds)
-    except KeyboardInterrupt:
-        print("[watcher] interrupted; exiting")
+        try:
+            while True:
+                _beat()
+                processed = 0
+                try:
+                    processed = scan_once(store, vault, gateway,
+                                          settle_seconds=settle_seconds,
+                                          max_attempts=max_attempts,
+                                          memory_store=memory_store)
+                    if memory_store is not None:
+                        from .memory_projection import MemoryProjector
+                        from .worker import process_pending_finalizations
+                        process_pending_finalizations(
+                            store, gateway or NoOpGateway(), memory_store,
+                            MemoryProjector(memory_store, vault.root),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+                try:
+                    from . import scheduled
+                    for name in scheduled.run_due(store, memory_store=memory_store):
+                        print(f"[scheduled] {name} ran")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[scheduled] ledger error: {type(exc).__name__}: {exc}")
+                time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print("[watcher] interrupted; exiting")
+    finally:
+        lock.release()
