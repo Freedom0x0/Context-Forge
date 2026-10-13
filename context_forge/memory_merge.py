@@ -335,7 +335,8 @@ class MemoryMerge:
             for relation in self.store.relations(duplicate.id)
         ):
             return duplicate
-        if duplicate.draft.user_owned or duplicate.draft.suppressed or duplicate.draft.status == 'disabled':
+        if (duplicate.draft.user_owned or duplicate.draft.suppressed
+                or duplicate.draft.status in {'disabled', 'conflicted'}):
             return duplicate
         retained = self._outgoing_relations(duplicate)
         retained.append(Relation(target_id=canonical.id, target_version=canonical.version, kind='duplicate_of'))

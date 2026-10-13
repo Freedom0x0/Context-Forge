@@ -1493,6 +1493,11 @@ class MemoryStore:
             raise ValueError('memory kind cannot change')
         if previous and actor != 'human' and (previous.draft.suppressed or previous.draft.user_owned or previous.draft.status == 'disabled'):
             raise ProtectedMemory('human-owned or suppressed memory requires a human correction')
+        # `conflicted` is absorbing: a write that leaves it is a human-only act. A write that
+        # keeps the status (e.g. `support` appending evidence) still passes, so the model may
+        # enrich a disputed memory but never settle it.
+        if previous and actor != 'human' and previous.draft.status == 'conflicted' and draft.status != 'conflicted':
+            raise ProtectedMemory('a human conflict may only be cleared by a human')
         if previous and actor != 'human' and access_broader(previous.draft, draft):
             raise ProtectedMemory('automatic writes may not widen access')
         version = expected_version + 1

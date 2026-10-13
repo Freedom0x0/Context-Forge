@@ -106,6 +106,21 @@ for ep in episodes:
 
 **Generalisation**: any fold over a tri-state (or any lattice with a "don't know" element) must ask *"is the pessimistic state absorbing?"* Min/max folds are naturally absorbing; a "last write wins unless equal" fold is not.
 
+## `conflicted` is an absorbing state for non-human writes
+
+**Rule**: a non-`human` write may **enrich** a `conflicted` record but may **not move it out of** `conflicted`. `MemoryStore._put` raises `ProtectedMemory` when `actor != 'human'` and a `conflicted` record's status would change to anything else. The condition is "moves *out*", not "touches a conflicted row" — `support()` appending evidence (status preserved) must still pass, and the `harmful` feedback write that *creates* the conflict (`memory.py`, `record_feedback` → actor `system`, status → `conflicted`) must still pass.
+
+**Why**: the protection set was `suppressed / user_owned / disabled`. A human `harmful` verdict sets `conflicted` (pending review); `MemoryLifecycle.publish` then wrote `status="active"` unconditionally, so the next model-authored proposal silently erased the human's dissent — the worker path (`worker.py` → `publish_session`) is unattended. Human dissent has to be absorbing against machine rewrites; only `suppress` used to be.
+
+**One choke point, not per-path patches**: `_put` is the single storage entry every write routes through (public `put`, `record_feedback`, import, and thus merge/finalization/publish). Guarding there covers `publish` and `finalization` (both `actor='model'`) at once, instead of leaving the second entry open.
+
+**Every unattended pass must SKIP, never raise** — an exception escaping a batch pass causes retry loops:
+- `MemoryMerge.apply_exact` returns a `conflicted` exact-duplicate unchanged (same skip set as `user_owned/suppressed/disabled`).
+- `MemoryLifecycle.publish` returns the current record when the model re-publishes over a conflict — it does **not** raise, because `worker.py` calls `publish_session` *before* `set_lines_processed` (a raise would skip the offset advance → the same slice retries) and the batch is a generator (a raise aborts every later candidate). `suppressed/disabled/user_owned` keep raising.
+- `Finalization` skips a `conflicted` target and marks the frozen operation **committed** with a skip note, so a re-run is terminal.
+
+**Tests required**: model put clearing a conflict raises and leaves status+version unchanged; a status-preserving model write passes; a human write clears it; `publish` skips without aborting the batch; `apply_exact` leaves the duplicate alone; finalization's skipped operation does not retry. Mutation: drop the `_put` condition → AC1 RED; drop `conflicted` from `apply_exact`'s set → `ProtectedMemory` escapes.
+
 ## Mutation records must be reproducible
 
 A guard's mutation note is part of the evidence. Record a mutation that **cannot actually go red** and the note becomes worse than nothing — later readers will assume the guard was verified.

@@ -57,6 +57,18 @@ class FinalizationService:
                 raise ValueError("frozen operation hash mismatch")
             draft = MemoryDraft.model_validate(payload["draft"])
             if operation["status"] != "committed":
+                existing = self.memory.get(operation["memory_id"])
+                if existing is not None and existing.draft.status == "conflicted":
+                    # A human conflict is absorbing: the frozen pass must not settle it, and an
+                    # operation left pending would be re-planned forever. Skip and mark it
+                    # committed, with a note, so a re-run does not stall on the same operation.
+                    self.queue.complete_finalization_operation(
+                        operation["operation_key"],
+                        {"memory_id": operation["memory_id"],
+                         "skipped": "conflicted memory awaits human review"},
+                    )
+                    results.append(operation["memory_id"])
+                    continue
                 record = self.memory.put(
                     operation["memory_id"], draft,
                     expected_version=payload["expected_version"],

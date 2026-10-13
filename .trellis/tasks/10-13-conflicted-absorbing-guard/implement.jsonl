@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/memory-store.md", "reason": "存储层的非人写入保护集与「conflict 是吸收态」的既有纪律"}
+{"file": ".trellis/spec/backend/memory-lifecycle.md", "reason": "publish/revise/restore 生命周期契约与 actor 语义"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "ProtectedMemory 拒绝语义，以及批处理跳过而非抛的重试边界"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "每个守卫必须变异验证、闸门必须读它名字所指之事"}

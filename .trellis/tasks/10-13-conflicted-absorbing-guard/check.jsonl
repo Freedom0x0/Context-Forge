@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/memory-store.md", "reason": "核对吸收态不变量是否落在存储层且未破坏既有保护集"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对新守卫已变异验证、跳过路径不会造成重试循环"}

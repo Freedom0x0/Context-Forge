@@ -278,7 +278,12 @@ class MemoryLifecycle:
         if current and actor == "model":
             if current.draft.suppressed or current.draft.user_owned or current.draft.status == "disabled":
                 raise ProtectedMemory(candidate.memory_id)
-            elif current.draft.body == candidate.draft.body and current.draft.kind == candidate.draft.kind:
+            if current.draft.status == "conflicted":
+                # Skip, never raise: this runs in the worker's `publish_session` before
+                # `set_lines_processed`, and the batch is a generator — an exception would loop
+                # the same slice and abort every later candidate. The conflict stays until a human.
+                return current
+            if current.draft.body == candidate.draft.body and current.draft.kind == candidate.draft.kind:
                 return current
         draft = candidate.draft.model_copy(update={"status": "active"}) if actor == "model" else candidate.draft
         return self.store.put(candidate.memory_id, draft,
