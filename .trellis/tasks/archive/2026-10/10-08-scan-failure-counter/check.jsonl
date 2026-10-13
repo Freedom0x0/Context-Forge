@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "校验重点：类别是否稳定、是否把异常原文当了维度导致桶碎"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "校验重点：doctor 那条是否真能失败，而不是恒绿的展示行"}

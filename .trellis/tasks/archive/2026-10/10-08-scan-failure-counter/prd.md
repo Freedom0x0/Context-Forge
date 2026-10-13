@@ -25,10 +25,18 @@
 
 ## Acceptance Criteria
 
-- [ ] 制造一份无 meta 的 transcript → 跑一轮 → 计数 +1，且该文件仍不被沉淀
-- [ ] 计数按 host 与类别分桶，跨轮累积、可被报表读取
-- [ ] `doctor` 在"有失败计数"时能点名 host 与类别（可失败，不是只读展示）
-- [ ] 全量测试绿
+- [x] 制造一份无 meta 的 transcript → 跑一轮 → 计数 +1，且该文件仍不被沉淀
+- [x] 计数按 host 与类别分桶，跨轮累积、可被报表读取
+- [x] `doctor` 在"有失败计数"时能点名 host 与类别（可失败，不是只读展示）
+- [x] 全量测试绿
+
+证据：`tests/test_scan_failure_counter.py` 7 条（复核补了此前未覆盖的 `unreadable` 分支）。
+全量 `pytest -q` **431 passed**。
+
+**口径记录**：需求 3 写的是"**近期**失败次数"，落地是**累计、永不归零**——依据是验收
+"跨轮累积"与"有失败计数即可失败"两条；表只存 `(count, last_at)`，做时间窗需要改成逐事件行。
+该语义已就近写在 `queue.scan_failures()` 的 docstring 与 spec 的
+`A cumulative counter is a sticky gate` 一节。真要滚动窗口，单开小项。
 
 ## Out of Scope
 

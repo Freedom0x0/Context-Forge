@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "queue.db 派生库的表形状与迁移约定；失败计数与 scheduled_runs 同层"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "采集不得改变跳过语义、报表不得只做只读展示；doctor 项必须可失败"}
+{"file": ".trellis/spec/backend/host-integration.md", "reason": "按 host 归类的既有约定；失败计数是 8a.3 沉默报警的另一半"}
