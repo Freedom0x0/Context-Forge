@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -203,3 +203,74 @@ def test_the_hygiene_step_tolerates_being_called_without_a_library(tmp_path: Pat
     store = JobStore(tmp_path / 'queue.db')
 
     scheduled.STEPS['hygiene'](scheduled.Context(store, None))      # must not raise
+
+
+def _edges(memory, kind: str) -> set[int]:
+    """Relation ids of one kind between the pair. `relations()` yields both directions,
+    so dedupe by id or every edge is counted twice."""
+    return {item['id'] for mid in ('keep', 'twin')
+            for item in memory.relations(mid) if item['kind'] == kind}
+
+
+def test_the_hygiene_key_derives_from_the_pair_not_the_calendar(tmp_path: Path, monkeypatch):
+    """AC #4: the idempotency key must come from the candidate's identity, never a date or
+    run number -- a calendar stamp would re-archive the same pair on every pass."""
+    from context_forge.memory_merge import MemoryMerge
+
+    store = JobStore(tmp_path / 'queue.db')
+    memory = _duplicate_pair(tmp_path)
+    twin_version = memory.get('twin').version
+
+    seen: list[str] = []
+    original = MemoryMerge.apply_exact
+
+    def spy(self, candidate, *, idempotency_key):
+        seen.append(idempotency_key)
+        return original(self, candidate, idempotency_key=idempotency_key)
+
+    monkeypatch.setattr(MemoryMerge, 'apply_exact', spy)
+    scheduled.STEPS['hygiene'](scheduled.Context(store, memory))
+
+    assert seen == [f'hygiene:exact:keep:twin@{twin_version}']
+    assert date.today().strftime('%Y-%m-%d') not in seen[0]
+    assert date.today().strftime('%Y-%m') not in seen[0]
+
+
+def test_re_running_the_hygiene_step_does_not_duplicate_data(tmp_path: Path):
+    """AC #4: bypass `run_due`'s throttle and run the step twice in a row -- it must be a no-op."""
+    store = JobStore(tmp_path / 'queue.db')
+    memory = _duplicate_pair(tmp_path)
+    ctx = scheduled.Context(store, memory)
+
+    scheduled.STEPS['hygiene'](ctx)
+    assert memory.get('twin').draft.status == 'archived'
+    twin_version = memory.get('twin').version
+    assert len(_edges(memory, 'duplicate_of')) == 1
+
+    scheduled.STEPS['hygiene'](ctx)
+    assert memory.get('twin').draft.status == 'archived'       # still canonicalized
+    assert memory.get('twin').version == twin_version          # no second write
+    assert len(_edges(memory, 'duplicate_of')) == 1            # no extra relation
+
+
+def test_re_running_the_hygiene_conflict_tier_keeps_a_single_note(tmp_path: Path):
+    from context_forge.memory import MemoryStore
+    from context_forge.memory_models import Applicability, MemoryDraft, Provenance, Source
+
+    body = 'the cache key must include the tenant id'
+    memory = MemoryStore.initialize(tmp_path / 'memory.db')
+    for memory_id, result in (('keep', 'true'), ('twin', 'false')):
+        memory.put(memory_id, MemoryDraft(
+            body=body, status='active',
+            applicability=(Applicability(condition='shared cache', result=result),),
+            provenance=Provenance(projects=('demo',)),
+            sources=(Source(identity=f'source:{memory_id}', kind='observation', excerpt=body),),
+        ), expected_version=0, idempotency_key=f'put:{memory_id}', reason='test')
+
+    ctx = scheduled.Context(JobStore(tmp_path / 'queue.db'), memory)
+
+    scheduled.STEPS['hygiene'](ctx)
+    assert len(_edges(memory, 'conflicts_with')) == 1
+
+    scheduled.STEPS['hygiene'](ctx)
+    assert len(_edges(memory, 'conflicts_with')) == 1

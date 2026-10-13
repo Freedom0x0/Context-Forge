@@ -48,7 +48,11 @@
 - [ ] `scheduled_runs` 随库自动创建；老库打开即存在，无需手动迁移
 - [ ] 到期时 retention 自动执行一次，未到期不执行；`last_success_at` 正确更新
 - [ ] 人为让某 step 抛错 → 其它 step 照常执行；失败信息进 `last_error`，doctor 能报出来
-- [ ] 同一 step 连续跑两次不产生重复数据（幂等键派生规则的测试通过）
+- [x] 同一 step 连续跑两次不产生重复数据（幂等键派生规则的测试通过）
+      —— 2026-10-13 补齐：`tests/test_scheduled.py::test_the_hygiene_key_derives_from_the_pair_not_the_calendar`
+      （键 = `hygiene:exact:keep:twin@<version>`，断言不含当日 `%Y-%m-%d`／`%Y-%m`，变异 RED）、
+      `::test_re_running_the_hygiene_step_does_not_duplicate_data`（直调 step 两次，绕过周期节流）、
+      `::test_re_running_the_hygiene_conflict_tier_keeps_a_single_note`。原偏差#2 作废。
 - [ ] 不新建进程、不新增依赖、不新增用户配置项
 - [ ] 全量测试通过
 
@@ -87,6 +91,8 @@
 2. **幂等键派生纪律暂时没有对应测试**：今天唯一上线的 step 是 retention，它不写候选、不产生幂等键。
    该约束先写成 `scheduled.py` 的模块文档（key 必须由候选身份派生，绝不含日期/轮次），
    等 G1/G2 接线（第 5 层）时补成断言测试。
+   —— **2026-10-13 已消除**：第 5 层的 `hygiene` step 已上线并派生 `hygiene:exact:{a}:{b}@{v}`，
+   断言测试已补（见 Acceptance Criteria 第 4 条）。
 
 **首批只挂一步**：`retention`（原 `forge retention --apply`，`cli.py:385`，默认 30 天）。
 `inferred_advance` 留给 8c 任务自行注册（PRD 的 Requirements 4 已写明）。
