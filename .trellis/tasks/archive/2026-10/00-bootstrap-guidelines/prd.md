@@ -21,9 +21,10 @@ the rest conversationally.
 
 ## Status (update the checkboxes as you complete each item)
 
-- [ ] Fill backend guidelines
-- [ ] Fill frontend guidelines
-- [ ] Add code examples
+- [x] Fill backend guidelines
+- [x] Fill frontend guidelines — **N/A：本项目为 Python CLI / MCP，无前端**（无 package.json / tsconfig / src）。
+      `.trellis/spec/frontend/*` 保留 Trellis 模板占位，无任务引用，不影响子代理。
+- [x] Add code examples
 
 ---
 
