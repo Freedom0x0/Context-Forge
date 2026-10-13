@@ -87,11 +87,13 @@ class EpisodeCollector:
                          liveness_by_session: Mapping[str, tuple[bool | None, bool | None]] | None = None,
                          pending_after: timedelta = PENDING_AFTER,
                          grace: timedelta = GRACE) -> list[FinalizationReceipt]:
-        """Close an unreported episode only with explicit liveness evidence.
+        """Close an unreported episode on file evidence, suppressed by positive liveness.
 
-        Unknown process/tool state is deliberately treated as active. A quiet
-        transcript is not proof that the host exited, and finalization must not
-        split a live session or freeze an in-flight tool result.
+        Judgement is file-evidence first: silence, `new_activity`, and the
+        trailing `tool_use` check decide. A *positive* liveness signal (process
+        confirmed alive, or a tool outstanding) suppresses the close. Unknown
+        liveness is not evidence of anything and falls through to the file
+        checks — finalization must not depend on host-hook cooperation.
 
         `new_activity` means a transcript appeared this pass: the user is clearly
         around, so anything already suspected can be closed without the grace wait.
@@ -107,7 +109,7 @@ class EpisodeCollector:
             last = datetime.fromisoformat(episode.last_activity_at)
             silence = now - last
             suspected = episode.state == "inferred_pending"
-            if session_process is not False or session_tools is not False:
+            if session_process is True or session_tools is True:
                 continue
             if not suspected and silence < pending_after:
                 continue

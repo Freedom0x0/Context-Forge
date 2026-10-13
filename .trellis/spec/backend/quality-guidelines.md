@@ -388,6 +388,23 @@ has no such behaviour, so the offset-1 scheme must be used unconditionally or th
 semantics on the accessor, and note that a *windowed* count needs per-event rows — not a reset knob.
 Same family as the `DEFAULT + delta` rule above: the trap is in what the number means, not in the code.
 
+### Liveness is a *suppressor*, never a precondition (inferred finalization)
+
+`EpisodeCollector.advance_inferred` decides on **file evidence first** — 30/30-second silence, a
+`new_activity` transcript, and the trailing-`tool_use` check. A host-reported liveness signal
+(process confirmed alive, or a tool outstanding) only *suppresses* a close; it never licenses one.
+
+The shipped bug was the inverse gate `if session_process is not False or session_tools is not False:
+continue`. When the host registered nothing the probe returns `None`, `None is not False` is true,
+and the file-evidence branch below is **structurally unreachable** — episodes stay `open` forever
+(the bug 8c exists to fix) and finalization is silently pinned on host-hook cooperation, which is
+the probabilistic trigger the red line forbids. The fix is `if session_process is True or
+session_tools is True: continue`.
+
+Rule: an *unknown* fact is not a *negative* fact. If a gate consumes an optional signal that is
+`None` when absent, ask whether absence **blocks** the gate or **falls through** it — and make the
+test pin the absent case, not just the present one.
+
 ---
 
 ## Code Review Checklist
@@ -408,4 +425,5 @@ Same family as the `DEFAULT + delta` rule above: the trap is in what the number 
 - [ ] Any liveness/watcher check: does it read the **lock holder**, not the last-written heartbeat?
 - [ ] Any new lock/mutex path: scoped under `runtime_dir()` (per-library), acquired before any write?
 - [ ] Any cumulative counter that feeds a gate: are its never-reset semantics stated on the accessor?
+- [ ] Any gate consuming an optional signal: does **absence** fall through (not block), and is the absent case pinned by a test?
 - [ ] Comment density matches the surrounding code; no comments explaining deleted code?

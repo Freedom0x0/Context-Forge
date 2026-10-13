@@ -380,7 +380,8 @@ def test_missing_transcript_is_skipped_instead_of_finalizing(tmp_path: Path):
                                       active_tools=False) == []
 
 
-def test_inferred_end_requires_explicit_liveness_evidence(tmp_path: Path):
+def test_inferred_end_falls_back_to_file_evidence_when_liveness_is_unknown(tmp_path: Path):
+    """No host liveness registered (None) must not block inferred finalization."""
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"message":"one"}\n', encoding="utf-8")
     store = JobStore(tmp_path / "queue.db")
@@ -389,13 +390,18 @@ def test_inferred_end_requires_explicit_liveness_evidence(tmp_path: Path):
     old = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.save_episode(episode.model_copy(update={"last_activity_at": old.isoformat()}))
 
-    assert collector.advance_inferred(old + timedelta(hours=2)) == []
-    assert store.latest_episode("s-live").state == "open"
-    assert collector.advance_inferred(old + timedelta(hours=2), process_alive=True,
-                                      active_tools=False) == []
-    assert collector.advance_inferred(old + timedelta(hours=2), process_alive=False,
-                                      active_tools=False) == []
+    # No liveness arguments at all -> probe unknown -> file evidence decides.
+    assert collector.advance_inferred(old + timedelta(minutes=30)) == []
     assert store.latest_episode("s-live").state == "inferred_pending"
+
+    receipts = collector.advance_inferred(old + timedelta(minutes=60))
+    assert len(receipts) == 1 and receipts[0].end_kind == "inferred"
+
+    # A positively-live process still suppresses the close.
+    other = collector.collect("s-alive", transcript, "demo", "claude_code")
+    store.save_episode(other.model_copy(update={"last_activity_at": old.isoformat()}))
+    assert collector.advance_inferred(old + timedelta(hours=2), process_alive=True) == []
+    assert store.latest_episode("s-alive").state == "open"
 
 
 def test_append_cancels_inferred_pending(tmp_path: Path):
