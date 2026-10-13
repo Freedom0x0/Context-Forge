@@ -3,7 +3,7 @@
   "name": "host-dimension",
   "title": "host 维度打通：EpisodeRecord 与 session_episodes 加列",
   "description": "把写死的 claude_code 透传为可统计维度；问题1分桶与8a沉默报警的前置",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "gsr",
   "assignee": "gsr",
   "createdAt": "2026-09-29",
-  "completedAt": null,
+  "completedAt": "2026-10-13",
   "branch": null,
   "base_branch": "master",
   "worktree_path": null,
@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "AC 文字偏差：host 计数由 forge status 输出，非 memory-report（PRD 实现记录已认）",
   "meta": {
     "source": "09-29-memory-improvement-brainstorm",
     "layer": "0"

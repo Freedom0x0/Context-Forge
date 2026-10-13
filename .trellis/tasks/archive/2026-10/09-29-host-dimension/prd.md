@@ -27,11 +27,14 @@
 
 ## Acceptance Criteria
 
-- [ ] 老库打开即自动加列；既有 episode 落 `'claude_code'`，无需回填脚本
-- [ ] 新采集的 episode 记录 host；`collect(session_id, path, project, host=...)` 有测试覆盖
+- [x] 老库打开即自动加列；既有 episode 落 `'claude_code'`，无需回填脚本
+- [x] 新采集的 episode 记录 host；`collect(session_id, path, project, host=...)` 有测试覆盖
 - [ ] `forge memory-report` 输出含 host 维度计数
-- [ ] 接入第二家宿主时**只需在建事件/采集时传 host**，不改管道逻辑（用一个假 host 值的测试证明）
-- [ ] 全量测试通过，无新增依赖
+      —— **未按字面达成**：计数落在 `forge status`（`status.py` 的 `episodes_by_host`），
+      `memory_effectiveness.py` 内无 host 代码。意图（host 成为可统计维度）达成，落地面不同。
+      2026-10-13 状态归一审核记录。
+- [x] 接入第二家宿主时**只需在建事件/采集时传 host**，不改管道逻辑（用一个假 host 值的测试证明）
+- [x] 全量测试通过，无新增依赖
 
 ## Out of Scope
 
