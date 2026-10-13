@@ -46,18 +46,23 @@
 
 ## Acceptance Criteria
 
-- [ ] 含词表词的候选 → `risk=high`；不含 → `normal`/`low`；词表每类都有单测用例
+- [x] 含词表词的候选 → `risk=high`；不含 → `normal`/`low`；词表每类都有单测用例
+      —— 口径已改：枚举去掉 `low`，只余 `normal`/`high`（见下方实现记录 2026-09-29）
 - [ ] 分类器是无状态纯函数，同一输入两次调用结果一致（不依赖时间/随机）
-- [ ] `risk=high` 且 `status=candidate` 的记忆，`forge search` 与 MCP `memory_search` 都查不到；
+      —— **无专项测试**；`risk.classify_risk` 由构造（纯函数、不读时间/随机）保证，未落断言。2026-10-13 审核记录。
+- [x] `risk=high` 且 `status=candidate` 的记忆，`forge search` 与 MCP `memory_search` 都查不到；
       转为 `active` 后查得到
-- [ ] 迁移走**显式** `MemoryStore.migrate()`：`dry_run=True` 默认能报出将要加的列；实跑先落在线备份；
+- [x] 迁移走**显式** `MemoryStore.migrate()`：`dry_run=True` 默认能报出将要加的列；实跑先落在线备份；
       跑完后 `memory_versions.risk` 存在，且回填值 = 对每个版本 `snapshot_json` 运行分类器的结果
       （与 `canonical_fingerprint` 的回填同构，`memory.py:613-615`）
-- [ ] 打开旧 `user_version` 的普通连接仍然 **raise、不隐式迁移**（规范红线，必须有这条测试）
+- [x] 打开旧 `user_version` 的普通连接仍然 **raise、不隐式迁移**（规范红线，必须有这条测试）
+      —— `tests/test_risk.py:94`
 - [ ] `rebuild_weights()` 等运营缓存路径不受影响
+      —— **无专项测试**；`rebuild_weights` 未读 `risk`，未落回归断言。2026-10-13 审核记录。
 - [ ] 模型自报与分类器冲突时以分类器为准，且写入一条可被报表统计的事件
-- [ ] prompt 哈希测试存在，并能在"改 prompt 未 bump 版本"时失败（用临时改动验证一次）
-- [ ] 全量测试通过，无新增依赖
+      —— 口径已改：非法自报由 field_validator 降级为 `normal`，不写事件（见下方实现记录 2026-09-29）
+- [x] prompt 哈希测试存在，并能在"改 prompt 未 bump 版本"时失败（用临时改动验证一次）
+- [x] 全量测试通过，无新增依赖
 
 ## Out of Scope（明确不做）
 

@@ -3,7 +3,7 @@
   "name": "risk-field-classifier",
   "title": "risk 字段落地：枚举化 + 确定性分类器 + 可过滤列",
   "description": "让 risk=high 成为 SQL 可过滤、由确定性分类器赋值的真实属性；问题4/9/F4 的公共前置",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "gsr",
   "assignee": "gsr",
   "createdAt": "2026-09-29",
-  "completedAt": null,
+  "completedAt": "2026-10-13",
   "branch": null,
   "base_branch": "master",
   "worktree_path": null,
@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "既定偏差：枚举只 normal/high；high 走 candidate+确认通道由 F4 落地",
   "meta": {
     "source": "09-29-memory-improvement-brainstorm",
     "layer": "0"
