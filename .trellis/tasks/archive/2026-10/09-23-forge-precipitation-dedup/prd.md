@@ -132,23 +132,45 @@ unified-self-permission-refresh   unify-auth-refresh-signal-across-predicates   
 
 ## Acceptance Criteria
 
-- [ ] 含 30 次静默的两小时模拟会话，在结束事件前长期记忆新增数为 0；静默只推进 Episode 采集水位
-- [ ] `PreCompact` 只生成幂等 checkpoint；`SessionEnd` / 人工 finalize 各只生成一个 finalization receipt
-- [ ] 同一结束事件并发或崩溃重试时，模型至多成功提炼一次，DB 无重复实体/版本，Markdown 可独立重试
-- [ ] 完全相同正文与完整边界追加来源；仅措辞相似、access 或 applicability 不同的条目不被误复用（变异 RED）
-- [ ] 机制、程序、反例按“能否独立召回/验证/修正”决定是否拆分，不固定生成 knowledge + rule
-- [ ] 同属 antd 等主题但无语义依赖的记忆不自动连边；有效 refinement/exception 可追溯且版本固定
-- [ ] 存量 31 条进入卫生报告；只有确定性精确重复可自动可逆归档，其余仅临时分族且可展开
-- [ ] 召回先做防御性分族再应用最终 top-K/byte budget；曝光与共同召回不提高可信度
+- [x] 含 30 次静默的两小时模拟会话，在结束事件前长期记忆新增数为 0；静默只推进 Episode 采集水位
+      —— 2026-10-13 补：`tests/test_precipitation_simulation.py::test_two_hour_thirty_silence_session_writes_nothing_until_it_ends`
+      （驱动真 `watcher.scan_once` 30 轮，注入时钟/mtime；变异：去掉静默闸门 → 第 1 轮即出现 receipt → RED）
+- [x] `PreCompact` 只生成幂等 checkpoint；`SessionEnd` / 人工 finalize 各只生成一个 finalization receipt
+      —— `tests/test_episodes.py::{test_precompact_creates_checkpoint_without_long_term_write, test_manual_finalize_is_idempotent_and_marks_episode, test_repeated_hook_session_end_reuses_first_observed_at}`
+- [x] 同一结束事件并发或崩溃重试时，模型至多成功提炼一次，DB 无重复实体/版本，Markdown 可独立重试
+      —— `tests/test_finalization.py::{test_finalization_freezes_model_output_and_recovers_without_second_call, test_two_workers_only_one_claims_model_extraction}`；`tests/test_memory_projection.py::test_db_commit_survives_projection_failure_and_retry`
+- [x] 完全相同正文与完整边界追加来源；仅措辞相似、access 或 applicability 不同的条目不被误复用（变异 RED）
+      —— `tests/test_finalization.py::{test_a_case_variant_lands_on_the_same_memory, test_a_second_project_widens_provenance_instead_of_replacing_it}`；`tests/test_memory_hygiene.py::test_merge_candidates_split_conflicts_from_compatible`
+- [x] 机制、程序、反例按“能否独立召回/验证/修正”决定是否拆分，不固定生成 knowledge + rule
+      —— finalizer 输出是**候选列表**（0～K 条、`kind` 自由），无强制配对；`output()` 夹具本身即单候选并端到端跑过
+      `FinalizationService`（`tests/test_finalization.py`）。此条为结构性保证，无“专用”测试但有活体覆盖。
+- [x] 同属 antd 等主题但无语义依赖的记忆不自动连边；有效 refinement/exception 可追溯且版本固定
+      —— `tests/test_memory_recall_score.py:194`（`relations("noisy") == []`）、`tests/test_memory_store.py:152`
+- [x] 存量 31 条进入卫生报告；只有确定性精确重复可自动可逆归档，其余仅临时分族且可展开
+      —— 2026-10-13 补：`tests/test_precipitation_simulation.py::test_flood_corpus_replay_reports_rewrites_and_archives_only_exact_duplicates`
+      （64 行语料：子句 A 31 条改写进 `hygiene_report().merges` 作 `overlaps`、绝不进 `exact_duplicates`；
+      子句 B `apply_auto_tier()['exact_applied'] == 1`，仅精确孪生归档、31 条改写留 `active`。变异：把近重复强塞进 exact → RED）
+- [x] 召回先做防御性分族再应用最终 top-K/byte budget；曝光与共同召回不提高可信度
+      —— `tests/test_recall_families.py::{test_family_grouping_is_after_candidates_and_boundary_compatible, test_presentation_grouping_is_anchor_based_not_transitive}`
 - [ ] 回放报告误复用、关系误连、召回覆盖、错误迁移、调用次数与成本；不以篇数下降判成功
-- [ ] event ingest 对重复/冲突 ID 幂等正确；hook 安装、自检、丢失/乱序事件和显式降级均可诊断
-- [ ] Episode 持久化前完成脱敏，retention 和删除可执行；删除后来源显示 `source_deleted`
-- [ ] 每个 finalization operation 可在任意故障点恢复，request hash 或 expected version 不符时显式失败
-- [ ] finalizer JSON schema 拒绝越权 existing ID、未知 evidence ref、无依据 fact 和不合法关系
-- [ ] Markdown 人工修改永不被投影静默覆盖；correction/keep-db 两条解决路径均保留版本历史
-- [ ] 候选池达到 100 条时显式返回截断；分族确定、非传递、一个成员只属于一个族
-- [ ] 生产副本完成迁移 dry-run、备份恢复、批次回滚和 `forge doctor` 故障呈现演练
-- [ ] 项目全量测试通过（父任务基线 199）
+      —— **2026-10-13 判定：转到父任务 `09-21-forge-recall-rank-and-merge`**。父任务验收第 10 条即"按研究协议
+      报告收益、错误率、延迟和 token 成本"，且父任务因模型行为层验收未过本就不归档。本任务不重复承载该交付。
+- [x] event ingest 对重复/冲突 ID 幂等正确；hook 安装、自检、丢失/乱序事件和显式降级均可诊断
+      —— `tests/test_episodes.py::{test_lifecycle_event_is_request_idempotent, test_hook_self_test_releases_temporary_database}`
+- [x] Episode 持久化前完成脱敏，retention 和删除可执行；删除后来源显示 `source_deleted`
+      —— `tests/test_privacy_lifecycle.py`（3 例）
+- [x] 每个 finalization operation 可在任意故障点恢复，request hash 或 expected version 不符时显式失败
+      —— `tests/test_finalization.py::test_finalization_freezes_model_output_and_recovers_without_second_call`；VersionConflict 测试
+- [x] finalizer JSON schema 拒绝越权 existing ID、未知 evidence ref、无依据 fact 和不合法关系
+      —— `tests/test_finalization.py::{test_unknown_evidence_and_relations_are_rejected, test_output_requires_reason_and_enforces_limit}`
+- [x] Markdown 人工修改永不被投影静默覆盖；correction/keep-db 两条解决路径均保留版本历史
+      —— `tests/test_memory_projection.py::{test_manual_difference_conflicts_and_explicit_correction, test_conflict_can_explicitly_keep_database_version}`
+- [x] 候选池达到 100 条时显式返回截断；分族确定、非传递、一个成员只属于一个族
+      —— `tests/test_recall_families.py::test_presentation_grouping_is_anchor_based_not_transitive`
+- [x] 生产副本完成迁移 dry-run、备份恢复、批次回滚和 `forge doctor` 故障呈现演练
+      —— 迁移干跑/备份恢复/回滚有测试（`tests/test_precipitation_migration.py`、`test_memory_boundary.py::test_migration_backup_is_restorable`）；
+      "生产副本"演练遵守"不得操作真实生产库"，用 `tmp_path` 副本等价行使。
+- [x] 项目全量测试通过（父任务基线 199）—— **442 passed**（2026-10-13）
 
 ## Out of Scope
 
@@ -174,6 +196,17 @@ unified-self-permission-refresh   unify-auth-refresh-signal-across-predicates   
 
 顺带确认：**FTS 匹配与切词本身正常**——同一段正文直查 1/2/3/5 token 分别命中 24/15/4/1 行，
 每次均含自身，无查询侧与索引侧不一致。
+
+### 2026-10-13 收尾记录（状态归一复核）
+
+代码 2026-09-24 已落地；本轮补的是两条端到端验证（`tests/test_precipitation_simulation.py`，3 例）
+并逐条复核 17 条 AC 的测试归属（见 Acceptance Criteria）。全量 442 passed。
+
+- 新测试：两小时/30 静默模拟（结束前零长期写入）、64 行洪泛语料回放（改写进报告、仅精确重复可归档）、
+  同一正文重复沉淀 31 次仍归一实体。
+- 变异验证两处：去静默闸门 → sim1 RED；把近重复塞进 exact → sim2 RED。
+- AC#5 结构性满足（单候选夹具已活体覆盖）；AC#9 回放/成本报告转父任务 `09-21`（与其验收第 10 条重复）。
+- **仍未决（需用户显式决定）**：是否恢复生产 watcher（见上"当前生产状态"与 implement.md 完成定义）。
 
 ### 其他
 
