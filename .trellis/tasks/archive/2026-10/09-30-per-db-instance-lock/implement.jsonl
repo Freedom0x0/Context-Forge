@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "守卫必须有牙齿：本任务的互斥是并发守卫，按既有变异测试纪律交付（把守卫改成恒真应让测试变红）"}
+{"file": ".trellis/spec/backend/host-integration.md", "reason": "runtime_dir() 隔离与宿主运行形态的既有约定；锁文件必须落在该目录下"}

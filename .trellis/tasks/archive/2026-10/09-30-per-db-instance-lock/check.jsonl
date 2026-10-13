@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "校验重点：守卫是否被测试真正咬住、是否有不可失败的断言"}
+{"file": ".trellis/spec/backend/host-integration.md", "reason": "校验重点：有没有把按库隔离做成全局锁（测试套件会被自己锁死）"}
