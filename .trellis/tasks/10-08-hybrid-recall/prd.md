@@ -23,18 +23,38 @@
 
 ## Acceptance Criteria
 
-- [ ] BLOB 打包/解包 + 维度不符判为失效行：纯函数单测，无需 provider 也能跑
-- [ ] v7 → v8 迁移：`dry_run` 不改字节；实跑后备份可恢复；普通连接打开旧库仍 raise
+- [x] BLOB 打包/解包 + 维度不符判为失效行：纯函数单测，无需 provider 也能跑
+      —— `tests/test_embedding.py::test_vector_pack_round_trip_and_dimension_guard`
+- [x] v7 → v8 迁移：`dry_run` 不改字节；实跑后备份可恢复；普通连接打开旧库仍 raise
+      —— 2026-10-13 补齐备份可恢复那条：`tests/test_embedding.py::test_v7_migration_backup_restore_returns_records`。
+      注：`SCHEMA_VERSION` 已涨到 11；`initialize()` 守卫由陈旧的 `(1,2,3)` 修为 `1 <= version < SCHEMA_VERSION`，
+      使任意老版本的 `.pre-vN` 备份都能 restore（构造函数仍拒绝旧库，红线不变）。
 - [x] 关键词放宽：2a 剔除 `df=0` 的词 + 2b 词并集兜底（`WIDEN_RESULT_CAP=100`），命中带来源标签，
       边界过滤不绕。**注意**：原先计划用 `tests/recall_eval_cases.py` 量"字面远、语义近"的命中增量，
       实测该语料是迁移正确性（`right`/`wrong`）标注，没有换问法这一维，量不了放宽收益；
       改为自建语料 8 例 + 现有评测门槛不回归 + 三处变异验证。
 - [x] 单 token 查询不放宽；已有高精度命中不被放宽标签覆盖
-- [ ] 未配 embedding / 无 numpy 时全部测试通过且行为等于现状（**语义通道不得成为任何现有测试的前提**）
-- [ ] provider 挂掉时沉淀仍然成功（断言 receipt 状态与 NULL 向量），失败计数在 doctor 可见
-- [ ] `doctor` 的 egress 行同时列出提取与 embedding 两条通路
-- [ ] 解释里能看到通道与两个分数；五维 `text` 取 `max(词法, 语义)`
-- [ ] 全量测试绿
+- [x] 未配 embedding / 无 numpy 时全部测试通过且行为等于现状（**语义通道不得成为任何现有测试的前提**）
+      —— 全量 439 passed 全部以 `embedder=None` 跑；无 embedder 时并集等于词法集，行为不变
+- [x] provider 挂掉时沉淀仍然成功（断言 receipt 状态与 NULL 向量），失败计数在 doctor 可见
+      —— 2026-10-13 补齐计数：memory.db 新增 `embedding_failures` 表（惰性 `CREATE TABLE IF NOT EXISTS`），
+      `doctor.check_embedding_failures()` 红/绿；`tests/test_embedding.py::test_doctor_reports_embedding_write_failures`
+- [x] ~~`doctor` 的 egress 行同时列出提取与 embedding 两条通路~~
+      —— **已被 design §6 取代**：embedding 走本地模型，不新增出境 endpoint（设计把"本地模型缓存状态"单列一行
+      `check_local_embedding()`）。原 AC 对本地模型已不适用，不再要求。
+- [x] 解释里能看到通道与两个分数；五维 `text` 取 `max(词法, 语义)`
+      —— 2026-10-13 补齐：`memory.py` 加 `channel_labels`（`bm25`/`widened`/`semantic`）+
+      词法/语义原始分；`text = max(词法, 语义)`（语义取余弦原值）。
+      `tests/test_embedding.py::{test_semantic_only_hit_enters_results_labelled_with_its_cosine,
+      test_text_dimension_is_the_max_of_lexical_and_semantic, test_embedding_from_another_model_identity_is_skipped}`
+- [x] 全量测试绿 —— 439 passed（2026-10-13）
+
+## 已知残余（2026-10-13）
+
+- **查询期语义失败仍是静默降级**：design §5 要求"本次请求只用通道 1+2，并在解释里明说语义通道未启用，
+  不静默降级"，但当前 `except Exception: pass` 未在解释里外显。未列入原 AC，留作后续。
+- **通道标注暂无消费方**：design 设想它喂给第 2 层分桶报表，但 `bucket_report` 目前按
+  `host`/`model@prompt_version`/`evidence_level` 分桶，未消费 channel。标注已具备，接线待做。
 
 ## Blocked / 待验证（2026-10-08 已探测，事实见 `design.md` §10）
 

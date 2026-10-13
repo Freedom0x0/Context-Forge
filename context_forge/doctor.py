@@ -336,6 +336,31 @@ def check_local_embedding() -> tuple[str, bool, str]:
             f"{settings.embedding_model} cached locally ({settings.embedding_dimensions} dimensions)")
 
 
+def check_embedding_failures() -> tuple[str, bool, str]:
+    """Embedding write failures, the one place a broken provider becomes visible.
+
+    The write path keeps the memory (NULL vector) rather than failing, so without this
+    line a provider that never works would leave recall silently lexical-only (design §5).
+    """
+    from .config import runtime_dir
+    from .memory import MemoryStore, MemoryStoreError
+
+    path = runtime_dir() / "memory.db"
+    if not path.exists():
+        return ("embedding-failures", True, "no memory database yet")
+    try:
+        failures = MemoryStore(path, readonly=True).embedding_failures()
+    except MemoryStoreError as error:
+        return ("embedding-failures", False, f"unreadable memory database: {error}")
+    if not failures:
+        return ("embedding-failures", True, "no embedding write failures")
+    rendered = "; ".join(
+        f'{model}: {reason} x{info["count"]} (last {info["last_at"]})'
+        for model, by_reason in sorted(failures.items())
+        for reason, info in sorted(by_reason.items()))
+    return ("embedding-failures", False, rendered)
+
+
 def check_memory_sync(vault_root: Path | None) -> list[str]:
     """Warn when the vault has documents that `memory.db` does not.
 
@@ -464,6 +489,7 @@ def run_all(retention_days: int = 30) -> list[tuple[str, bool, str]]:
         check_confirmations(),
         check_memory(),
         check_local_embedding(),
+        check_embedding_failures(),
         check_precipitation_state(),
         ("memory-sync", not sync_warnings,
          "; ".join(sync_warnings) if sync_warnings else "vault and memory.db agree"),

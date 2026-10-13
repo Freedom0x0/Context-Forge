@@ -129,6 +129,14 @@ CREATE TABLE pending_confirmations (
  replay_attempts INTEGER NOT NULL DEFAULT 0,
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );
+-- Embedding write failures are a new table, so no column-migration branch is needed:
+-- it is created here for a fresh database and lazily by the write path for one already
+-- at the current version, which is exactly when the first failure can be counted.
+CREATE TABLE embedding_failures (
+ model TEXT NOT NULL, reason TEXT NOT NULL,
+ count INTEGER NOT NULL DEFAULT 0, last_at TEXT,
+ PRIMARY KEY(model, reason)
+);
 """
 
 PROJECTIONS = """

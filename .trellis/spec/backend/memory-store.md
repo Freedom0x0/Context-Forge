@@ -6,8 +6,8 @@ Applies to the standalone long-term memory foundation in `context_forge/memory*.
 
 ## Signatures
 
-- `MemoryStore.initialize(path)` explicitly creates the versioned schema and returns a writable store.
-- `MemoryStore(path, readonly=True)` opens an existing compatible database without creating it.
+- `MemoryStore.initialize(path)` explicitly creates the versioned schema **or migrates any older one** (`1 <= version < SCHEMA_VERSION`) and returns a writable store. It is the one explicit entry point: the migration chain supports every version ≥ 1, and `restore()` re-runs `initialize()` on a `.pre-vN-` backup so a rollback copy of any vintage is restorable. The constructor still refuses a stale database.
+- `MemoryStore(path, readonly=True)` opens an existing compatible database without creating it; a version mismatch raises (`unsupported memory schema N; expected M`). Ordinary opens never migrate.
 - `put(id, draft, expected_version=..., idempotency_key=..., actor=..., reason=..., relations=...)` atomically persists a revision.
 - `get(id, version=None)`, `history(id)`, `events(id)` and `relations(id, ...)` inspect durable state.
 - `search(query, project=..., changed_path=None, limit=8, byte_budget=65536, owner=...)` returns visible current records.
@@ -58,6 +58,15 @@ Use temporary directories for every database/vault. Assert rollback after an inj
 Wrong: copy only the active SQLite main file and call it a complete backup.
 
 Correct: use SQLite's backup API, check the result, restore to a new target and verify versions, events, sources, boundary fields and relationships.
+
+## The embedding cache is a derived accelerator, never a precondition
+
+`memory_versions.embedding` / `embedding_model` are a **derived cache** — the authoritative data is still `snapshot_json`. Rules:
+
+- **A failed embedding call must not fail the write.** The row is stored with `embedding = NULL` and the write succeeds; the semantic channel is an accelerator, so a provider/offline failure must not stop memory from being produced (this is the same red line as the watcher: don't put the main path on a probabilistic event). The swallow path records the failure rather than discarding it silently.
+- **Failures are counted, not lost.** `embedding_failures(model, reason, count, last_at)` lives in **memory.db** (per-library, like `scan_failures` lives in queue.db). It is created lazily with `CREATE TABLE IF NOT EXISTS` on the write path — a *new table* in `SCHEMA`'s createscript only reaches a fresh v0 DB, so an already-current database needs the lazy create, not an `ALTER` (columns need `_migrate`; tables don't). `doctor.check_embedding_failures()` reads it back and is red when any failure is recorded.
+- **BLOB dimension is not stored in the blob.** Validity is `len(blob) == dimensions * 4`; a mismatch is an *invalid row* → skip and count, never guess. Packing rejects a wrong-length vector.
+- **Identity filter on read.** A candidate whose `embedding_model` differs from the live embedder identity is skipped (model drift → report + prompt `reindex-embeddings`, never auto-recompute).
 
 ## Folding tri-state conditions: conflict is an *absorbing* state
 

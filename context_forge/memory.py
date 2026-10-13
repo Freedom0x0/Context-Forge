@@ -395,7 +395,8 @@ def text_scores(ranks: Sequence[float]) -> list[float]:
 
 def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
              bonus: float, evidence: float, freshness: float, feedback: float,
-             text: float, risks: Sequence[str], match_note: str = '') -> str:
+             text: float, risks: Sequence[str], match_note: str = '', channel: str = '',
+             lexical_score: float | None = None, semantic_score: float | None = None) -> str:
     scope = draft.scope
     hits = []
     if scope.visibility == 'global':
@@ -413,10 +414,22 @@ def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
         provenance.append(f'同项目 +{PROVENANCE_PROJECT_BONUS:.2f}')
     if paths_hit(draft.provenance.paths, ctx.changed_path):
         provenance.append(f'证据路径 +{PROVENANCE_PATH_BONUS:.2f}')
+    # Channel + both raw scores are additive to the free-text note: the note says which
+    # relaxation reached the record, the structured parts say through which channel and with
+    # what lexical / cosine numbers (design §7), which the layer-2 report can bucket on.
+    match_parts = []
+    if channel:
+        match_parts.append(f'通道={channel}')
+    if lexical_score is not None:
+        match_parts.append(f'词法={lexical_score:.2f}')
+    if semantic_score is not None:
+        match_parts.append(f'语义={semantic_score:.2f}')
+    if match_note:
+        match_parts.append(match_note)
+    match_suffix = f' 匹配[{" ".join(match_parts)}]' if match_parts else ''
     line_hit = ('为什么命中: 适用[' + ', '.join(hits) + '] 来源[' + (', '.join(provenance) or '无加分')
                 + f'] 证据[{draft.evidence_level} {evidence:.2f}] 时效[{freshness:.2f}] '
-                + f'反馈[{feedback:.2f}] 文本[{text:.2f}]'
-                + (f' 匹配[{match_note}]' if match_note else ''))
+                + f'反馈[{feedback:.2f}] 文本[{text:.2f}]' + match_suffix)
 
     projects = ', '.join(draft.provenance.projects) or '未声明项目'
     sessions = draft.provenance.sessions
@@ -470,7 +483,8 @@ def _explain(draft: MemoryDraft, ctx: RetrievalContext, *, applicability: float,
 def relevance(memory: MemoryRecord, ctx: RetrievalContext,
               weights: ScoreWeights = DEFAULT_WEIGHTS, *, text: float = 0.0,
               applied: int = 0, feedback: float = 0.0, conflicts: int = 0,
-              risks: Sequence[str] = (), match_note: str = '') -> ScoreBreakdown:
+              risks: Sequence[str] = (), match_note: str = '', channel: str = '',
+              lexical_score: float | None = None, semantic_score: float | None = None) -> ScoreBreakdown:
     """Five weighted dimensions minus the conflict penalty.
 
     `feedback` is the w4 calibration hook (P3's `apply_feedback_weight`);
@@ -492,7 +506,8 @@ def relevance(memory: MemoryRecord, ctx: RetrievalContext,
         conflict_penalty=penalty, admitted_by=derive_level(memory.draft),
         explanation=_explain(memory.draft, ctx, applicability=applicability, bonus=bonus,
                              evidence=evidence, freshness=freshness, feedback=feedback,
-                             text=text, risks=risks, match_note=match_note))
+                             text=text, risks=risks, match_note=match_note, channel=channel,
+                             lexical_score=lexical_score, semantic_score=semantic_score))
 
 
 def _split_snapshot(raw: str, *, owner: str, privacy: str) -> tuple[str, MemoryDraft]:
@@ -560,7 +575,11 @@ class MemoryStore:
             connection.row_factory = sqlite3.Row
             connection.execute('PRAGMA foreign_keys=ON')
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version in (1, 2, 3):
+            # Every older schema migrates here: `migrate()` already supports each version
+            # at or above 1, and `restore()` re-runs this path on a `.pre-vN-` backup so a
+            # rollback copy of any vintage is restorable. The constructor still refuses to
+            # open an un-migrated database, so this stays the one explicit entry point.
+            if 1 <= version < SCHEMA_VERSION:
                 connection.close()
                 connection = None
                 cls.migrate(path, dry_run=False)
@@ -1373,19 +1392,61 @@ class MemoryStore:
             relations: tuple[Relation, ...] = ()) -> MemoryRecord:
         embedding_model = ''
         embedding = None
+        failure = None
         if self.embedder is not None:
             try:
                 clean_text = sanitize_text(draft.summary + '\n' + draft.body)
                 embedding = self.embedder.encode(clean_text)
                 embedding_model = self.embedder.identity
-            except Exception:
+            except Exception as error:
                 # Embeddings are optional derived data; the authoritative write still proceeds.
                 embedding = None
+                failure = (str(error) or error.__class__.__name__)[:200]
         with self._connection(write=True) as connection:
+            if failure is not None:
+                self._record_embedding_failure(connection, self.embedder.identity, failure)
             return self._put(connection, memory_id, draft, expected_version=expected_version,
                              idempotency_key=idempotency_key, actor=actor, reason=reason,
                              relations=relations, embedding_model=embedding_model,
                              embedding=embedding)
+
+    @staticmethod
+    def _record_embedding_failure(connection: sqlite3.Connection, model: str, reason: str) -> None:
+        """Count one embedding write failure per model and reason (design §5).
+
+        A write must not fail because the provider did, so the failure is recorded rather
+        than raised. The table is created lazily: a database written before this counter
+        existed has no table, and there is nothing to count until the first failure. The
+        reason is the exception text, truncated — an operator wants to know *why* the
+        provider is failing, not just that it is.
+        """
+        connection.execute(
+            'CREATE TABLE IF NOT EXISTS embedding_failures ('
+            'model TEXT NOT NULL, reason TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, '
+            'last_at TEXT, PRIMARY KEY(model, reason))')
+        connection.execute(
+            'INSERT INTO embedding_failures(model,reason,count,last_at) VALUES (?,?,1,?) '
+            'ON CONFLICT(model,reason) DO UPDATE SET count=embedding_failures.count+1, '
+            'last_at=excluded.last_at', (model, reason, now()))
+
+    def embedding_failures(self) -> dict[str, dict[str, dict]]:
+        """Embedding write failures per model per reason — read by `doctor` (design §5).
+
+        A missing table means no failure was ever recorded (old database, counter not yet
+        created), which is a clean bill of health, not an error.
+        """
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    'SELECT model,reason,count,last_at FROM embedding_failures '
+                    'ORDER BY model,reason').fetchall()
+        except MemoryStoreError:
+            return {}
+        out: dict[str, dict[str, dict]] = {}
+        for row in rows:
+            out.setdefault(row['model'], {})[row['reason']] = {
+                'count': row['count'], 'last_at': row['last_at']}
+        return out
 
     def _put(self, connection: sqlite3.Connection, memory_id: str, draft: MemoryDraft, *,
              expected_version: int, idempotency_key: str, actor: Actor, reason: str,
@@ -1650,6 +1711,7 @@ class MemoryStore:
         tokens = list(dict.fromkeys(tokenize(query)))[:128]
         single_han = re.fullmatch(r'[\u3400-\u9fff\U00020000-\U0002fa1f]', query.strip()) is not None
         channel_notes: dict[str, str] = {}
+        channel_labels: dict[str, str] = {}
         with self._connection() as connection:
             if single_han:
                 rows = [(row['id'], 1.0) for row in connection.execute(
@@ -1683,6 +1745,7 @@ class MemoryStore:
                         seen.update(memory_id for memory_id, _ in added)
                         for memory_id, _rank in added:
                             channel_notes[memory_id] = reason
+                            channel_labels[memory_id] = 'widened'
 
                     # A term that appears in no document can never satisfy an AND, so giving it up
                     # costs nothing and buys everything. Measured: with a fixed drop budget, queries
@@ -1703,8 +1766,15 @@ class MemoryStore:
                     rows.sort(key=lambda item: (item[1], item[0]))
             else:
                 return []
-            # Optional semantic candidates supplement lexical results. Invalid or
-            # unavailable vectors are ignored, preserving lexical-only behavior.
+            # Lexical text score: min-max over lexical ranks only, so folding the semantic
+            # channel in below cannot distort it.
+            lexical_scores = dict(zip(
+                (memory_id for memory_id, _ in rows),
+                text_scores([-rank for _, rank in rows])))
+            semantic_scores: dict[str, float] = {}
+            # Optional semantic candidates supplement lexical results. Invalid, drifted
+            # (embedding_model mismatch — design §5) or unavailable vectors are ignored,
+            # preserving lexical-only behavior.
             if self.embedder is not None and tokens:
                 try:
                     query_blob = self.embedder.encode(query)
@@ -1712,36 +1782,40 @@ class MemoryStore:
                     if query_vector:
                         import math
                         qnorm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
-                        seen = {memory_id for memory_id, _ in rows}
-                        semantic = []
                         for candidate in connection.execute(
                                 "SELECT m.id,v.embedding,v.embedding_model FROM memories m "
                                 "JOIN memory_versions v ON v.memory_id=m.id AND v.version=m.current_version "
                                 "WHERE m.status IN ('active','conflicted') AND m.suppressed=0"):
+                            # Identity filter: a vector from another model is not comparable.
                             if candidate['embedding_model'] != self.embedder.identity:
                                 continue
                             vector = unpack_vector(candidate['embedding'], dimensions=self.embedder.dimensions)
                             if not vector:
                                 continue
                             norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-                            score = sum(a * b for a, b in zip(query_vector, vector)) / (qnorm * norm)
-                            semantic.append((candidate['id'], score))
-                        semantic.sort(key=lambda item: (-item[1], item[0]))
-                        for memory_id, score in semantic[:50]:
+                            semantic_scores[candidate['id']] = (
+                                sum(a * b for a, b in zip(query_vector, vector)) / (qnorm * norm))
+                        seen = {memory_id for memory_id, _ in rows}
+                        for memory_id, score in sorted(
+                                semantic_scores.items(), key=lambda item: (-item[1], item[0]))[:50]:
                             if memory_id not in seen:
                                 rows.append((memory_id, -score))
                                 channel_notes[memory_id] = f'语义相似 {score:.2f}'
+                                channel_labels[memory_id] = 'semantic'
                 except Exception:
+                    # Query-time provider failure falls back to channels 1+2 (lexical only).
                     pass
             effective_limit = min(limit or 100, 100) if single_han else limit
             ids = [memory_id for memory_id, _ in rows]
             views = self._boundary_views(connection, ids)
             applied = self._applied_counts(connection, ids)
             weights = self._weights(connection, ids)
-            scores = text_scores([-rank for _, rank in rows])
             extras = extra_risks or {}
             candidates: list[tuple[MemoryRecord, float, int]] = []
-            for (memory_id, _rank), text in zip(rows, scores):
+            for memory_id, _rank in rows:
+                # Text dimension is max(lexical, semantic); the semantic side is the raw
+                # cosine (0..1), not a normalised value (design §7 defers calibration).
+                text = max(lexical_scores.get(memory_id, 0.0), semantic_scores.get(memory_id, 0.0))
                 if not boundary_visible(views[memory_id], owner=owner, ctx=ctx):
                     continue
                 record = self._record(connection, memory_id)
@@ -1790,6 +1864,9 @@ class MemoryStore:
                     record, ctx, text=text, applied=count, conflicts=conflicts[record.id],
                     feedback=weights.get(record.id, DEFAULT_WEIGHT) - DEFAULT_WEIGHT,
                     match_note=channel_notes.get(record.id, ''),
+                    channel=channel_labels.get(record.id, 'bm25'),
+                    lexical_score=lexical_scores.get(record.id),
+                    semantic_score=semantic_scores.get(record.id),
                     risks=[*extras.get(record.id, ()), *notes[record.id]])))
             rescored.sort(key=lambda item: (-item[1].total, item[0].id))
             return self._fit(rescored if effective_limit is None else rescored[:effective_limit],
