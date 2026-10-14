@@ -3,23 +3,23 @@
 > 面向 Agent 的持续学习记忆系统：从经历中形成有依据的理解，在新任务中应用，并根据结果修正。
 
 <p align="left">
-  <a href="README.md"><img alt="version" src="https://img.shields.io/badge/version-v1.0.0-0F1419?style=flat-square&labelColor=FAFAF9"></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-0F1419?style=flat-square&labelColor=FAFAF9">
   <img alt="python" src="https://img.shields.io/badge/python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white">
-  <img alt="tests" src="https://img.shields.io/badge/tests-390%20passed-16A34A?style=flat-square">
+  <img alt="tests" src="https://img.shields.io/badge/tests-454%20passed-16A34A?style=flat-square">
 </p>
 
 Context Forge 是一个 local-first 的 Agent 记忆基础设施。它不修改大模型参数，也不把历史对话无差别塞进上下文，而是把经历、来源、适用条件、冲突和结果保存在可追溯的 SQLite 长期记忆中，在需要时检索，并允许人工纠正。
 
 仓库历史名称为 `code-mentor`；包名、CLI 和 MCP 名称已统一为 `context-forge` / `forge`。
 
-## v1.0 做到了什么
+## 它能做什么
 
 - **持续沉淀**：从现有 `SessionArtifacts` 生成零到多条候选记忆。
 - **有依据的理解**：区分 observation、claim、hypothesis、preference、procedure，保存来源、证据等级、模型版本和提示词版本。
-- **人工纠正旁路**：支持修订、抑制、恢复、作用域调整和替代；人工版本优先于后台更新。
-- **按需召回**：SQLite + FTS5 支持中文 bigram、ASCII、项目/路径过滤、稳定排序和字节预算。
+- **人工纠正旁路**：支持修订、抑制、恢复、作用域调整和替代；人工版本优先于后台更新。人工打成的 `conflicted`（待复核）对后台写入是**吸收态**——模型只能追加佐证，不能替人把它结算掉。
+- **按需召回**：SQLite + FTS5 支持中文 bigram、ASCII、项目/路径过滤、稳定排序和字节预算。三条通道——BM25 严格 AND → 关键词放宽 → 可选语义 top-K——汇入同一条打分管线；每条结果带通道标签（`bm25`/`widened`/`semantic`），查询期语义降级会在解释里显式写出，不静默。
 - **结果追踪**：区分 retrieved、tool_returned、presented、referenced、applied、validated；曝光不会自动提高可信度。
+- **只读报表**：应用归因、异常候选、整理候选，外加各通道召回计数、人工判决计数与宿主收集健康——**一律给绝对数，不给百分比**。
 - **保守整理**：完全重复且决策边界一致时才自动归档；相似内容只生成候选，不擅自判断同义、冲突或替代。
 - **可恢复**：版本、来源、关系和事件事务一致；支持 FTS 重建、SQLite 在线备份/恢复和旧 vault 导入。
 - **高危闸门**：确定性分类器判为 `risk=high` 的规则停在 `candidate`，人在终端批准后才可召回。**闸门也管已经发布的那一半**：召回遇到从未被批准过的高危规则时扣掉正文，只返回 `confirmation_required`、摘要和服务端句柄；人在终端批准（`forge approve`）后，宿主调 `context_forge_memory_confirm(token)` 才拿到可执行文本。两个后果：1) **召回响应形状变了**——`body` 可能是 `null`，连 `sources`/`applicability`/`scope`/`provenance`/`explanation` 一起不返回；2) **一个版本批一次**，改写即重新待批。待批请求是服务端随机句柄（不是内容的派生物，模型算不出第二个）：10 分钟有效、一次性（重复换取会被记进台账并由 `forge doctor` 打印）、记忆换版即作废。这条是**执行闸门，不是保密闸门**：它挡"没人读过就执行"，不挡"在本机读"；理由与边界见 `docs/adr/0001-withhold-unapproved-high-risk-rules.md`。
@@ -119,9 +119,11 @@ forge-mcp
 
 长期记忆工具包括：
 
-- `context_forge_memory_search`：按项目、路径和预算检索记忆。
+- `context_forge_memory_search`：按项目、路径和预算检索记忆（带通道标签）。
 - `context_forge_memory_get`：读取当前或指定历史版本。
-- `context_forge_memory_report`：生成只读整理和质量报告。
+- `context_forge_memory_confirm`：用终端批准换来的句柄取回被扣留的高危规则正文。
+- `context_forge_memory_mark` / `context_forge_memory_apply`：上报引用、应用与验证阶段。
+- `context_forge_memory_report` / `context_forge_memory_effectiveness` / `context_forge_memory_hygiene`：只读整理、效果与卫生报表。
 
 旧 vault 工具仍保留，便于渐进迁移。
 
@@ -142,23 +144,20 @@ forge-mcp
 python -m pytest tests/ -q
 ```
 
-当前验证结果：`390 passed`（2026-10-09）。
+当前验证结果：`454 passed`（2026-10-14）。
 
-测试覆盖存储事务和并发、证据与关系、中文/ASCII 检索、作用域隔离、生命周期、worker 端到端接入、MCP 工具、保守整理、高危规则的扣留与换取（含假句柄、过期、换版、重复换取）、备份恢复和旧 vault 导入。
+测试覆盖存储事务和并发、证据与关系、中文/ASCII 检索、混合召回与通道标注、作用域隔离、生命周期、`conflicted` 吸收态、worker 端到端接入、MCP 工具、保守整理、高危规则的扣留与换取（含假句柄、过期、换版、重复换取）、备份恢复和旧 vault 导入。
 
 持续学习质量仍需使用独立的多轮任务数据集评估，包括决策正确率、错误复发率、过度泛化、跨范围泄露、延迟和 token 成本；通过确定性测试不等于已经证明模型能力提升。
 
 ## 文档
 
+- `docs/technical-introduction.md`：**先读这份**——按当前代码讲系统长什么样（架构、领域模型、写入通路、召回、闭环、治理边界）。
 - `docs/context-forge-usage.md`：日常使用和 CLI。
 - `docs/memory-store.md`：长期记忆 API、迁移和恢复。
 - `docs/adr/`：判断理由（为什么不选另一条路、保证的边界在哪）；API 事实不放这里。
-- `docs/technical-design-context-forge.md`：整体技术设计。
+- `docs/technical-design-context-forge.md`、`docs/technical-design-falsifiable-memory.md`：技术设计论证。
 - `docs/research/competitor-landscape-human-ai-learning.md`：竞品和研究背景。
-
-## 版本状态
-
-`v1.0.0` 表示本地长期记忆闭环的首个可验收版本：存储、生命周期、按需召回、曝光追踪、保守整理和宿主接入均已实现。模型质量收益、跨用户服务化和参数训练属于后续版本，不作为 v1.0 的隐含承诺。
 
 ## License
 
