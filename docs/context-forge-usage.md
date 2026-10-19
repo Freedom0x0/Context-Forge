@@ -90,6 +90,9 @@ forge hygiene                   # 只读：完全重复 / 近似候选 / 矛盾 
 forge hygiene --apply           # 只跑可无人值守的两档：归档完全重复、标注矛盾（每档一轮上限 100）
 forge hygiene --review          # 逐条判决，必须在终端里敲（管道喂进来的答案一律拒绝）
 forge hygiene-undo <id>         # 撤销一次自动改动；先打印计划，加 --apply 才写
+forge memory feedback <id> --outcome harmful   # 人工负反馈；harmful 转 conflicted 待复核
+forge memory suppress <id>       # 停止召回一条记忆（可逆，版本化事件）
+forge memory restore <id>        # 恢复被抑制 / conflicted 的记忆
 forge approve                   # 列出等你批的高危规则（只读）
 forge approve --token <handle>           # 显示将要放行的全文，不写库
 forge approve --token <handle> --apply   # 终端里回读挑战码才放行；管道进来的直接拒绝

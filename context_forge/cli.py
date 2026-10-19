@@ -36,8 +36,10 @@ app = typer.Typer(no_args_is_help=True)
 worker_app = typer.Typer(no_args_is_help=True)
 event_app = typer.Typer(no_args_is_help=True)
 session_app = typer.Typer(no_args_is_help=True)
+memory_app = typer.Typer(no_args_is_help=True)
 app.add_typer(event_app, name="event")
 app.add_typer(session_app, name="session")
+app.add_typer(memory_app, name="memory")
 app.add_typer(worker_app, name="worker")
 
 
@@ -516,6 +518,68 @@ def hygiene(days: int = typer.Option(90, "--days", min=0),
     payload = report.as_dict()
     payload['adjudicated'] = _store().verdict_counts()
     typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@memory_app.command("feedback")
+def memory_feedback(memory_id: str,
+                    outcome: str = typer.Option(..., "--outcome",
+                                                help="revoked | harmful | irrelevant"),
+                    note: str = typer.Option("", "--note"),
+                    request_id: str = typer.Option("", "--request-id",
+                                                   help="repeat to make the call idempotent")) -> None:
+    """Record feedback on one memory; `harmful` parks it as `conflicted` for review."""
+    import uuid
+
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    record = store.get(memory_id)
+    if record is None:
+        raise typer.BadParameter(f"no memory {memory_id}")
+    key = f"cli:feedback:{request_id}" if request_id else f"cli:feedback:{uuid.uuid4()}"
+    try:
+        updated = store.record_feedback(memory_id, outcome=outcome, note=note,
+                                        idempotency_key=key, actor="human")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{updated.draft.status} v{updated.version} "
+               f"weight={store.weight(memory_id):.2f}")
+
+
+def _memory_correction(action: str, memory_id: str, version: int, reason: str):
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    record = store.get(memory_id)
+    if record is None:
+        raise typer.BadParameter(f"no memory {memory_id}")
+    target = {"suppress": "disabled", "restore": "active"}[action]
+    if record.draft.status == target:
+        typer.echo(f"already {target} v{record.version}")
+        return
+    from .memory_lifecycle import MemoryLifecycle
+    expected = version or record.version
+    lifecycle = MemoryLifecycle(store)
+    revised = getattr(lifecycle, action)(
+        memory_id, expected_version=expected,
+        idempotency_key=f"cli:{action}:{memory_id}:{expected}", reason=reason)
+    typer.echo(f"{revised.draft.status} v{revised.version}")
+
+
+@memory_app.command("suppress")
+def memory_suppress(memory_id: str, version: int = typer.Option(0, "--version"),
+                    reason: str = typer.Option("human suppression", "--reason")) -> None:
+    """Stop recalling a memory; reversible with `forge memory restore`."""
+    _memory_correction("suppress", memory_id, version, reason)
+
+
+@memory_app.command("restore")
+def memory_restore(memory_id: str, version: int = typer.Option(0, "--version"),
+                   reason: str = typer.Option("human restoration", "--reason")) -> None:
+    """Return a suppressed / conflicted memory to `active` (a human correction)."""
+    _memory_correction("restore", memory_id, version, reason)
 
 
 @app.command("approve")

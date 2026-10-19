@@ -7,6 +7,7 @@ Tools:
   context_forge_recent_knowledge(N)  last N auto-published knowledge items
   context_forge_recent_rules(N)      last N rule candidates (any status)
   context_forge_record_feedback(...) log helpful/harmful/irrelevant on a rule
+  context_forge_memory_feedback(...) log feedback on one long-term memory
 """
 
 from __future__ import annotations
@@ -58,6 +59,28 @@ def _vault():
 def _index():
     from .index import DocumentIndex
     return DocumentIndex(_vault()._index_path())
+
+
+def record_memory_feedback(memory_id: str, outcome: str, *, note: str = "",
+                           request_id: str = "") -> dict:
+    """Record model-observed feedback on a Gen2 memory.
+
+    `harmful` parks the record as `conflicted` (pending a human review) via the
+    absorbing-status guard in `MemoryStore._put`; it never deletes text. The
+    idempotency key is derived from `request_id` when the host supplies one, so
+    a retried call is a no-op instead of a second event.
+    """
+    import uuid
+
+    store = _memory()
+    record = store.get(memory_id)
+    if record is None:
+        raise KeyError(memory_id)
+    key = f"mcp:feedback:{request_id}" if request_id else f"mcp:feedback:{uuid.uuid4()}"
+    updated = store.record_feedback(memory_id, outcome=outcome, note=note,
+                                    idempotency_key=key, actor="model")
+    return {"memory_id": updated.id, "version": updated.version,
+            "status": updated.draft.status, "weight": store.weight(updated.id)}
 
 
 def create_server():
@@ -153,6 +176,17 @@ def create_server():
         )
         return {'memory_id': record.id, 'version': record.version, 'stage': stage,
                 'request_id': request_id, 'weight': store.weight(record.id)}
+
+    @server.tool()
+    def context_forge_memory_feedback(memory_id: str, outcome: str,
+                                      note: str = "", request_id: str = "") -> dict:
+        """Report revoked / harmful / irrelevant on one long-term memory.
+
+        `harmful` parks the record as `conflicted` for a human review — a host
+        can flag, never clear a conflict. Suppression and restoration are
+        terminal-only (`forge memory suppress` / `restore`), not exposed here.
+        """
+        return record_memory_feedback(memory_id, outcome, note=note, request_id=request_id)
 
     @server.tool()
     def context_forge_memory_apply(memory_id: str, task_id: str, action: str,

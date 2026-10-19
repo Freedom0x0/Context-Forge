@@ -8,6 +8,10 @@ listed in §15 of the technical design:
 - `context_forge_pending_reviews()` — list drafts awaiting approval.
 - `context_forge_match_rules(project, changed_path)` — explain rule hits.
 - `context_forge_record_feedback(rule_id, outcome, note)` — log outcome.
+- `context_forge_memory_feedback(memory_id, outcome, note, request_id)` — log
+  model-observed feedback (`revoked` / `harmful` / `irrelevant`) on one
+  long-term memory; `harmful` parks it as `conflicted` for a human, and
+  suppression/restoration stay terminal-only.
 
 The server uses stdio transport. It runs from the user shell with
 `python -m context_forge.mcp_server` and never opens a network port.
