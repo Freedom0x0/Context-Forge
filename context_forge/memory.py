@@ -1861,7 +1861,7 @@ class MemoryStore:
                     # downgrade is recorded per result instead of swallowed, so a recalled set that
                     # silently lost its semantic channel is visible (design §5).
                     semantic_note = f'语义通道未启用（{type(error).__name__}）'
-            effective_limit = min(limit or 100, 100) if single_han else limit
+            effective_limit = (min(limit, 100) if limit is not None else None) if single_han else limit
             ids = [memory_id for memory_id, _ in rows]
             views = self._boundary_views(connection, ids)
             applied = self._applied_counts(connection, ids)

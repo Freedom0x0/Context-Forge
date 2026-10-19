@@ -161,7 +161,7 @@ def init(vault_path: Path) -> None:
     cfg_path = default_settings_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     settings = Settings(vault_path=vault_path.resolve())
-    cfg_path.write_bytes(tomli_w.dumps(settings.model_dump(mode="json")))
+    cfg_path.write_text(tomli_w.dumps(settings.model_dump(mode="json")), encoding="utf-8")
     Vault(vault_path / "context-forge")  # create dirs
     from .memory import MemoryStore
     from .config import runtime_dir
@@ -402,29 +402,6 @@ def retention(days: int = typer.Option(30, "--days", min=0),
     typer.echo(f"{verb} {len(targets)} session(s)")
     for sid in targets:
         typer.echo(f"  {sid}")
-
-
-@app.command("install-daemon")
-def install_daemon(uninstall: bool = typer.Option(False, "--uninstall")) -> None:
-    """Opt-in: install a logon-time worker daemon (alternative to
-    session-following model).
-
-    Default flow uses `forge process-now` on SessionEnd (transient,
-    progress bar, exits when done). Use this only if you want the
-    worker running continuously in the background at all times.
-    """
-    from .worker_service import install as _install, uninstall as _uninstall
-
-    try:
-        if uninstall:
-            result = _uninstall()
-            typer.echo(f"removed launcher at {result['launcher']}")
-        else:
-            result = _install()
-            typer.echo(f"installed launcher at {result['launcher']}")
-    except Exception as exc:
-        typer.echo(f"failed: {exc}")
-        raise typer.Exit(code=1)
 
 
 @app.command("scan")

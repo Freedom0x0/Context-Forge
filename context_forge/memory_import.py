@@ -9,6 +9,7 @@ import frontmatter
 
 from .memory import MemoryStore, MemoryStoreError, canonical_json, digest, now
 from .memory_models import DEFAULT_OWNER, MemoryDraft, Relation, Scope, Source, split_legacy_scopes
+from .index import iter_vault_documents
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -85,10 +86,8 @@ def preview_vault(root: Path, *, feedback_db: Path | None = None,
         raise MemoryStoreError(f'vault directory does not exist: {root}')
     namespace = namespace or str(root)
     documents = []
-    for path in sorted(root.rglob('*.md')):
+    for path in iter_vault_documents(root):
         relative = path.relative_to(root).as_posix()
-        if path.name == 'index.md' or relative.split('/')[0] not in {'knowledge', 'rules', 'reviews'}:
-            continue
         if not path.resolve().is_relative_to(root):
             raise MemoryStoreError(f'vault symlink escapes root: {path}')
         raw = path.read_bytes()

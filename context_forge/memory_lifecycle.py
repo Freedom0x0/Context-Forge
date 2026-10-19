@@ -199,16 +199,22 @@ def _merge_applicability(members: list[MemoryRecord]) -> tuple[Applicability, ..
     conflicted: set[str] = set()
     for member in members:
         for condition in member.draft.applicability:
-            result, ids = decisions.get(condition.condition, ('unknown', set()))
-            ids = ids | set(condition.evidence_ids)
+            current = decisions.get(condition.condition)
+            ids = (current[1] if current else set()) | set(condition.evidence_ids)
             if condition.condition in conflicted:
                 decisions[condition.condition] = ('unknown', ids)
-            elif (result in ('true', 'false') and condition.result in ('true', 'false')
-                  and result != condition.result):
+            elif condition.result == 'unknown':
+                # `unknown` is the pessimistic state: it is absorbing too, so a later
+                # `true` cannot resurrect a condition whose evidence was missing.
+                conflicted.add(condition.condition)
+                decisions[condition.condition] = ('unknown', ids)
+            elif current is None:
+                decisions[condition.condition] = (condition.result, ids)
+            elif current[0] != condition.result:
                 conflicted.add(condition.condition)
                 decisions[condition.condition] = ('unknown', ids)
             else:
-                decisions[condition.condition] = (result if result != 'unknown' else condition.result, ids)
+                decisions[condition.condition] = (current[0], ids)
     return tuple(Applicability(condition=condition, result=result, evidence_ids=tuple(sorted(ids)))
                  for condition, (result, ids) in sorted(decisions.items()))
 

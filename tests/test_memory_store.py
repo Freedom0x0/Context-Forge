@@ -217,6 +217,12 @@ def test_search_chinese_ascii_safety_and_limits(store):
     assert store.search('SQLite', project='demo', byte_budget=1) == []
 
 
+def test_single_han_limit_none_is_not_capped_at_one_hundred(store):
+    for number in range(101):
+        put(store, f'han-{number:03d}', MemoryDraft(body='数据库事务回滚', status='active'))
+    assert len(store.search('库', project='demo', limit=None, byte_budget=10 ** 7)) == 101
+
+
 def test_cross_project_records_keep_stable_order_when_truncated(store):
     for memory_id in ['a-hidden', 'z', 'b']:
         put(store, memory_id, MemoryDraft(body='transaction', status='active'))

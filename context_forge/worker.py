@@ -195,8 +195,11 @@ def process_pending_finalizations(store: JobStore, gateway, memory_store,
     if memory_store is None:
         return 0
     from .finalization import FinalizationService
+    from .provider_http import PROMPT_VERSION
     processed = 0
-    service = FinalizationService(store, memory_store, gateway)
+    service = FinalizationService(store, memory_store, gateway,
+                                  model=getattr(gateway, "model", None),
+                                  prompt_version=PROMPT_VERSION)
     for receipt in store.pending_receipts():
         try:
             memory_ids = service.finalize(receipt.finalization_id)

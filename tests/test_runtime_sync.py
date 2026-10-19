@@ -371,6 +371,8 @@ def test_worker_uses_receipt_finalization_without_legacy_runtime_sync():
     project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["dependencies"] == [
         "pydantic>=2.0,<3.0", "typer>=0.12,<1.0", "python-frontmatter>=1.1,<2.0",
+        "httpx>=0.27,<1.0", "tomli-w>=1.0,<2.0",
     ]
     assert project["optional-dependencies"]["mcp"] == ["mcp>=1.0,<2.0"]
     assert project["optional-dependencies"]["liveness"] == ["psutil>=5.9,<8"]
+    assert project["optional-dependencies"]["watch"] == ["watchdog>=4,<7"]

@@ -16,7 +16,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .index import parse_frontmatter, yaml_scalar
+from .index import iter_vault_documents, parse_frontmatter, yaml_scalar
 from .memory_models import DEFAULT_OWNER
 
 
@@ -230,9 +230,7 @@ def plan(root: Path) -> dict:
     report = {'owner': DEFAULT_OWNER, 'documents': 0, 'changed': 0, 'unchanged': 0,
               'paths_collapsed': 0, 'skipped_user_owned': 0, 'quoted_scalars': 0,
               'diagnostics': [], 'items': []}
-    targets = sorted(path for path in root.rglob('*.md')
-                     if path.name != 'index.md' and path.relative_to(root).as_posix().split('/')[0]
-                     in {'knowledge', 'rules', 'reviews'})
+    targets = list(iter_vault_documents(root))
     report['documents'] = len(targets)
     parsed = {}
     for path in targets:

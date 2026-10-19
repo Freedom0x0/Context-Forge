@@ -123,6 +123,20 @@ def test_consolidation_keeps_a_disputed_condition_unknown(tmp_path):
     assert merged["antd+server-paging"] == "unknown"
 
 
+# P4.t1 -- an explicit `unknown` is absorbing as well: a later `true` cannot revive it
+def test_consolidation_keeps_an_unknown_condition_unknown(tmp_path):
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    body = "Always set filterOption false for server-side search"
+    decisions = (("true", "a"), ("unknown", "b"), ("true", "c"))
+    for index, (result, project) in enumerate(decisions):
+        seed(store, f"unk{index}", body, role="observation", project=project,
+             session=f"s{index}", technologies=("antd",),
+             applicability=(Applicability(condition="antd+server-paging", result=result),))
+    proposal = MemoryLifecycle(store).consolidation_candidates(min_sources=3)[0]
+    merged = {condition.condition: condition.result for condition in proposal.draft.applicability}
+    assert merged["antd+server-paging"] == "unknown"
+
+
 # P4.4 -- the abstraction is revocable; the episodes are untouched
 def test_consolidation_is_reversible(tmp_path):
     store = MemoryStore.initialize(tmp_path / "memory.db")

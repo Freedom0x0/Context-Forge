@@ -209,8 +209,15 @@ class Vault:
                 continue
             rule_id = str(front.get("id", path.stem))
             store.add_rule_feedback(rule_id, fb, note="from frontmatter scan")
-            text = text.replace(f"feedback: {fb}", "feedback: ", 1)
-            path.write_text(text, encoding="utf-8", newline="\n")
+            # Clear the consumed label case-insensitively: `feedback: Helpful` used to
+            # survive `replace('feedback: helpful')` and re-enter the table on every scan.
+            lines = text.splitlines(keepends=True)
+            for index, line in enumerate(lines):
+                key, _, value = line.partition(":")
+                if key.strip().lower() == "feedback" and value.strip().lower() == fb:
+                    lines[index] = "feedback:" + ("\n" if line.endswith("\n") else "")
+                    break
+            self._atomic_write(path, "".join(lines))
 
     def _count_markdown(self) -> int:
         return sum(1 for _ in iter_vault_documents(self.root))

@@ -465,12 +465,14 @@ def test_scan_picks_up_frontmatter_feedback(tmp_path: Path) -> None:
                                  RuleExtraction(instruction="x", paths=[]))
     rule = vault.root / "rules" / "proposals" / "rule-k1.md"
     text = rule.read_text(encoding="utf-8")
-    text = text.replace("---\n", "---\nfeedback: helpful\n", 1)
+    text = text.replace("---\n", "---\nfeedback: Helpful\n", 1)
     rule.write_text(text, encoding="utf-8")
     vault.scan()
     store = JobStore(vault._index_path().parent / "queue.db")
     stats = store.rule_hit_stats("rule-k1")
     assert "helpful" in stats.get("feedback", {})
+    # The consumed label is cleared regardless of case, so a re-scan cannot re-record it.
+    assert "feedback: Helpful" not in rule.read_text(encoding="utf-8")
 
 
 def test_doctor_fix_applies_retention(tmp_path: Path, monkeypatch) -> None:

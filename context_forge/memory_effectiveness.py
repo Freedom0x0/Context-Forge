@@ -196,15 +196,6 @@ class MemoryEffectiveness:
         negative_feedback = [item for item in self.store.feedback()
                              if item.get('outcome') in {'irrelevant', 'harmful'}]
 
-        # A repeated error is a harmful outcome for a memory that has already had
-        # a previous harmful outcome. This is conservative and fully attributable.
-        harmful_by_memory: dict[str, int] = {}
-        for item in self.store.feedback():
-            if item.get('outcome') == 'harmful':
-                harmful_by_memory[item['memory_id']] = harmful_by_memory.get(item['memory_id'], 0) + 1
-        harmful_events = sum(harmful_by_memory.values())
-        repeated_errors = sum(max(0, count - 1) for count in harmful_by_memory.values())
-
         precipitation_total = precipitation_approved = precipitation_modified = 0
         repeated_errors = 0
         harmful_events = 0

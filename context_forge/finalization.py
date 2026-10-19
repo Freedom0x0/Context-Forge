@@ -15,10 +15,15 @@ from .transcript import sanitize_text
 class FinalizationService:
     """Recoverable Episode -> long-term memory consolidation."""
 
-    def __init__(self, queue: JobStore, memory: MemoryStore, gateway) -> None:
+    def __init__(self, queue: JobStore, memory: MemoryStore, gateway,
+                 *, model: str | None = None, prompt_version: str | None = None) -> None:
         self.queue = queue
         self.memory = memory
         self.gateway = gateway
+        # Recorded on every finalized version, like `MemoryLifecycle.publish` does.
+        # The model's own self-report is kept if present; these are the fallback.
+        self.model = model
+        self.prompt_version = prompt_version
 
     def finalize(self, finalization_id: str) -> list[str]:
         receipt = self.queue.receipt(finalization_id)
@@ -120,6 +125,8 @@ class FinalizationService:
             draft = draft.model_copy(update={
                 "provenance": Provenance(projects=projects, sessions=sessions,
                                            paths=draft.provenance.paths, host=host),
+                "model": draft.model or self.model,
+                "prompt_version": draft.prompt_version or self.prompt_version,
             })
             exact = self.memory.find_exact(canonical_fingerprint(draft))
             memory_id = exact.id if exact else str(uuid.uuid5(uuid.NAMESPACE_URL,
