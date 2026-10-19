@@ -237,9 +237,11 @@ Delete predicate N    Expected
 ────────────────────  ─────────────────────────────
 1 (owner)             some test RED   ← live
 2 (privacy)           all GREEN       ← DEAD, entailed by 1
-3 (selected_projects) some test RED   ← live
-4 (exclusions)        some test RED   ← live
+3 (exclusions)        some test RED   ← live
 ```
+
+(`selected_projects` was the third live predicate until v12 removed the project-level
+access policy; the table above is the post-removal state.)
 
 If a deletion leaves everything green you must do one of:
 1. **Redesign** so the predicate has independent effect (e.g. make the earlier check a bank/namespace match instead of an owner match), or
@@ -332,7 +334,7 @@ def test_elimination_and_admission_never_mix():
     admission = inspect.getsource(admitted)
     for banned in ('derive_level', 'admitted', 'principle', 'pattern', 'instance'):
         assert banned not in elimination
-    for banned in ('owner', 'privacy', 'allowed_projects', 'exclusions'):
+    for banned in ('owner', 'privacy', 'visibility', 'exclusions'):
         assert banned not in admission
 ```
 

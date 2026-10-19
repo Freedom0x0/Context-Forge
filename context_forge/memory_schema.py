@@ -4,7 +4,11 @@
 # 10 adds replay_attempts to that ledger: a host re-exchanging a used handle is an anomaly
 # worth counting server-side, because the exception alone would leave no trace of the attempt.
 # 11 adds optional, rebuildable local embedding cache columns.
-SCHEMA_VERSION = 11
+# 12 removes the project-level access policy (`selected_projects` / `allowed_projects`):
+#    cross-project recall is the product, so every stored record is rewritten to `shared`
+#    and the projection table loses the column. Snapshots are rewritten in place and
+#    fingerprints recomputed, because visibility is part of the canonical form.
+SCHEMA_VERSION = 12
 
 CORE = """
 CREATE TABLE memories (
@@ -144,8 +148,7 @@ CREATE TABLE IF NOT EXISTS memory_access_projection (
  memory_id TEXT NOT NULL, version INTEGER NOT NULL,
  owner TEXT NOT NULL,
  privacy TEXT NOT NULL CHECK(privacy IN ('shared','private')),
- visibility TEXT NOT NULL CHECK(visibility IN ('owner','selected_projects','shared')),
- allowed_projects_json TEXT NOT NULL CHECK(json_valid(allowed_projects_json)),
+ visibility TEXT NOT NULL CHECK(visibility IN ('owner','shared')),
  PRIMARY KEY(memory_id,version),
  FOREIGN KEY(memory_id,version) REFERENCES memory_versions(memory_id,version)
 );

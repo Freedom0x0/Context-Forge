@@ -59,17 +59,16 @@ def test_strict_matches_are_left_unannotated(tmp_path):
                    for breakdown in found.values())
 
 
-def test_widening_still_enforces_the_boundary(tmp_path):
+def test_widening_reaches_records_from_other_projects(tmp_path):
     store = seed(tmp_path)
-    add(store, 'hidden', 'alpha beta gamma delta zeta', project='other',
-        access=AccessPolicy(visibility='selected_projects', allowed_projects=('other',)))
+    add(store, 'from-other', 'alpha beta gamma delta zeta', project='other')
 
     found = hits(store, 'alpha beta gamma delta zeta zulu', project='demo')
 
     # 'zeta' lives only in the other project's memory, so no AND can reach 'target' —
-    # the union is what brings it in, and the union reaches 'hidden' too.
+    # the union is what brings it in, and the union reaches 'from-other' too.
     assert 'target' in found          # reachable via widening
-    assert 'hidden' not in found      # visible only to its own project
+    assert 'from-other' in found      # cross-project recall is the product
 
 
 def test_each_hit_labels_the_channel_that_reached_it(tmp_path):

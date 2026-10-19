@@ -84,11 +84,11 @@ Claude Code hooks (SessionStart/PreToolUse/Stop/…)     transcript *.jsonl
 | 对象 | 回答的问题 | 参与 |
 |---|---|---|
 | `MemorySpace`（`owner`, `privacy`） | 属于谁的空间 | 边界消元 |
-| `AccessPolicy`（`visibility`, `allowed_projects`） | 项目级**显式授权** | 边界消元 |
+| `AccessPolicy`（`visibility`） | 主体级可见性（`owner`/`shared`） | 边界消元 |
 | `Provenance`（`projects`, `sessions`, `paths`, `host`） | 从哪来 | **只加排序分，绝不参与可见性** |
 | `ApplicabilityScope`（`technologies`, `domains`, `constraints`, `exclusions`） | 何时适用 | 排序 + 准入 |
 
-`privacy` 和 `visibility` 是两个不同枚举，不可互换。`scope.visibility`（`global/scoped`）是**适用条件**，`access.visibility`（`owner/selected_projects/shared`）是**授权**，名字像但语义无关。
+`privacy` 和 `visibility` 是两个不同枚举，不可互换。`scope.visibility`（`global/scoped`）是**适用条件**，`access.visibility`（`owner/shared`）是**可见性**，名字像但语义无关。项目级授权（原 `selected_projects` + `allowed_projects`）已于 2026-10-19 移除。
 
 `Applicability` 是三元组 `(condition, result, evidence_ids)`，是一条条可判定的条件及其结论。`exclusions` 是反例：只有被上下文**判定成立**时才排除，判不定的记为风险、不静默过滤（`exclusion_outcome`）。
 
@@ -160,10 +160,10 @@ Claude Code hooks (SessionStart/PreToolUse/Stop/…)     transcript *.jsonl
 ### 5.2 统一管线
 
 ```
-并集 → 四边界消元 → 候选池准入 → 五维打分 + 冲突惩罚 → 解释 → 字节预算
+并集 → 三边界消元 → 候选池准入 → 五维打分 + 冲突惩罚 → 解释 → 字节预算
 ```
 
-- **四边界消元**（`boundary_visible`）：`owner` 不匹配、`private`、`selected_projects` 未授权、`exclusions` 判定成立——各自独立，只做**排除**。
+- **三边界消元**（`boundary_visible`）：`owner` 不匹配、`private` 跨主体、`exclusions` 判定成立——各自独立，只做**排除**。
 - **准入**（`admitted`）：按推导层级放行（principle 恒放；pattern 需命中技术/领域/约束；instance 需来源项目或路径命中）。这是"是否进候选池"，**不是排除**，两阶段不合并。
 - **五维打分**（`relevance`）：适用条件 + 来源加分、证据等级、新鲜度、反馈权重、文本分；再减冲突惩罚。权重见 `ScoreWeights`（evidence 1.2 最重）。
 - **`text` = `max(词法, 语义)`**：词法分只在**词法排名列**上做 min-max（把语义行并进去会污染它），语义侧是原始余弦。没有 embedder 时合并列表就等于词法列表，行为不变。

@@ -179,18 +179,10 @@ def _restrictive_access(members: list[MemoryRecord]) -> AccessPolicy | None:
     """The narrowest access among members; None when no safe scope exists.
 
     Widening access is a human-only action, so the abstraction may only be at
-    least as restrictive as every episode it generalises.
+    least as restrictive as every episode it generalises. Only `owner` narrows
+    anything now that project-level access is gone.
     """
     visibilities = {member.draft.access.visibility for member in members}
-    if 'selected_projects' in visibilities:
-        allowed: set[str] | None = None
-        for member in members:
-            if member.draft.access.visibility == 'selected_projects':
-                current = set(member.draft.access.allowed_projects)
-                allowed = current if allowed is None else (allowed & current)
-        if not allowed:
-            return None
-        return AccessPolicy(visibility='selected_projects', allowed_projects=tuple(sorted(allowed)))
     if 'owner' in visibilities:
         return AccessPolicy(visibility='owner')
     return AccessPolicy(visibility='shared')

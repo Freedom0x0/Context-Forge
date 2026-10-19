@@ -26,7 +26,7 @@ Each mutation updates the current pointer, version, event, source links, relatio
 
 Source identity identifies immutable evidence. Reusing it with different content must fail. Repeated references to one identity are not independent evidence. Applicability is `true`, `false` or `unknown`; unknown is not false or true. Boundary concerns are four separate objects (`MemorySpace`, `AccessPolicy`, `Provenance`, `ApplicabilityScope`); `privacy` and `visibility` are different fields with different enums.
 
-Search normalizes both indexed text and queries, quotes generated FTS terms, orders by BM25 ascending, and applies the four boundary eliminations before returning a limited result set. `project` is provenance and never a default filter; only `AccessPolicy` restricts projects. Direct `get`/history methods are internal storage inspection, not an authorization boundary; user-facing tools must enforce scope separately.
+Search normalizes both indexed text and queries, quotes generated FTS terms, orders by BM25 ascending, and applies the three boundary eliminations before returning a limited result set. `project` is provenance and never a default filter; the project-level access policy was removed in v12, so `AccessPolicy` only carries `owner`/`shared`. Direct `get`/history methods are internal storage inspection, not an authorization boundary; user-facing tools must enforce scope separately.
 
 ## Validation & Error Matrix
 

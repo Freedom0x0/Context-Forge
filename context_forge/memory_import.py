@@ -40,13 +40,16 @@ def _privacy(metadata: dict) -> str:
 
 
 def _access(metadata: dict, split) -> object:
+    """Only the subject boundary survives; project-level access was removed.
+
+    Older vaults may still carry `access_visibility: selected_projects` and
+    `allowed_projects`; they are ignored rather than rejected, so an import keeps
+    working and the record lands as `shared`.
+    """
     visibility = str(metadata.get('access_visibility', '')).strip().lower()
-    if visibility not in {'owner', 'selected_projects', 'shared'}:
+    if visibility not in {'owner', 'shared'}:
         return split.access
-    allowed = _strings(metadata.get('allowed_projects')) or split.provenance.projects
-    if visibility == 'selected_projects' and not allowed:
-        return split.access
-    return split.access.model_copy(update={'visibility': visibility, 'allowed_projects': allowed})
+    return split.access.model_copy(update={'visibility': visibility})
 
 
 def _applicability_scope(metadata: dict, split) -> object:

@@ -234,7 +234,7 @@ def restore(cls, backup: Path, target: Path) -> "MemoryStore":
 |------|---------|----------|
 | Tables | plural snake_case | `memories`, `memory_versions`, `retrieval_events`, `documents` |
 | Projection tables | `memory_<aspect>_projection` | `memory_access_projection` |
-| JSON columns | `<name>_json` + `CHECK(json_valid(...))` | `allowed_projects_json`, `snapshot_json` |
+| JSON columns | `<name>_json` + `CHECK(json_valid(...))` | `exclusions_json`, `snapshot_json` |
 | Event idempotency | `idempotency_key TEXT PRIMARY KEY` | `retrieval_events` |
 
 ## Common Mistakes

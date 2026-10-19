@@ -43,16 +43,13 @@ class MemorySpace(MemoryModel):
 
 
 class AccessPolicy(MemoryModel):
-    """项目级显式授权 — 与来源、适用条件分离。"""
+    """可见性 — 只剩主体边界。
 
-    visibility: Literal['owner', 'selected_projects', 'shared'] = 'shared'
-    allowed_projects: tuple[str, ...] = ()
+    项目级显式授权（原 `selected_projects` + `allowed_projects`）已按产品决策
+    移除：跨项目召回是产品核心，来源 project 只作弱排序，任何记忆都可按 id 读取。
+    """
 
-    @model_validator(mode='after')
-    def valid_selection(self) -> AccessPolicy:
-        if self.visibility == 'selected_projects' and not self.allowed_projects:
-            raise ValueError('selected_projects access requires allowed_projects')
-        return self
+    visibility: Literal['owner', 'shared'] = 'shared'
 
 
 class Provenance(MemoryModel):

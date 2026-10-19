@@ -63,8 +63,6 @@ _SECRET = re.compile(
     r'(-----BEGIN [A-Z ]*PRIVATE KEY-----)|(sk-[A-Za-z0-9]{16,})|(ghp_[A-Za-z0-9]{20,})|'
     r'(AKIA[0-9A-Z]{16})|((?:api[_-]?key|password|passwd|secret|token)\s*[:=]\s*["\']?[^\s,;\'"]{8,})',
     re.I)
-_INTERNAL_URL = re.compile(r'https?://(?:localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|'
-                           r'[\w.-]+\.(?:internal|corp|local))\b', re.I)
 _CONCRETE_FILE = re.compile(
     r'([\w.-]+/[\w.*-]+)'
     r'|(\b[\w-]+\.(?:ts|tsx|js|jsx|py|md|json|toml|ya?ml|css|go|rs)\b)'
@@ -150,12 +148,16 @@ def detect_tags(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return technologies, domains
 
 
-def detect_sensitive(text: str) -> tuple[str | None, str | None, str]:
+def detect_sensitive(text: str) -> tuple[str | None, str]:
+    """Only secrets still control visibility; project-level access was removed.
+
+    An internal / loopback URL used to be tagged `selected_projects` + `allowed_projects`.
+    Cross-project recall is the product, so that tag no longer exists; the URL text is left
+    untouched and the owner boundary is the only gate.
+    """
     if _SECRET.search(text):
-        return 'private', None, 'credential-shaped content detected'
-    if _INTERNAL_URL.search(text):
-        return None, 'selected_projects', 'internal or loopback URL detected'
-    return None, None, ''
+        return 'private', 'credential-shaped content detected'
+    return None, ''
 
 
 def _unquote(text: str) -> str:
@@ -240,14 +242,6 @@ def plan(root: Path) -> dict:
     knowledge = {str(front.get('id') or path.stem): (front, body)
                  for path, (_, front, body) in parsed.items()
                  if path.relative_to(root).as_posix().startswith('knowledge/')}
-    knowledge_projects: dict[str, set[str]] = {}
-    for path, (_, front, _body) in parsed.items():
-        if not path.relative_to(root).as_posix().startswith('rules/'):
-            continue
-        key = str(front.get('source_knowledge_id') or '')
-        project = str(front.get('project') or '').strip()
-        if key and project:
-            knowledge_projects.setdefault(key, set()).add(project)
     for path in targets:
         relative = path.relative_to(root).as_posix()
         text, front, body = parsed[path]
@@ -262,7 +256,6 @@ def plan(root: Path) -> dict:
             continue
         parent_front, parent_body = knowledge.get(str(front.get('source_knowledge_id') or ''), ({}, ''))
         sources = _list(parent_front, 'sources') or _list(front, 'sources')
-        projects = {project} if project else set(knowledge_projects.get(legacy_id, ()))
         updates: dict[str, object] = {}
         removals: tuple[str, ...] = ()
         reasons = []
@@ -282,20 +275,10 @@ def plan(root: Path) -> dict:
         if domains and not _list(front, 'domains'):
             updates['domains'] = ','.join(domains)
             reasons.append(f'domains={",".join(domains)}')
-        privacy, visibility, sensitive_basis = detect_sensitive(f'{instruction}\n{body}')
+        privacy, sensitive_basis = detect_sensitive(f'{instruction}\n{body}')
         if privacy and str(front.get('privacy', '')) != privacy:
             updates['privacy'] = privacy
             reasons.append(f'privacy={privacy} ({sensitive_basis})')
-        if visibility and str(front.get('access_visibility', '')).strip().lower() != visibility:
-            allowed = _list(front, 'allowed_projects') or tuple(sorted(projects))
-            if visibility == 'selected_projects' and not allowed:
-                report['diagnostics'].append(
-                    f'{relative}: needs project access restriction but has no known project')
-            else:
-                updates['access_visibility'] = visibility
-                if allowed:
-                    updates['allowed_projects'] = ','.join(allowed)
-                reasons.append(f'access_visibility={visibility} ({sensitive_basis})')
         patterns = _paths(front)
         if kind == 'rule' and patterns and not names_declared_paths(instruction, patterns):
             removals = ('paths',)

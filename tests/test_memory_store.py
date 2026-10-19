@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import json
 import sqlite3
 
 import pytest
@@ -196,34 +197,34 @@ def test_model_only_verification_and_invalid_conditions_rejected():
 
 
 def test_search_chinese_ascii_safety_and_limits(store):
-    restricted = AccessPolicy(visibility='selected_projects', allowed_projects=('other',))
     for number in range(12):
-        put(store, f'other-{number}', MemoryDraft(body='SQLite 数据库事务回滚', status='active', access=restricted))
+        put(store, f'other-{number}', MemoryDraft(body='SQLite 数据库事务回滚', status='active'))
     record = put(store, 'visible')
     put(store, 'disabled', draft().model_copy(update={'status': 'disabled'}))
-    assert store.search('数据库', project='demo', limit=1) == [record]
-    assert store.search('SQLITE', project='demo') == [record]
-    assert store.search('库', project='demo') == [record]
-    assert store.search('SQLite', project=None) == [record]
+    first = store.search('数据库', project='demo', limit=1)
+    assert [record.id for record in first] == ['visible']
+    assert len(store.search('SQLITE', project='demo', limit=None)) == 13
+    assert len(store.search('库', project='demo', limit=None)) == 13
+    assert len(store.search('SQLite', project=None, limit=None)) == 13
     assert len(store.search('数据库', project='other', limit=None)) == 13
+    assert record in store.search('数据库', project='demo', limit=None)
     assert store.search('"* - : ()', project='demo') == []
     # 'or' stays an ordinary word (quoted in the match string), and a term no document
     # contains is shed rather than dooming the query — but the hit has to say so.
-    assert store.search('SQLite OR missing', project='demo') == [record]
+    assert len(store.search('SQLite OR missing', project='demo', limit=None)) == 13
     breakdown = store.search_scored('SQLite OR missing', project='demo')[0][1]
     assert '匹配不上的词' in breakdown.explanation
     assert store.search('SQLite', project='demo', byte_budget=1) == []
 
 
-def test_hard_filter_before_truncation_and_stable_order(store):
-    put(store, 'a-hidden', MemoryDraft(body='transaction', status='active',
-                                       access=AccessPolicy(visibility='selected_projects',
-                                                           allowed_projects=('hidden',))))
-    for memory_id in ['z', 'b']:
+def test_cross_project_records_keep_stable_order_when_truncated(store):
+    for memory_id in ['a-hidden', 'z', 'b']:
         put(store, memory_id, MemoryDraft(body='transaction', status='active'))
-    assert [record.id for record in store.search('transaction', project='demo', limit=1)] == ['b']
-    assert [record.id for record in store.search('transaction', project='demo', limit=None)] == ['b', 'z']
-    assert [record.id for record in store.search('transaction', project='hidden', limit=None)] == ['a-hidden', 'b', 'z']
+    assert [record.id for record in store.search('transaction', project='demo', limit=1)] == ['a-hidden']
+    assert [record.id for record in store.search('transaction', project='demo', limit=None)] == [
+        'a-hidden', 'b', 'z']
+    assert [record.id for record in store.search('transaction', project='hidden', limit=None)] == [
+        'a-hidden', 'b', 'z']
 
 
 def test_rebuild_missing_index_and_rollback(store, monkeypatch):
@@ -423,3 +424,29 @@ def test_migrate_accepts_every_schema_older_than_the_current_one(tmp_path, versi
 
     report = MemoryStore.migrate(path, dry_run=False)
     assert (report['from'], report['to']) == (version, SCHEMA_VERSION)
+
+
+def test_migrate_removes_the_project_level_access_policy(tmp_path):
+    """v12: a stored `selected_projects` record becomes `shared`, fingerprint included."""
+    path = tmp_path / 'memory.db'
+    store = MemoryStore.initialize(path)
+    put(store, 'restricted', draft())
+    with sqlite3.connect(path) as connection:
+        raw = connection.execute('SELECT snapshot_json FROM memory_versions').fetchone()[0]
+        data = json.loads(raw)
+        data['access'] = {'visibility': 'selected_projects', 'allowed_projects': ['a']}
+        connection.execute('UPDATE memory_versions SET snapshot_json=?', (json.dumps(data),))
+        connection.execute('PRAGMA user_version=11')
+
+    report = MemoryStore.migrate(path, dry_run=True)
+    assert (report['from'], report['to'], report['access_rewrites']) == (11, SCHEMA_VERSION, 1)
+    assert report['rewritten'] == 0
+
+    MemoryStore.migrate(path, dry_run=False)
+    store = MemoryStore.initialize(path)
+    assert store.get('restricted').draft.access.visibility == 'shared'
+    with sqlite3.connect(path) as connection:
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = [row[1] for row in connection.execute(
+            'PRAGMA table_info(memory_access_projection)')]
+    assert 'allowed_projects_json' not in columns

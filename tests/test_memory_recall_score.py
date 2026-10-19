@@ -143,14 +143,13 @@ def test_legacy_filter_restores_the_binary_filter(tmp_path):
     seed(store, "instance", "proxy timeout policy", role="observation",
          provenance=Provenance(projects=("elsewhere",), sessions=("s1",)))
     seed(store, "principle", "proxy timeout policy")
-    seed(store, "locked", "proxy timeout policy",
-         access=AccessPolicy(visibility="selected_projects", allowed_projects=("other",)))
-    assert [r.id for r in store.search("proxy", project="demo")] == ["principle"]
+    seed(store, "from-other", "proxy timeout policy")
+    assert {r.id for r in store.search("proxy", project="demo")} == {"principle", "from-other"}
     assert {r.id for r in store.search("proxy", project="demo", legacy_filter=True)} == {
-        "instance", "principle"}
+        "instance", "principle", "from-other"}
     assert {r.id for r in store.search("proxy", project="demo", legacy_filter=True,
-                                      technologies=frozenset({"umi"}))} == {"instance", "principle"}
-    assert "locked" not in {r.id for r in store.search("proxy", project="demo", legacy_filter=True)}
+                                      technologies=frozenset({"umi"}))} == {
+        "instance", "principle", "from-other"}
 
 
 # P2.t9 -- one hop along positive relations, and it never feeds a score
@@ -220,7 +219,7 @@ def test_admission_and_elimination_are_separate_stages():
     admission = inspect.getsource(admitted)
     for word in ("derive_level", "admitted", "principle", "pattern", "instance"):
         assert word not in elimination
-    for word in ("owner", "privacy", "allowed_projects", "exclusions"):
+    for word in ("owner", "privacy", "visibility", "exclusions"):
         assert word not in admission
 
 
@@ -265,14 +264,13 @@ def test_boundary_projection_mirrors_the_draft_and_is_required(tmp_path):
     written = seed(store, "one", "proxy timeout policy",
                    scope=ApplicabilityScope(technologies=("umi",), domains=("proxy",),
                                             exclusions=("legacy",)),
-                   access=AccessPolicy(visibility="selected_projects", allowed_projects=("a",)))
+                   access=AccessPolicy(visibility="owner"))
     view = boundary_view(written.draft)
     with sqlite3.connect(store.path) as connection:
         access = connection.execute("SELECT * FROM memory_access_projection").fetchone()
         applicability = connection.execute("SELECT * FROM memory_applicability_projection").fetchone()
         connection.execute("DELETE FROM memory_access_projection")
-    assert (access[2], access[3], access[4], tuple(json.loads(access[5]))) == (
-        view.owner, view.privacy, view.visibility, view.allowed_projects)
+    assert (access[2], access[3], access[4]) == (view.owner, view.privacy, view.visibility)
     assert tuple(json.loads(applicability[4])) == view.exclusions
     try:
         store.search("proxy", project="demo")

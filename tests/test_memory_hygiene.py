@@ -249,7 +249,7 @@ def test_automatic_writes_cannot_widen_access(tmp_path):
     store = MemoryStore.initialize(tmp_path / "memory.db")
     seed(store, "m")
     lifecycle = MemoryLifecycle(store)
-    lifecycle.scope("m", AccessPolicy(visibility="selected_projects", allowed_projects=("one",)),
+    lifecycle.scope("m", AccessPolicy(visibility="owner"),
                     expected_version=1, idempotency_key="narrow")
     widened = Candidate("m", MemoryDraft(body="changed", role="claim", status="active",
                                          sources=(OBSERVED,)))
@@ -257,7 +257,7 @@ def test_automatic_writes_cannot_widen_access(tmp_path):
         lifecycle.publish(widened)
 
     narrow = store.get("m").draft.model_copy(
-        update={"access": AccessPolicy(visibility="selected_projects", allowed_projects=("one",))})
+        update={"access": AccessPolicy(visibility="owner")})
     assert store.put("m", narrow, expected_version=2, idempotency_key="same",
                      actor="system", reason="rewrite").version == 3
 

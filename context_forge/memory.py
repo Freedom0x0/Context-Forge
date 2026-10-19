@@ -202,7 +202,6 @@ class BoundaryView(NamedTuple):
     owner: str
     privacy: str
     visibility: str
-    allowed_projects: tuple[str, ...]
     exclusions: tuple[str, ...]
 
 
@@ -244,7 +243,7 @@ class CandidatePool:
 
 def boundary_view(draft: MemoryDraft) -> BoundaryView:
     return BoundaryView(draft.space.owner, draft.space.privacy, draft.access.visibility,
-                        tuple(draft.access.allowed_projects), tuple(draft.scope.exclusions))
+                        tuple(draft.scope.exclusions))
 
 
 def condition_result(condition: str, ctx: RetrievalContext) -> str:
@@ -277,20 +276,17 @@ def violated(constraints: Sequence[str], ctx: RetrievalContext) -> bool:
     return any(condition_result(entry, ctx) == 'false' for entry in constraints)
 
 
-_VISIBILITY_RANK = {'owner': 0, 'selected_projects': 1, 'shared': 2}
+_VISIBILITY_RANK = {'owner': 0, 'shared': 1}
 
 
 def access_broader(previous: MemoryDraft, current: MemoryDraft) -> bool:
-    """True when `current` reaches a subject or project `previous` did not.
+    """True when `current` reaches a subject `previous` did not.
 
     Automatic writes may only narrow access; widening it is a human-only
     action (technical design 2.3).
     """
     if _VISIBILITY_RANK[current.access.visibility] > _VISIBILITY_RANK[previous.access.visibility]:
         return True
-    if current.access.visibility == previous.access.visibility == 'selected_projects':
-        if not set(current.access.allowed_projects) <= set(previous.access.allowed_projects):
-            return True
     return previous.space.privacy == 'private' and current.space.privacy == 'shared'
 
 
@@ -307,19 +303,18 @@ def exclusion_outcome(exclusions: Sequence[str], ctx: RetrievalContext) -> tuple
 
 
 def boundary_visible(view: BoundaryView, *, owner: str, ctx: RetrievalContext) -> bool:
-    """The four boundary eliminations, and nothing else.
+    """The subject boundary and exclusions, and nothing else.
 
-    `project` resolves AccessPolicy scope only; it never matches against
-    provenance, so cross-project memories stay reachable. Candidate-pool
-    admission is a separate stage and must not be folded in here.
+    `project` never matches against provenance or access, so cross-project
+    memories stay reachable; the project-level access policy was removed by
+    product decision. Candidate-pool admission is a separate stage and must
+    not be folded in here.
     """
     if view.owner != owner:
         return False
-    # ponytail: subsumed by the owner check while one subject owns the store;
-    # kept so a future shared space cannot leak private records
+    # Subsumed by the owner check while one subject owns the store; kept so a
+    # future shared space cannot leak private records.
     if view.privacy == 'private' and view.owner != owner:
-        return False
-    if view.visibility == 'selected_projects' and ctx.project not in view.allowed_projects:
         return False
     eliminate, _unresolved = exclusion_outcome(view.exclusions, ctx)
     return not eliminate
@@ -534,9 +529,8 @@ def _split_snapshot(raw: str, *, owner: str, privacy: str) -> tuple[str, MemoryD
 def _insert_projections(connection: sqlite3.Connection, memory_id: str, version: int,
                         draft: MemoryDraft) -> None:
     view = boundary_view(draft)
-    connection.execute('INSERT OR REPLACE INTO memory_access_projection VALUES (?,?,?,?,?,?)',
-                       (memory_id, version, view.owner, view.privacy, view.visibility,
-                        canonical_json(list(view.allowed_projects))))
+    connection.execute('INSERT OR REPLACE INTO memory_access_projection VALUES (?,?,?,?,?)',
+                       (memory_id, version, view.owner, view.privacy, view.visibility))
     connection.execute('INSERT OR REPLACE INTO memory_applicability_projection VALUES (?,?,?,?,?)',
                        (memory_id, version, canonical_json(list(draft.scope.technologies)),
                         canonical_json(list(draft.scope.domains)), canonical_json(list(view.exclusions))))
@@ -611,8 +605,10 @@ class MemoryStore:
         """Explicit migration chain up to the current schema.
 
         v1 splits legacy `Scope` into the boundary trio; v2 adds the weight
-        cache and `memory_applications`. Takes an online backup before touching
-        anything. `dry_run=True` reports without writing. To roll back, copy the
+        cache and `memory_applications`; v12 removes the project-level access
+        policy and rewrites every `selected_projects` snapshot to `shared`.
+        Takes an online backup before touching anything. `dry_run=True` reports
+        without writing. To roll back, copy the
         `.pre-v<N>-*.db` file over the live database: `restore()` on that file
         would re-run this migration via `initialize()`, so it is disaster
         recovery, not a rollback. Projections are rebuildable from
@@ -621,7 +617,8 @@ class MemoryStore:
         path = Path(path).resolve()
         report = {'dry_run': dry_run, 'from': None, 'to': SCHEMA_VERSION,
                   'rewritten': 0, 'unchanged': 0, 'backup': None,
-                  'projections': 0, 'diagnostics': [], 'mapping': {}}
+                  'projections': 0, 'access_rewrites': 0,
+                  'diagnostics': [], 'mapping': {}}
         connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
         try:
             connection.row_factory = sqlite3.Row
@@ -666,17 +663,32 @@ class MemoryStore:
                 }
                 rewritten.append((row['memory_id'], row['version'], snapshot, draft))
         if dry_run:
+            if version >= 2:
+                counter = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
+                try:
+                    counter.row_factory = sqlite3.Row
+                    for row in counter.execute('SELECT snapshot_json FROM memory_versions'):
+                        data = json.loads(row['snapshot_json'])
+                        access = data.get('access') or {}
+                        if access.get('visibility') == 'selected_projects' or 'allowed_projects' in access:
+                            report['access_rewrites'] += 1
+                finally:
+                    counter.close()
             return report
         connection = sqlite3.connect(path, timeout=5)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute('PRAGMA foreign_keys=ON')
             connection.execute('BEGIN IMMEDIATE')
+            # v12: the access projection loses a column and gains a narrower CHECK, and it
+            # is rebuildable from snapshots, so recreate it rather than ALTER a table whose
+            # CHECK still names the removed value.
+            connection.execute('DROP TABLE IF EXISTS memory_access_projection')
+            connection.execute('DROP TABLE IF EXISTS memory_applicability_projection')
             _exec_script(connection, PROJECTIONS)
             for memory_id, version_no, snapshot, draft in rewritten:
                 connection.execute('UPDATE memory_versions SET snapshot_json=? WHERE memory_id=? AND version=?',
                                    (snapshot, memory_id, version_no))
-                _insert_projections(connection, memory_id, version_no, draft)
             connection.execute('DROP TABLE IF EXISTS memory_scopes')
             columns = {row[1] for row in connection.execute('PRAGMA table_info(memories)')}
             if 'weight' not in columns:
@@ -687,6 +699,22 @@ class MemoryStore:
                 connection.execute("ALTER TABLE memory_versions ADD COLUMN canonical_fingerprint TEXT NOT NULL DEFAULT ''")
             if 'risk' not in columns:
                 connection.execute("ALTER TABLE memory_versions ADD COLUMN risk TEXT NOT NULL DEFAULT 'normal'")
+            # v12: drop the project-level access policy before anything validates a
+            # snapshot, because `selected_projects` is no longer a legal value. Fingerprints
+            # are recomputed by the loop below, which is already the canonical-form step.
+            for row in connection.execute(
+                    'SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall():
+                data = json.loads(row['snapshot_json'])
+                access = data.get('access') or {}
+                if access.get('visibility') != 'selected_projects' and 'allowed_projects' not in access:
+                    continue
+                access = dict(access)
+                access['visibility'] = 'shared'
+                access.pop('allowed_projects', None)
+                data['access'] = access
+                connection.execute('UPDATE memory_versions SET snapshot_json=? WHERE memory_id=? AND version=?',
+                                   (canonical_json(data), row['memory_id'], row['version']))
+                report['access_rewrites'] += 1
             for row in connection.execute('SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall():
                 value = MemoryDraft.model_validate_json(row['snapshot_json'])
                 connection.execute('UPDATE memory_versions SET canonical_fingerprint=?,risk=? '
@@ -722,6 +750,7 @@ class MemoryStore:
                 connection.execute('UPDATE memories SET host=?,model=?,prompt_version=?,evidence_level=? WHERE id=?',
                                    (value.provenance.host, value.model or '',
                                     value.prompt_version or '', value.evidence_level, row['id']))
+            report['projections'] = cls._rebuild_projections(connection)
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -1622,14 +1651,13 @@ class MemoryStore:
             return {}
         marks = ','.join('?' * len(ids))
         rows = connection.execute(
-            'SELECT a.memory_id,a.owner,a.privacy,a.visibility,a.allowed_projects_json,p.exclusions_json '
+            'SELECT a.memory_id,a.owner,a.privacy,a.visibility,p.exclusions_json '
             'FROM memory_access_projection a '
             'JOIN memory_applicability_projection p ON p.memory_id=a.memory_id AND p.version=a.version '
             'JOIN memories m ON m.id=a.memory_id AND m.current_version=a.version '
             f'WHERE a.memory_id IN ({marks})', list(ids))
         views = {row['memory_id']: BoundaryView(
             row['owner'], row['privacy'], row['visibility'],
-            tuple(json.loads(row['allowed_projects_json'])),
             tuple(json.loads(row['exclusions_json']))) for row in rows}
         missing = set(ids) - set(views)
         if missing:

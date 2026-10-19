@@ -28,7 +28,7 @@ Context Forge 的记忆系统从「记住更多」转向「让有来源、适用
 ① 记忆分型（§3.1）
    从：knowledge / rules 两种产物
    到：情节 / 语义 / 程序 / 偏好 四种记忆
-       —— 规则可跨项目使用，但始终保留来源 project；项目访问限制由 AccessPolicy 表达
+       —— 规则可跨项目使用，但始终保留来源 project；项目级访问限制已移除（2026-10-19）
 
 ② 边界三分（§3.3）
    从：Scope 一个概念同时当安全边界和适用条件
@@ -359,7 +359,7 @@ class Scope(MemoryModel):
     paths: tuple[str, ...]
 ```
 
-拆开后，`project` **不再是默认召回边界**（调研 §核心结论 / §建议 2）；项目级访问限制改由显式授权表达：
+拆开后，`project` **不再是默认召回边界**（调研 §核心结论 / §建议 2）。**2026-10-19 产品决策**：跨项目召回是产品核心，不设项目级访问限制——任何记忆都可按 id 读取，只剩主体边界。
 
 ```python
 class MemorySpace(BaseModel):
@@ -368,9 +368,8 @@ class MemorySpace(BaseModel):
     privacy: Literal['shared', 'private'] = 'shared'
 
 class AccessPolicy(BaseModel):
-    """显式授权，与来源和适用条件分离。"""
-    visibility: Literal['owner', 'selected_projects', 'shared'] = 'shared'
-    allowed_projects: tuple[str, ...] = ()
+    """可见性 — 只剩主体边界；项目级显式授权已于 2026-10-19 移除。"""
+    visibility: Literal['owner', 'shared'] = 'shared'
 
 class Provenance(BaseModel):
     """来源上下文 — 只作溯源与排序加分，不决定可见性。"""
@@ -394,25 +393,24 @@ class ApplicabilityScope(BaseModel):
 | `observation`（情节） | **必须**填 `projects` / `sessions`，通常填 `paths` | 它本来就是「某时某地发生了什么」；来源同时参与准入判断 |
 | `claim` / `hypothesis` / `procedure` / `preference` | **同样保留** `projects` / `sessions` / `sources` | 来源永不删除，只从默认过滤路径移出；适用范围由 `ApplicabilityScope` 表达 |
 
-**校验约束**：所有记忆都保留 `Provenance.projects`；来源 project 只用于 `explanation` 溯源展示与弱排序加分，不参与默认硬过滤。项目专属访问由 `AccessPolicy.allowed_projects` 表达。
+**校验约束**：所有记忆都保留 `Provenance.projects`；来源 project 只用于 `explanation` 溯源展示与弱排序加分，不参与默认硬过滤。项目级访问限制已于 2026-10-19 移除，任何记录都可跨项目检索和按 id 读取。
 
 **三层职责对照**（调研原文：「bank 决定安全隔离，metadata 决定局部过滤」）：
 
 | 层 | 硬/软 | 作用 |
 |----|-------|------|
-| `MemorySpace` + `AccessPolicy` | **硬过滤** | `space.owner` 不匹配、`space.privacy='private'` 跨主体、`access.visibility='selected_projects'` 未授权 → 不可见 |
+| `MemorySpace` + `AccessPolicy` | **硬过滤** | `space.owner` 不匹配、`space.privacy='private'` 跨主体 → 不可见 |
 | `Provenance` | **软排序** | 同项目加分；跨项目**不删除**。同时是「迁移理由」的证据来源 |
 | `ApplicabilityScope` | **软排序 + 采用判断** | 技术栈/领域命中 → 加分；`exclusions` 命中 → 直接淘汰 |
 
 **匹配逻辑**（两个阶段不要混用）：
 
-- **淘汰路径（4 条）**：命中即完全不可见，发生在打分前。
+- **淘汰路径（3 条）**：命中即完全不可见，发生在打分前。
 - **候选池准入**：不淘汰，只决定是否进入打分；`instance` 依赖 provenance 是准入条件，不是淘汰条件。
 
 ```
 space.owner 不匹配                              → 淘汰（主体边界）
 space.privacy='private' 且非本 owner            → 淘汰（主体级隐私）
-access.visibility='selected_projects' 且当前项目不在 access.allowed_projects → 淘汰（项目级显式授权）
 scope.exclusions 命中                           → 淘汰
 ────────────────────────────────────────────────────────
 visibility == 'global'                         → 适用分 1.0
@@ -427,7 +425,7 @@ provenance.paths 命中 changed_path             → 来源加分 +0.15
 
 **关键行为差异**：旧逻辑下 platform-web 的记忆在 context-forge 里**看不见**；新逻辑下它**看得见但排得靠后，且必须说明为什么适用**。这正是「脏记忆不该删、该改标签」的结构性根据——跨项目联想是个人长期学习的全部价值。
 
-**`AccessPolicy` 是显式授权**，不是默认。`visibility='selected_projects'` 承接「确实不能跨项目使用」的内容（如含内部 URL、客户名、环境变量的条目），并独立于来源项目保存 `allowed_projects`。
+**`AccessPolicy` 不是项目授权**（2026-10-19 起）。跨项目使用是默认行为：任何记录都可被其它项目检索，也可按 id 读取；`visibility` 只剩 `owner`（主体隔离）与 `shared`。原 `selected_projects` + `allowed_projects` 机制已连同 schema 字段、自动打标与迁移逻辑一起移除，存量记录在 v12 迁移中统一改写为 `shared`。敏感内容的隔离只剩 `space.privacy='private'` 这一层主体边界。
 
 **当前项目技术栈自动检测**，不需要人工标注：
 
@@ -826,7 +824,7 @@ Obsidian Vault 是**用户拥有的数据**，不是供应商格式：
 | `kind: rule`（103 条） | **保留 `project` 作来源**，但从默认过滤路径移出；按内容改 `role` 为 `claim`/`procedure`/`preference`；把技术/领域词迁到 `technologies`/`domains` |
 | `kind: knowledge` 且是具体项目细节 | `role: observation`，**保留** `project`/`paths` 作 `Provenance` |
 | `kind: knowledge` 但结论跨项目通用 | 升为 `role: claim`/`procedure`，**保留 `project` 作来源**，补 `technologies`/`domains`（这是一次离线巩固） |
-| 内容含内部 URL / 客户名 / 凭据 | 标 `space.privacy: private`（主体级不可跨主体），或 `access.visibility: selected_projects` + `allowed_projects`（限定项目） |
+| 内容含凭据 / 内部 URL / 客户名 | 标 `space.privacy: private`（主体级不可跨主体）；项目级限制已移除，跨项目可见 |
 
 **判据**：看这条记忆描述的是「某时某地发生了什么」还是「一般而言什么为真」。文本是否出现项目名不能单独决定类型；所有类型都保留来源。
 
@@ -847,8 +845,7 @@ CREATE TABLE memory_access_projection (
   memory_id TEXT NOT NULL, version INTEGER NOT NULL,
   owner TEXT NOT NULL,
   privacy TEXT NOT NULL CHECK(privacy IN ('shared','private')),
-  visibility TEXT NOT NULL CHECK(visibility IN ('owner','selected_projects','shared')),
-  allowed_projects_json TEXT NOT NULL CHECK(json_valid(allowed_projects_json)),
+  visibility TEXT NOT NULL CHECK(visibility IN ('owner','shared')),
   PRIMARY KEY(memory_id, version)
 );
 CREATE TABLE memory_applicability_projection (
@@ -890,12 +887,12 @@ CREATE TABLE memory_applicability_projection (
 | 风险 | 对策 |
 |------|------|
 | **幻觉沉淀** | `verified` 强制 tool 摘录；模型 confidence 永不升 `evidence_level`；§4.4 异常审计候选 |
-| **错误迁移**（本次改造**新增的最大风险**） | 跨项目召回开宽后，别的项目的结论被误用到当前项目。对策：§3.3 的 `AccessPolicy.visibility='selected_projects'` 显式授权、§4.3 的迁移理由强制展示、「仅文本相关」时显式降级警告、§4.6 的 G3 错误迁移率作为**优先级最高的**验证指标 |
+| **错误迁移**（本次改造**新增的最大风险**） | 跨项目召回开宽后，别的项目的结论被误用到当前项目。项目级授权已移除，只能靠 §4.3 的迁移理由强制展示、「仅文本相关」时显式降级警告、§4.6 的 G3 错误迁移率作为**优先级最高的**验证指标来纠偏 |
 | **知识污染** | 三态 applicability + 关系显式 + 一键撤销；`ProtectedMemory` 保护人工条目 |
 | **曝光自我强化** | §4.4 硬原则「曝光 ≠ 强化」；`presented`/`referenced` 只计数不加权 |
 | **打分权重拍脑袋** | 权重是**校准旋钮**不是模型参数——真实使用会偏离初始假设，留 `forge doctor` 的权重诊断入口；**必须过 §4.6 的实验**才上线；不预设 ML |
 | **打扰成本** | 沉淀过程不打扰用户；合并/冲突只生成可选复核项，批量呈现 |
-| **隐私与凭据** | transcript 解析前本地脱敏，默认不上传；`space.privacy='private'` 承接不可跨主体内容，`access.visibility='selected_projects'` 承接限定项目内容 |
+| **隐私与凭据** | transcript 解析前本地脱敏，默认不上传；`space.privacy='private'` 承接不可跨主体内容（项目级限定已移除） |
 | **冷启动检索质量差** | FTS5 打不过向量检索是已知边界。靠证据层和卫生能力补，不硬碰硬；§2.2 明确向量检索不在本期 |
 | **自动归因错误** | 只有 `attribution='confirmed'` 才能修改记忆状态；无法归因时只记录，不提升证据、不降权 |
 | **Obsidian 生态碎片化** | Markdown 是最低共同点，不依赖特定插件；链接/目录约定可配置 |

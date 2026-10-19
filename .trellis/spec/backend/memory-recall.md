@@ -1,6 +1,6 @@
 # Memory Recall Contracts
 
-- Recall filters current status, suppression and the four boundary eliminations (owner, privacy, project authorisation, exclusions) before returning the requested number of records. Source project is provenance, not a filter.
+- Recall filters current status, suppression and the three boundary eliminations (owner, privacy, exclusions) before returning the requested number of records. Source project is provenance, not a filter; the project-level access policy was removed in schema v12, so every record is reachable across projects and by id.
 - A result unit retains the conclusion together with applicability, sources, relationships and unresolved conflicts.
 - `get` may inspect historical versions; user-facing search returns current active or conflicted records only.
 - Retrieval stages are separate events: retrieved, tool-returned, presented, referenced, applied and validated.

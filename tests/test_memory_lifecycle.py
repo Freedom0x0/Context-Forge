@@ -75,7 +75,9 @@ def test_scope_correction_changes_visibility(tmp_path):
     record = service.publish(candidate)
     scoped = service.scope(
         record.id,
-        AccessPolicy(visibility="selected_projects", allowed_projects=("two",)),
+        AccessPolicy(visibility="owner"),
         expected_version=record.version, idempotency_key="scope-1")
-    assert store.search("boundary", project="one") == []
+    assert store.get(record.id).draft.access.visibility == "owner"
+    # Project-level access is gone: changing the project no longer changes visibility.
+    assert store.search("boundary", project="one")[0].version == scoped.version
     assert store.search("boundary", project="two")[0].version == scoped.version

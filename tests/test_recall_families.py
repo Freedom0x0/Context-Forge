@@ -1,10 +1,10 @@
 from context_forge.memory import MemoryStore
-from context_forge.memory_models import AccessPolicy, MemoryDraft
+from context_forge.memory_models import AccessPolicy, MemoryDraft, MemorySpace
 from context_forge.memory_recall import MemoryRecall, group_for_presentation
 
 
-def put(store, memory_id, body, access=AccessPolicy()):
-    return store.put(memory_id, MemoryDraft(body=body, status="active", access=access),
+def put(store, memory_id, body, access=AccessPolicy(), space=MemorySpace()):
+    return store.put(memory_id, MemoryDraft(body=body, status="active", access=access, space=space),
                      expected_version=0, idempotency_key=memory_id, reason="test")
 
 
@@ -13,7 +13,7 @@ def test_family_grouping_is_after_candidates_and_boundary_compatible(tmp_path):
     put(store, "a", "permission cache invalidation must happen together")
     put(store, "b", "permission cache invalidation must happen together")
     put(store, "private", "permission cache invalidation must happen together",
-        AccessPolicy(visibility="selected_projects", allowed_projects=("demo",)))
+        space=MemorySpace(privacy="private"))
     response = MemoryRecall(store).search("permission cache invalidation", project="demo")
     assert len(response) == 3
     assert ("a", "b") in response.families

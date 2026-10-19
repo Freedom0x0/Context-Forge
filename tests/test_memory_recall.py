@@ -26,21 +26,22 @@ def add(store, memory_id, body, *, project="demo", applicability=(), access=None
     )
 
 
-def test_recall_returns_conditions_and_respects_access(tmp_path):
+def test_recall_returns_conditions_and_crosses_projects(tmp_path):
     store = MemoryStore.initialize(tmp_path / "memory.db")
     add(store, "one", "transaction boundary", applicability=(
         Applicability(condition="only for external integrations", result="unknown"),
     ))
     add(store, "two", "transaction boundary", project="other")
-    add(store, "locked", "transaction boundary",
-        access=AccessPolicy(visibility="selected_projects", allowed_projects=("other",)))
+    add(store, "from-other", "transaction boundary", project="other")
     results = MemoryRecall(store).search("transaction", project="demo")
-    assert {result.memory.id for result in results} == {"one", "two"}
+    assert {result.memory.id for result in results} == {"one", "two", "from-other"}
     payload = next(result for result in results if result.memory.id == "one").as_dict()
     assert payload["applicability"][0]["result"] == "unknown"
     assert all(label in payload["explanation"]
                for label in ("为什么命中", "来源与迁移", "适用边界", "风险提示"))
     assert 'unknown="only for external integrations"' in payload["explanation"]
+    # Cross-project recall is the product: a record from another project is readable by id too.
+    assert MemoryRecall(store).get("two") is not None
 
 
 def test_retrieval_stages_are_idempotent_and_do_not_change_memory(tmp_path):
