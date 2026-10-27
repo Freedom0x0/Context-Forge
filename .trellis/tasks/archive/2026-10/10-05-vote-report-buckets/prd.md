@@ -18,6 +18,7 @@
 - `MemoryStore.bucket_report(months=6, min_sample=20)`，三轴：`host`、`model+prompt_version`、
   `evidence_level`。每桶给 `memories / against_memories / against_events / support_events`。
   - 反对 = `signal LIKE 'vote:%'`（harmful / irrelevant / revoked）
+    **2026-10-27 后续变更**：反对票带出票人（`vote:<outcome>:<actor>`，schema v13），平反票 `restored` 不计入反对；报表新增 `against_events_by_actor`。
   - 赞成 = `signal IN ('stage:applied','stage:validated')`
 - **分母纪律**：样本 < `min_sample` 时 `against_rate` 给 `None` + `note='样本不足…只给绝对数'`。
   "2 条里 1 条反对"不配拥有一个看起来能据此行动的百分比。

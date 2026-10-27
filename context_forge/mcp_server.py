@@ -66,19 +66,21 @@ def record_memory_feedback(memory_id: str, outcome: str, *, note: str = "",
     """Record model-observed feedback on a Gen2 memory.
 
     `harmful` parks the record as `conflicted` (pending a human review) via the
-    absorbing-status guard in `MemoryStore._put`; it never deletes text. The
-    idempotency key is derived from `request_id` when the host supplies one, so
-    a retried call is a no-op instead of a second event.
-    """
-    import uuid
+    absorbing-status guard in `MemoryStore._put`; it never deletes text.
 
+    `request_id` is required: without it every call minted a fresh idempotency
+    key, so a retried call counted twice -- and a retried call is exactly what a
+    flaky host does. The sibling `context_forge_memory_mark` has always required
+    one; two tools on the same store must not disagree about idempotency.
+    """
     store = _memory()
     record = store.get(memory_id)
     if record is None:
         raise KeyError(memory_id)
-    key = f"mcp:feedback:{request_id}" if request_id else f"mcp:feedback:{uuid.uuid4()}"
+    if not request_id:
+        raise ValueError("request_id is required (a retry must not double-count)")
     updated = store.record_feedback(memory_id, outcome=outcome, note=note,
-                                    idempotency_key=key, actor="model")
+                                    idempotency_key=f"mcp:feedback:{request_id}", actor="model")
     return {"memory_id": updated.id, "version": updated.version,
             "status": updated.draft.status, "weight": store.weight(updated.id)}
 
@@ -179,14 +181,151 @@ def create_server():
 
     @server.tool()
     def context_forge_memory_feedback(memory_id: str, outcome: str,
-                                      note: str = "", request_id: str = "") -> dict:
+                                      request_id: str, note: str = "") -> dict:
         """Report revoked / harmful / irrelevant on one long-term memory.
 
         `harmful` parks the record as `conflicted` for a human review — a host
         can flag, never clear a conflict. Suppression and restoration are
         terminal-only (`forge memory suppress` / `restore`), not exposed here.
+
+        `request_id` is required: it makes a retried call a no-op instead of a
+        second vote on the same memory.
         """
+        from .memory import FEEDBACK_OUTCOMES
+
+        if outcome not in FEEDBACK_OUTCOMES:
+            raise ValueError(f'outcome must be one of {", ".join(FEEDBACK_OUTCOMES)}')
         return record_memory_feedback(memory_id, outcome, note=note, request_id=request_id)
+
+    def _correction_target(memory_id: str, version: int = 0):
+        """Resolve a memory and the lifecycle, for the correction tools below."""
+        from .memory_lifecycle import MemoryLifecycle
+
+        store = _memory()
+        record = store.get(memory_id, version or None)
+        if record is None:
+            raise KeyError(memory_id)
+        return store, record, MemoryLifecycle(store)
+
+    @server.tool()
+    def context_forge_memory_scope(memory_id: str, visibility: str,
+                                   version: int = 0) -> dict:
+        """Change who may see a memory, without deleting it.
+
+        `visibility` is `owner` or `shared`. The host may narrow access; it may not
+        widen it -- that is the subject's boundary, not the host's call.
+        """
+        from .memory import access_broader
+        from .memory_lifecycle import MemoryLifecycle
+        from .memory_models import AccessPolicy
+
+        if visibility not in ('owner', 'shared'):
+            raise ValueError('visibility must be owner or shared')
+        store = _memory()
+        record = store.get(memory_id, version or None)
+        if record is None:
+            raise KeyError(memory_id)
+        access = AccessPolicy(visibility=visibility)
+        if access_broader(record.draft, record.draft.model_copy(update={'access': access})):
+            raise ValueError('the host may narrow access but not widen it')
+        revised = MemoryLifecycle(store).scope(
+            memory_id, access, expected_version=record.version,
+            idempotency_key=f"mcp:scope:{memory_id}:{record.version}",
+            reason='host narrowed access', actor='model')
+        return {'memory_id': revised.id, 'version': revised.version,
+                'visibility': revised.draft.access.visibility}
+
+    @server.tool()
+    def context_forge_memory_support(memory_id: str, excerpt: str, identity: str = "",
+                                     kind: str = "observation", version: int = 0) -> dict:
+        """Attach supporting evidence to a memory.
+
+        The evidence level rises at most to `supported`: a host may never promote a
+        memory to `verified`, which only a real tool observation earns.
+        """
+        from .memory_lifecycle import source_from_text
+
+        store, record, lifecycle = _correction_target(memory_id, version)
+        source = source_from_text(excerpt, identity=identity, kind=kind)
+        revised = lifecycle.support(memory_id, source, reason='host supporting evidence',
+                                    expected_version=record.version,
+                                    idempotency_key=f"mcp:support:{memory_id}:{record.version}",
+                                    actor='model')
+        return {'memory_id': revised.id, 'version': revised.version,
+                'evidence_level': revised.draft.evidence_level,
+                'proof_count': revised.draft.proof_count}
+
+    @server.tool()
+    def context_forge_memory_weaken(memory_id: str, condition: str, excerpt: str,
+                                    identity: str = "", version: int = 0) -> dict:
+        """Narrow when a memory applies, without deleting it.
+
+        Use this when the memory is right but its applicability was too broad.
+        """
+        from .memory_lifecycle import source_from_text
+
+        store, record, lifecycle = _correction_target(memory_id, version)
+        source = source_from_text(excerpt, identity=identity, kind='observation')
+        revised = lifecycle.weaken(memory_id, source, condition, reason='host narrowing',
+                                   expected_version=record.version,
+                                   idempotency_key=f"mcp:weaken:{memory_id}:{record.version}",
+                                   actor='model')
+        return {'memory_id': revised.id, 'version': revised.version,
+                'applicability': len(revised.draft.applicability)}
+
+    @server.tool()
+    def context_forge_memory_extend(memory_id: str, target_id: str, kind: str,
+                                    excerpt: str, identity: str = "",
+                                    version: int = 0) -> dict:
+        """Link a memory to the one it refines, or that is an exception to it.
+
+        `kind` is `refines` or `exception_to`. The target is not rewritten.
+        """
+        from .memory_lifecycle import source_from_text
+
+        store, record, lifecycle = _correction_target(memory_id, version)
+        source = source_from_text(excerpt, identity=identity, kind='observation')
+        revised = lifecycle.extend(memory_id, target_id=target_id, kind=kind, source=source,
+                                   reason='host extension', expected_version=record.version,
+                                   idempotency_key=f"mcp:extend:{memory_id}:{record.version}",
+                                   actor='model')
+        return {'memory_id': revised.id, 'version': revised.version, 'kind': kind}
+
+    @server.tool()
+    def context_forge_memory_supersede(memory_id: str, body: str, project: str = "",
+                                       version: int = 0) -> dict:
+        """Replace a memory with a new one. The old one becomes `stale`, not deleted."""
+        from .memory_lifecycle import candidate_from_body
+
+        store, record, lifecycle = _correction_target(memory_id, version)
+        replacement = candidate_from_body(f"{memory_id}:v{record.version + 1}", body,
+                                          project=project or None)
+        created = lifecycle.supersede(memory_id, replacement, expected_version=record.version,
+                                      idempotency_key=f"mcp:supersede:{memory_id}:{record.version}",
+                                      reason='host supersession', actor='model')
+        return {'memory_id': created.id, 'version': created.version,
+                'superseded': memory_id}
+
+    @server.tool()
+    def context_forge_memory_overturn(memory_id: str, body: str, excerpt: str,
+                                      identity: str = "", project: str = "",
+                                      version: int = 0) -> dict:
+        """Record that a memory is wrong: a contradicting memory is created.
+
+        The refuted memory is never deleted and never overwritten -- the conflict
+        stays visible until a human settles it.
+        """
+        from .memory_lifecycle import candidate_from_body, source_from_text
+
+        store, record, lifecycle = _correction_target(memory_id, version)
+        source = source_from_text(excerpt, identity=identity, kind='observation')
+        replacement = candidate_from_body(f"{memory_id}:overturn:{record.version}", body,
+                                          project=project or None, sources=(source,))
+        created = lifecycle.overturn(memory_id, replacement, source, reason='host overturn',
+                                     expected_version=record.version,
+                                     idempotency_key=f"mcp:overturn:{memory_id}:{record.version}",
+                                     actor='model')
+        return {'memory_id': created.id, 'version': created.version, 'contradicts': memory_id}
 
     @server.tool()
     def context_forge_memory_apply(memory_id: str, task_id: str, action: str,

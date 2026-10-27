@@ -33,10 +33,16 @@ class Context:
 
 def _retention(ctx: Context) -> None:
     from .config import load_settings
+    from .episodes import EpisodeCollector
 
     settings = load_settings()
     days = settings.retention_days if settings else 30
-    ctx.queue.retention_apply(days, dry_run=False)
+    ctx.queue.stamp_retention_deadlines(days)
+    # Through the collector, not the store: deleting an episode marks the memory
+    # sources it fed as `source_deleted` and keeps the minimal audit facts. The
+    # store's own path skipped that, so the same deletion meant two different
+    # things depending on who ran it.
+    EpisodeCollector(ctx.queue).apply_retention(days, memory_store=ctx.memory)
 
 
 def _month_keys(today: date | None = None) -> tuple[str, str]:

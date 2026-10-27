@@ -5,7 +5,7 @@ from hashlib import sha256
 from typing import Iterable
 
 from .domain import SessionArtifacts
-from .memory import MemoryStore, ProtectedMemory, VersionConflict, now
+from .memory import MemoryStore, ProtectedMemory, VersionConflict, digest, now
 from .memory_effectiveness import MemoryEffectiveness
 from .memory_merge import MemoryMerge, MergeCandidate, normalized_text, token_similarity
 from .memory_models import (
@@ -19,6 +19,35 @@ CONSOLIDATION_THRESHOLD = 0.6
 # duplicates in one afternoon — must not be canonicalized in a single silent sweep; the remainder
 # is reported and picked up by the next pass.
 AUTO_TIER_LIMIT = 100
+
+
+def source_from_text(excerpt: str, *, identity: str = '', kind: str = 'observation',
+                     reference: str = '') -> Source:
+    """Build a source from a caller-supplied excerpt.
+
+    Without an explicit identity the source is content-addressed, like
+    `memory_sources`: the same words are the same source, so repeating them
+    cannot pass as a second independent observation. One constructor for both
+    entry points -- a CLI flag and an MCP argument must not be able to produce
+    different evidence records for the same correction.
+    """
+    if not identity:
+        identity = f"{kind}:{digest(excerpt)[:16]}"
+    return Source(identity=identity, kind=kind, excerpt=excerpt, reference=reference)
+
+
+def candidate_from_body(memory_id: str, body: str, *, project: str | None = None,
+                        role: str = 'claim', status: str = 'active',
+                        sources: tuple[Source, ...] = (),
+                        provenance: Provenance | None = None) -> Candidate:
+    """Build a replacement memory from a body, for supersession and overturn."""
+    return Candidate(
+        memory_id=memory_id,
+        draft=MemoryDraft(body=body, status=status, role=role, sources=sources,
+                           provenance=provenance if provenance is not None
+                           else Provenance(projects=(project,) if project else ())),
+        relations=(),
+    )
 
 # The four things a human may settle on for one merge candidate. `keep` changes nothing in the
 # library but is still ledgered: without it the opposition rate has no denominator.
@@ -299,7 +328,8 @@ class MemoryLifecycle:
                status: str | None = None, access: AccessPolicy | None = None,
                provenance: Provenance | None = None,
                applicability_scope: ApplicabilityScope | None = None,
-               reason: str, expected_version: int, idempotency_key: str):
+               reason: str, expected_version: int, idempotency_key: str,
+               actor: str = 'human'):
         record = self.store.get(memory_id)
         if record is None:
             raise KeyError(memory_id)
@@ -317,40 +347,71 @@ class MemoryLifecycle:
         updates["last_confirmed_at"] = now()
         draft = record.draft.model_copy(update=updates)
         return self.store.put(memory_id, draft, expected_version=expected_version,
-                              idempotency_key=idempotency_key, actor="human", reason=reason)
+                              idempotency_key=idempotency_key, actor=actor, reason=reason)
 
     def suppress(self, memory_id: str, *, expected_version: int, idempotency_key: str,
                  reason: str = "human suppression"):
-        return self.revise(memory_id, status="disabled", expected_version=expected_version,
-                           idempotency_key=idempotency_key, reason=reason)
+        """Stop recalling a memory, and record the opposition.
+
+        The verdict is the point: a suppression is a strong objection, so it has to
+        reach the weight and the vote buckets. It used to be only a status change,
+        which left the opposition invisible to every report.
+        """
+        revised = self.revise(memory_id, status="disabled", expected_version=expected_version,
+                              idempotency_key=idempotency_key, reason=reason)
+        self.store.record_feedback(memory_id, outcome="revoked", note=reason,
+                                   idempotency_key=idempotency_key + ":vote", actor="human")
+        return revised
 
     def restore(self, memory_id: str, *, expected_version: int, idempotency_key: str,
                 reason: str = "human restoration"):
-        return self.revise(memory_id, status="active", expected_version=expected_version,
-                           idempotency_key=idempotency_key, reason=reason)
+        """Return a suppressed / conflicted memory to `active`, and acquit it.
+
+        The acquittal cancels one revocation. Without it a suppressed-then-restored
+        memory kept the suppression's negative weight forever.
+        """
+        revised = self.revise(memory_id, status="active", expected_version=expected_version,
+                              idempotency_key=idempotency_key, reason=reason)
+        self.store.record_feedback(memory_id, outcome="restored", note=reason,
+                                   idempotency_key=idempotency_key + ":vote", actor="human")
+        return revised
 
     def scope(self, memory_id: str, access: AccessPolicy, *, expected_version: int,
-              idempotency_key: str, reason: str = "human access correction"):
+              idempotency_key: str, reason: str = "human access correction",
+              actor: str = 'human'):
         return self.revise(memory_id, access=access, expected_version=expected_version,
-                           idempotency_key=idempotency_key, reason=reason)
+                           idempotency_key=idempotency_key, reason=reason, actor=actor)
 
     def supersede(self, memory_id: str, replacement: Candidate, *, expected_version: int,
-                  idempotency_key: str, reason: str = "human supersession"):
-        created = self.publish(replacement, actor="human")
+                  idempotency_key: str, reason: str = "human supersession",
+                  actor: str = 'human'):
+        created = self.publish(replacement, actor=actor)
         relation = Relation(target_id=created.id, target_version=created.version, kind="supersedes")
         current = self.store.get(memory_id)
         if current is None or current.version != expected_version:
             raise VersionConflict(memory_id)
         revised = current.draft.model_copy(update={"status": "stale"})
         self.store.put(memory_id, revised, expected_version=expected_version,
-                       idempotency_key=idempotency_key, actor="human", reason=reason,
+                       idempotency_key=idempotency_key, actor=actor, reason=reason,
                        relations=(relation,))
         return created
 
     def support(self, memory_id: str, source: Source, *, reason: str, expected_version: int,
-                idempotency_key: str):
-        """Append supporting evidence; the level rises at most to `supported`."""
+                idempotency_key: str, actor: str = 'human'):
+        """Append supporting evidence; the level rises at most to `supported`.
+
+        `proof_count` counts *independent* observations, so a source the record
+        already carries is not evidence again -- neither the same identity nor
+        the same words under a new one. Repeating one excerpt must not raise
+        the evidence strength.
+        """
         record = self._current(memory_id, expected_version)
+        known_identities = {item.identity for item in record.draft.sources}
+        known_excerpts = {item.excerpt for item in record.draft.sources}
+        independent = (source.identity not in known_identities
+                       and source.excerpt not in known_excerpts)
+        if not independent:
+            return record
         level = 'supported' if record.draft.evidence_level in {'unknown', 'unverified', 'supported'} \
             else record.draft.evidence_level
         draft = record.draft.model_copy(update={
@@ -359,10 +420,10 @@ class MemoryLifecycle:
             'evidence_level': level,
         })
         return self.store.put(memory_id, draft, expected_version=expected_version,
-                              idempotency_key=idempotency_key, actor='model', reason=reason)
+                              idempotency_key=idempotency_key, actor=actor, reason=reason)
 
     def weaken(self, memory_id: str, source: Source, condition: str, *, reason: str,
-               expected_version: int, idempotency_key: str):
+               expected_version: int, idempotency_key: str, actor: str = 'human'):
         """Narrow the applicability surface with a decided-against condition."""
         record = self._current(memory_id, expected_version)
         applicability = record.draft.applicability + (
@@ -372,10 +433,10 @@ class MemoryLifecycle:
             'applicability': applicability,
         })
         return self.store.put(memory_id, draft, expected_version=expected_version,
-                              idempotency_key=idempotency_key, actor='model', reason=reason)
+                              idempotency_key=idempotency_key, actor=actor, reason=reason)
 
     def extend(self, memory_id: str, *, target_id: str, kind: str, source: Source,
-               reason: str, expected_version: int, idempotency_key: str):
+               reason: str, expected_version: int, idempotency_key: str, actor: str = 'human'):
         """Record a `refines` / `exception_to` link; the target is not rewritten."""
         if kind not in {'refines', 'exception_to'}:
             raise ValueError('extension kind must be refines or exception_to')
@@ -387,11 +448,12 @@ class MemoryLifecycle:
                             evidence_ids=(source.identity,))
         draft = record.draft.model_copy(update={'sources': record.draft.sources + (source,)})
         return self.store.put(memory_id, draft, expected_version=expected_version,
-                              idempotency_key=idempotency_key, actor='model', reason=reason,
+                              idempotency_key=idempotency_key, actor=actor, reason=reason,
                               relations=(relation,))
 
     def overturn(self, memory_id: str, replacement: Candidate, source: Source, *,
-                 reason: str, expected_version: int, idempotency_key: str):
+                 reason: str, expected_version: int, idempotency_key: str,
+                 actor: str = 'human'):
         """Create a contradicting memory; the refuted one is never deleted."""
         refuted = self._current(memory_id, expected_version)
         relation = Relation(target_id=memory_id, target_version=refuted.version,
@@ -400,7 +462,7 @@ class MemoryLifecycle:
             'sources': replacement.draft.sources + (source,),
         })
         return self.store.put(replacement.memory_id, draft, expected_version=0,
-                              idempotency_key=idempotency_key, actor='model', reason=reason,
+                              idempotency_key=idempotency_key, actor=actor, reason=reason,
                               relations=replacement.relations + (relation,))
 
     def consolidation_candidates(self, min_sources: int = 3) -> list[ConsolidationProposal]:

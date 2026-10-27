@@ -273,8 +273,15 @@ def check_precipitation_state() -> tuple[str, bool, str]:
     issues = []
     if queue_path.exists():
         store = JobStore(queue_path)
+        # A failure counts only while it is unresolved: a later successful receipt for
+        # the same episode closes it. Counting every failure forever meant one network
+        # timeout turned this check red for good.
         failed = store.db.execute(
-            "SELECT COUNT(*) FROM finalization_receipts WHERE status='failed'").fetchone()[0]
+            "SELECT COUNT(*) FROM finalization_receipts f WHERE f.status='failed' "
+            "AND NOT EXISTS (SELECT 1 FROM finalization_receipts s "
+            "WHERE s.session_id=f.session_id AND s.segment=f.segment "
+            "AND s.status IN ('committed','projected') AND s.created_at>=f.created_at)"
+        ).fetchone()[0]
         pending = store.db.execute(
             "SELECT COUNT(*) FROM finalization_receipts WHERE status IN ('extracting','planned')").fetchone()[0]
         if failed:

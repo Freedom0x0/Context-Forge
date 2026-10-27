@@ -63,8 +63,14 @@ def handle_payload(payload: dict, *, store: JobStore | None = None) -> SessionLi
             )
         return None
     transcript = Path(str(payload.get("transcript_path", ""))).expanduser()
-    if not session_id or not transcript.is_file():
-        raise ValueError("session_id and an existing transcript_path are required")
+    if not session_id:
+        raise ValueError("session_id is required")
+    if not transcript.is_file():
+        # Claude Code fires SessionEnd for non-interactive runs (`claude mcp list`,
+        # one-shot prompts) that never write a transcript. There is nothing to
+        # finalize, so this is a no-op -- raising here prints a hook failure into
+        # every such command. The watcher picks the file up if it ever appears.
+        return None
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     event_id = str(payload.get("event_id") or f"claude:{hashlib.sha256(canonical.encode()).hexdigest()}")
     if store is None:
@@ -88,6 +94,12 @@ def handle_payload(payload: dict, *, store: JobStore | None = None) -> SessionLi
         final_line_count=payload.get("final_line_count"),
         reason=str(payload.get("reason") or name),
     )
+    from ..watcher import excluded_cwd
+
+    if excluded_cwd(str(payload.get("cwd") or "")):
+        # A sibling tool's own session: the watcher skips these too, and the two
+        # paths must agree on what counts as the user's work.
+        return None
     store.ingest_session_event(event)
     collector = EpisodeCollector(store)
     collector.collect(session_id, transcript,

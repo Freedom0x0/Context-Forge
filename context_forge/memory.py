@@ -147,18 +147,26 @@ PROVENANCE_PATH_BONUS = 0.15
 # P3 feedback weight table (technical design 4.4). Exposure stages carry no
 # entry on purpose: being shown is not being used.
 WEIGHT_TABLE = {'applied': 0.3, 'validated': 0.5, 'revoked': -0.8,
-                'harmful': -1.0, 'irrelevant': -0.2}
+                'harmful': -1.0, 'irrelevant': -0.2, 'restored': 0.0}
 UNUSED_DECAY_DAYS = 90
 UNUSED_DECAY_WEIGHT = -0.1
+# What anyone may record: objections. A restoration is a human's acquittal and is
+# only reachable through `forge memory restore`, never through the feedback API.
 FEEDBACK_OUTCOMES = ('revoked', 'harmful', 'irrelevant')
+HUMAN_FEEDBACK_OUTCOMES = FEEDBACK_OUTCOMES + ('restored',)
 DEFAULT_WEIGHT = 1.0
+# The stored weight is a ranking calibration, not a score. Unbounded it let one
+# memory's repeated verdicts dominate a dimension: 20 harmful votes drove the
+# weight to -19.0, which is -20 on the feedback axis against a 1.0 match axis.
+WEIGHT_FLOOR = -2.0
+WEIGHT_CEILING = 2.0
 
 
 @dataclass(frozen=True)
 class WeightEvent:
     """One normalized, attributable signal feeding `apply_feedback_weight`."""
 
-    kind: Literal['applied', 'validated', 'revoked', 'harmful', 'irrelevant']
+    kind: Literal['applied', 'validated', 'revoked', 'harmful', 'irrelevant', 'restored']
     at: str | None = None
 
 
@@ -169,6 +177,15 @@ def apply_feedback_weight(record: MemoryRecord, events: Sequence[WeightEvent],
     Only the adopted / validated / negative-feedback kinds exist in
     `WEIGHT_TABLE`. Long-term non-use accrues a small decay unless the memory
     was ever adopted or validated.
+
+    A restoration weighs nothing: the acquittal works because the correction
+    writes a new version, and the weight is the evidence attached to the
+    current one -- the withdrawn objection no longer counts. The event stays
+    as the audit mark that the objection was withdrawn.
+
+    The result is a delta on `DEFAULT_WEIGHT`, clamped so the stored weight
+    stays inside `[WEIGHT_FLOOR, WEIGHT_CEILING]`. Without the clamp a repeated
+    verdict compounds without bound.
     """
     total = sum(WEIGHT_TABLE[event.kind] for event in events)
     if not any(event.kind in {'applied', 'validated'} for event in events):
@@ -178,7 +195,9 @@ def apply_feedback_weight(record: MemoryRecord, events: Sequence[WeightEvent],
         moment = at or datetime.now(timezone.utc)
         if (moment - created).days >= UNUSED_DECAY_DAYS:
             total += UNUSED_DECAY_WEIGHT
-    return total
+    floor = WEIGHT_FLOOR - DEFAULT_WEIGHT
+    ceiling = WEIGHT_CEILING - DEFAULT_WEIGHT
+    return max(floor, min(ceiling, total))
 
 
 @dataclass(frozen=True)
@@ -606,7 +625,10 @@ class MemoryStore:
 
         v1 splits legacy `Scope` into the boundary trio; v2 adds the weight
         cache and `memory_applications`; v12 removes the project-level access
-        policy and rewrites every `selected_projects` snapshot to `shared`.
+        policy: `selected_projects` becomes `shared`, and the removed
+        `allowed_projects` key is dropped from every snapshot (the current model
+        forbids unknown keys). `owner` stays `owner` -- only the removed value is
+        rewritten.
         Takes an online backup before touching anything. `dry_run=True` reports
         without writing. To roll back, copy the
         `.pre-v<N>-*.db` file over the live database: `restore()` on that file
@@ -617,7 +639,7 @@ class MemoryStore:
         path = Path(path).resolve()
         report = {'dry_run': dry_run, 'from': None, 'to': SCHEMA_VERSION,
                   'rewritten': 0, 'unchanged': 0, 'backup': None,
-                  'projections': 0, 'access_rewrites': 0,
+                  'projections': 0, 'access_rewrites': 0, 'access_key_drops': 0,
                   'diagnostics': [], 'mapping': {}}
         connection = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
         try:
@@ -670,8 +692,10 @@ class MemoryStore:
                     for row in counter.execute('SELECT snapshot_json FROM memory_versions'):
                         data = json.loads(row['snapshot_json'])
                         access = data.get('access') or {}
-                        if access.get('visibility') == 'selected_projects' or 'allowed_projects' in access:
+                        if access.get('visibility') == 'selected_projects':
                             report['access_rewrites'] += 1
+                        if 'allowed_projects' in access:
+                            report['access_key_drops'] += 1
                 finally:
                     counter.close()
             return report
@@ -706,15 +730,23 @@ class MemoryStore:
                     'SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall():
                 data = json.loads(row['snapshot_json'])
                 access = data.get('access') or {}
-                if access.get('visibility') != 'selected_projects' and 'allowed_projects' not in access:
+                narrowed = access.get('visibility') == 'selected_projects'
+                legacy_key = 'allowed_projects' in access
+                if not narrowed and not legacy_key:
                     continue
                 access = dict(access)
-                access['visibility'] = 'shared'
                 access.pop('allowed_projects', None)
+                # v11 serialised the empty default, so `allowed_projects` was present on
+                # every record. Treating that key as "needs rewriting" promoted `owner`
+                # records to `shared`; only the removed value may change visibility.
+                if narrowed:
+                    access['visibility'] = 'shared'
+                    report['access_rewrites'] += 1
+                else:
+                    report['access_key_drops'] += 1
                 data['access'] = access
                 connection.execute('UPDATE memory_versions SET snapshot_json=? WHERE memory_id=? AND version=?',
                                    (canonical_json(data), row['memory_id'], row['version']))
-                report['access_rewrites'] += 1
             for row in connection.execute('SELECT memory_id,version,snapshot_json FROM memory_versions').fetchall():
                 value = MemoryDraft.model_validate_json(row['snapshot_json'])
                 connection.execute('UPDATE memory_versions SET canonical_fingerprint=?,risk=? '
@@ -751,6 +783,15 @@ class MemoryStore:
                                    (value.provenance.host, value.model or '',
                                     value.prompt_version or '', value.evidence_level, row['id']))
             report['projections'] = cls._rebuild_projections(connection)
+            # v13: the vote key carries the actor. Rows written before that did not
+            # record it, so they are rewritten to `unknown` rather than silently
+            # counted as one side. SQLite's `instr` takes two arguments only, so the
+            # "no second colon" test is spelled out.
+            connection.execute(
+                "UPDATE signal_counts SET signal=signal || ':unknown' "
+                "WHERE signal LIKE 'vote:%' AND "
+                "replace(substr(signal, length('vote:') + 1), ':', '') = "
+                "substr(signal, length('vote:') + 1)")
             connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             connection.execute('COMMIT')
             connection.execute('PRAGMA journal_mode=WAL')
@@ -1142,16 +1183,25 @@ class MemoryStore:
         if record is None:
             return
         weight = DEFAULT_WEIGHT + apply_feedback_weight(
-            record, self._weight_events(connection, memory_id, record.version))
+            record, self._weight_events(connection, memory_id, record.version,
+                                        user_owned=record.draft.user_owned))
         connection.execute('UPDATE memories SET weight=? WHERE id=?', (weight, memory_id))
 
     @staticmethod
     def _weight_events(connection: sqlite3.Connection, memory_id: str,
-                       version: int) -> list[WeightEvent]:
+                       version: int, *, user_owned: bool = False) -> list[WeightEvent]:
         """Attributable signals only; exposure stages are filtered out here.
 
         Applied / validated stages count once a confirmed application pins the
         action to an outcome. Negative feedback is recorded explicitly.
+
+        Two rules stop one verdict from compounding:
+        - a version can be marked harmful once. The first harmful verdict is
+          what flips the record to `conflicted`; repeating it on the same
+          version must not keep pushing the weight down.
+        - a human-owned memory only moves on a human verdict. A model may not
+          demote it, and may not park it either: `user_owned` is protected
+          against the status change as well.
         """
         events: list[WeightEvent] = []
         confirmed = connection.execute(
@@ -1161,9 +1211,19 @@ class MemoryStore:
             events.extend(WeightEvent(row['stage']) for row in connection.execute(
                 "SELECT stage FROM retrieval_events WHERE memory_id=? AND version=? "
                 "AND stage IN ('applied','validated') ORDER BY id", (memory_id, version)))
-        events.extend(WeightEvent(json.loads(row['payload_json'])['outcome']) for row in connection.execute(
-            "SELECT payload_json FROM memory_events WHERE memory_id=? AND version=? AND kind='feedback' "
-            "ORDER BY id", (memory_id, version)))
+        harmful_seen = False
+        for row in connection.execute(
+                "SELECT actor,payload_json FROM memory_events "
+                "WHERE memory_id=? AND version=? AND kind='feedback' ORDER BY id",
+                (memory_id, version)):
+            if user_owned and row['actor'] != 'human':
+                continue
+            outcome = json.loads(row['payload_json'])['outcome']
+            if outcome == 'harmful':
+                if harmful_seen:
+                    continue
+                harmful_seen = True
+            events.append(WeightEvent(outcome))
         return events
 
     def record_application(self, application: MemoryApplication) -> None:
@@ -1270,10 +1330,13 @@ class MemoryStore:
                 key = (row['memory_id'], row['version'], f"stage:{row['stage']}")
                 counts[key] = counts.get(key, 0) + 1
             for row in connection.execute(
-                    "SELECT memory_id,version,payload_json FROM memory_events "
+                    "SELECT memory_id,version,actor,payload_json FROM memory_events "
                     "WHERE kind='feedback' AND substr(created_at,1,7)=?", (month,)):
                 outcome = json.loads(row['payload_json']).get('outcome', 'unknown')
-                key = (row['memory_id'], row['version'], f'vote:{outcome}')
+                # The actor is part of the key: a model's objection and a human's
+                # objection are different facts, and pooling them made every
+                # opposed bucket look unanimous.
+                key = (row['memory_id'], row['version'], f'vote:{outcome}:{row["actor"]}')
                 counts[key] = counts.get(key, 0) + 1
         with self._connection(write=True) as connection:
             connection.execute('DELETE FROM signal_counts WHERE month=?', (month,))
@@ -1332,6 +1395,21 @@ class MemoryStore:
                 return rows
             placeholders = ','.join('?' * len(window))
             for axis, expression in self.BUCKET_AXES:
+                # Who objected, separately: a bucket where every memory is opposed
+                # reads very differently when the objections are all the model's.
+                by_actor: dict[str, dict[str, int]] = {}
+                for row in connection.execute(
+                        f'SELECT {expression} AS bucket, signal_counts.signal AS signal, '
+                        'SUM(signal_counts.events) AS events FROM memories '
+                        'JOIN signal_counts ON signal_counts.memory_id = memories.id '
+                        f'WHERE signal_counts.month IN ({placeholders}) '
+                        "AND signal_counts.signal LIKE 'vote:%' "
+                        "AND signal_counts.signal NOT LIKE 'vote:restored:%' "
+                        'GROUP BY bucket, signal',
+                        (*window,)).fetchall():
+                    actor = str(row['signal']).rsplit(':', 1)[-1] or 'unknown'
+                    bucket = by_actor.setdefault(row['bucket'], {})
+                    bucket[actor] = bucket.get(actor, 0) + (row['events'] or 0)
                 grouped = connection.execute(
                     f'SELECT {expression} AS bucket, COUNT(*) AS memories, '
                     'SUM(CASE WHEN signals.against_events > 0 THEN 1 ELSE 0 END) AS against_memories, '
@@ -1339,7 +1417,8 @@ class MemoryStore:
                     'COALESCE(SUM(signals.support_events), 0) AS support_events '
                     'FROM memories LEFT JOIN ('
                     '  SELECT memory_id, '
-                    "    SUM(CASE WHEN signal LIKE 'vote:%' THEN events ELSE 0 END) AS against_events, "
+                    "    SUM(CASE WHEN signal LIKE 'vote:%' AND signal NOT LIKE 'vote:restored:%' "
+                    '      THEN events ELSE 0 END) AS against_events, '
                     "    SUM(CASE WHEN signal IN ('stage:applied','stage:validated') THEN events ELSE 0 END) "
                     '    AS support_events '
                     f'  FROM signal_counts WHERE month IN ({placeholders}) GROUP BY memory_id'
@@ -1352,6 +1431,7 @@ class MemoryStore:
                                  'against_memories': row['against_memories'] or 0,
                                  'against_events': row['against_events'],
                                  'support_events': row['support_events'],
+                                 'against_events_by_actor': by_actor.get(row['bucket'], {}),
                                  'against_rate': (round((row['against_memories'] or 0) / memories, 6)
                                                  if enough and memories else None),
                                  'note': '' if enough else f'样本不足（<{min_sample}），只给绝对数'})
@@ -1380,9 +1460,13 @@ class MemoryStore:
         review). Revocation never sets `contradicted`: it records a reason and a
         negative weight, nothing more.
         """
-        if outcome not in FEEDBACK_OUTCOMES:
+        if outcome not in HUMAN_FEEDBACK_OUTCOMES:
             raise ValueError('unknown feedback outcome')
         actor = _actor(actor)
+        if outcome == 'restored' and actor != 'human':
+            # The acquittal is a human's; the choke point is here, not in the
+            # wrappers that happen to be human-operated.
+            raise ValueError('only a human may acquit a memory')
         if not idempotency_key:
             raise ValueError('idempotency key required')
         with self._connection(write=True) as connection:
@@ -1401,7 +1485,7 @@ class MemoryStore:
             if outcome == 'harmful' and record.draft.status != 'conflicted' and not protected:
                 conflicted = record.draft.model_copy(update={'status': 'conflicted'})
                 record = self._put(connection, memory_id, conflicted, expected_version=record.version,
-                                   idempotency_key=idempotency_key + ':status', actor='system',
+                                   idempotency_key=idempotency_key + ':status', actor=actor,
                                    reason='harmful feedback: pending review')
                 payload['version'] = record.version
                 request_hash = digest(canonical_json({**payload, 'actor': actor}))

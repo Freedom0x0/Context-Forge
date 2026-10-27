@@ -375,12 +375,16 @@ def doctor(fix: bool = typer.Option(False, "--fix")) -> None:
     if fix:
         settings = load_settings()
         days = settings.retention_days if settings else 30
+        from .episodes import EpisodeCollector
+
         store = _store()
         targets = store.retention_preview(days)
         if not targets:
             typer.echo(f"no sessions older than {days}d to clean")
         else:
-            store.retention_apply(days)
+            # Through the collector: deleting an episode marks the memory sources
+            # it fed as `source_deleted`, and that must not depend on who ran it.
+            EpisodeCollector(store).apply_retention(days, memory_store=_memory())
             typer.echo(f"cleaned {len(targets)} session(s) older than {days}d")
     if failed:
         raise typer.Exit(code=1)
@@ -394,12 +398,14 @@ def retention(days: int = typer.Option(30, "--days", min=0),
 
     Without `--apply`, only lists. `--dry-run` is the default for safety.
     """
+    from .episodes import EpisodeCollector
+
     store = _store()
-    if apply:
-        targets = store.retention_apply(days, dry_run=dry_run)
-        verb = "would delete" if dry_run else "deleted"
+    if apply and not dry_run:
+        targets = EpisodeCollector(store).apply_retention(days, memory_store=_memory())
+        verb = "deleted"
     else:
-        targets = [r["session_id"] for r in store.retention_preview(days)]
+        targets = [row["session_id"] for row in store.retention_preview(days)]
         verb = "would delete"
     typer.echo(f"{verb} {len(targets)} session(s)")
     for sid in targets:
@@ -530,10 +536,14 @@ def memory_feedback(memory_id: str,
     """Record feedback on one memory; `harmful` parks it as `conflicted` for review."""
     import uuid
 
+    from .memory import FEEDBACK_OUTCOMES
+
     store = _memory()
     if store is None:
         typer.echo("no memory database")
         raise typer.Exit(code=1)
+    if outcome not in FEEDBACK_OUTCOMES:
+        raise typer.BadParameter(f"outcome must be one of {', '.join(FEEDBACK_OUTCOMES)}")
     record = store.get(memory_id)
     if record is None:
         raise typer.BadParameter(f"no memory {memory_id}")
@@ -562,9 +572,14 @@ def _memory_correction(action: str, memory_id: str, version: int, reason: str):
     from .memory_lifecycle import MemoryLifecycle
     expected = version or record.version
     lifecycle = MemoryLifecycle(store)
-    revised = getattr(lifecycle, action)(
-        memory_id, expected_version=expected,
-        idempotency_key=f"cli:{action}:{memory_id}:{expected}", reason=reason)
+    try:
+        revised = getattr(lifecycle, action)(
+            memory_id, expected_version=expected,
+            idempotency_key=f"cli:{action}:{memory_id}:{expected}", reason=reason)
+    except Exception as exc:
+        # A concurrent correction is a fact to report, not a crash: the traceback
+        # buried the one thing the operator needed to know.
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"{revised.draft.status} v{revised.version}")
 
 
@@ -580,6 +595,149 @@ def memory_restore(memory_id: str, version: int = typer.Option(0, "--version"),
                    reason: str = typer.Option("human restoration", "--reason")) -> None:
     """Return a suppressed / conflicted memory to `active` (a human correction)."""
     _memory_correction("restore", memory_id, version, reason)
+
+
+def _lifecycle_record(memory_id: str, version: int):
+    """Resolve a memory and its expected version for a correction command."""
+    store = _memory()
+    if store is None:
+        typer.echo("no memory database")
+        raise typer.Exit(code=1)
+    record = store.get(memory_id)
+    if record is None:
+        raise typer.BadParameter(f"no memory {memory_id}")
+    from .memory_lifecycle import MemoryLifecycle
+
+    return store, record, MemoryLifecycle(store), version or record.version
+
+
+def _source(excerpt: str, identity: str, kind: str):
+    from .memory_lifecycle import source_from_text
+
+    return source_from_text(excerpt, identity=identity, kind=kind)
+
+
+@memory_app.command("scope")
+def memory_scope(memory_id: str, visibility: str = typer.Option(..., "--visibility",
+                                                                  help="owner | shared"),
+                 version: int = typer.Option(0, "--version"),
+                 reason: str = typer.Option("human access correction", "--reason")) -> None:
+    """Change who may see a memory, without deleting it."""
+    from .memory_models import AccessPolicy
+
+    if visibility not in ("owner", "shared"):
+        raise typer.BadParameter("visibility must be owner or shared")
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    try:
+        revised = lifecycle.scope(memory_id, AccessPolicy(visibility=visibility),
+                                  expected_version=expected,
+                                  idempotency_key=f"cli:scope:{memory_id}:{expected}",
+                                  reason=reason)
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{revised.draft.access.visibility} v{revised.version}")
+
+
+@memory_app.command("support")
+def memory_support(memory_id: str, excerpt: str = typer.Option(..., "--excerpt"),
+                   identity: str = typer.Option("", "--identity",
+                                               help="source identity; derived from the id when empty"),
+                   kind: str = typer.Option("observation", "--kind",
+                                            help="observation | tool | model | human"),
+                   version: int = typer.Option(0, "--version"),
+                   reason: str = typer.Option("human supporting evidence", "--reason")) -> None:
+    """Attach supporting evidence; the record's evidence level rises at most to `supported`."""
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    source = _source(excerpt, identity, kind)
+    try:
+        revised = lifecycle.support(memory_id, source, reason=reason, expected_version=expected,
+                                    idempotency_key=f"cli:support:{memory_id}:{expected}")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{revised.draft.evidence_level} proof_count={revised.draft.proof_count} "
+               f"v{revised.version}")
+
+
+@memory_app.command("weaken")
+def memory_weaken(memory_id: str, condition: str = typer.Option(..., "--condition"),
+                  excerpt: str = typer.Option(..., "--excerpt"),
+                  identity: str = typer.Option("", "--identity"),
+                  kind: str = typer.Option("observation", "--kind"),
+                  version: int = typer.Option(0, "--version"),
+                  reason: str = typer.Option("human narrowing", "--reason")) -> None:
+    """Narrow when a memory applies, without deleting it."""
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    source = _source(excerpt, identity, kind)
+    try:
+        revised = lifecycle.weaken(memory_id, source, condition, reason=reason,
+                                   expected_version=expected,
+                                   idempotency_key=f"cli:weaken:{memory_id}:{expected}")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"narrowed v{revised.version}")
+
+
+@memory_app.command("extend")
+def memory_extend(memory_id: str, target_id: str = typer.Option(..., "--target"),
+                   kind: str = typer.Option("refines", "--kind",
+                                            help="refines | exception_to"),
+                   excerpt: str = typer.Option(..., "--excerpt"),
+                   identity: str = typer.Option("", "--identity"),
+                   version: int = typer.Option(0, "--version"),
+                   reason: str = typer.Option("human extension", "--reason")) -> None:
+    """Link a memory to another one it refines, or that is an exception to it."""
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    source = _source(excerpt, identity, "observation")
+    try:
+        revised = lifecycle.extend(memory_id, target_id=target_id, kind=kind, source=source,
+                                   reason=reason, expected_version=expected,
+                                   idempotency_key=f"cli:extend:{memory_id}:{expected}")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{kind} v{revised.version}")
+
+
+@memory_app.command("supersede")
+def memory_supersede(memory_id: str, body: str = typer.Option(..., "--body"),
+                     project: str = typer.Option("", "--project"),
+                     version: int = typer.Option(0, "--version"),
+                     reason: str = typer.Option("human supersession", "--reason")) -> None:
+    """Replace a memory with a new one; the old one becomes `stale`, not deleted."""
+    from .memory_lifecycle import candidate_from_body
+
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    replacement = candidate_from_body(f"{memory_id}:v{expected + 1}", body,
+                                      project=project or None)
+    try:
+        created = lifecycle.supersede(memory_id, replacement, expected_version=expected,
+                                      idempotency_key=f"cli:supersede:{memory_id}:{expected}",
+                                      reason=reason)
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"superseded by {created.id} v{created.version}")
+
+
+@memory_app.command("overturn")
+def memory_overturn(memory_id: str, body: str = typer.Option(..., "--body"),
+                    excerpt: str = typer.Option(..., "--excerpt"),
+                    identity: str = typer.Option("", "--identity"),
+                    project: str = typer.Option("", "--project"),
+                    version: int = typer.Option(0, "--version"),
+                    reason: str = typer.Option("human overturn", "--reason")) -> None:
+    """Record that a memory is wrong: a contradicting memory is created, the old one stays."""
+    from .memory_lifecycle import candidate_from_body
+
+    store, record, lifecycle, expected = _lifecycle_record(memory_id, version)
+    source = _source(excerpt, identity, "observation")
+    replacement = candidate_from_body(f"{memory_id}:overturn:{expected}", body,
+                                      project=project or None, sources=(source,))
+    try:
+        created = lifecycle.overturn(memory_id, replacement, source, reason=reason,
+                                     expected_version=expected,
+                                     idempotency_key=f"cli:overturn:{memory_id}:{expected}")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"contradicted by {created.id} v{created.version}")
 
 
 @app.command("approve")
@@ -894,7 +1052,7 @@ def watch_cmd(daemon: bool = typer.Option(False, "--daemon"),
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
         except ImportError:
-            typer.echo("watchdog not installed; try `pip install watchdog`")
+            typer.echo("watchdog not installed; try `pip install 'context-forge[watch]'`")
             raise typer.Exit(code=1)
 
         class Handler(FileSystemEventHandler):

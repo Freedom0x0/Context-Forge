@@ -61,6 +61,7 @@
 ## Out of Scope
 
 - 不改"何时产生 conflicted"（仍是人工 harmful 反馈）。
+  **2026-10-27 后续变更**：模型也可以标记 harmful 并把记忆推进 `conflicted`（整条流程由模型完成，人只做旁支）。"只有人能触发 conflicted"这条约束已被取代；`conflicted` 仍是吸收态、仍只有人能解除。
 - 不改 `publish` 对**新 id** 记忆置 `active` 的既有行为（那是"自动沉淀"的设计选择，本次不动）。
 - 不引入 persona / 用户模型 / 主动推送等（那是另开的路线图）。
 - 不动 `access_broader` 那条保护。

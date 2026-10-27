@@ -22,6 +22,8 @@
 **聚合表**
 - `signal_counts(month, memory_id, version, signal, events)`，主键即前四列。
   `signal` 是**单一枚举**：`stage:<stage>` 与 `vote:<outcome>`，避免 `stage × outcome` 的笛卡尔稀疏。
+  **2026-10-27 后续变更**：反对票带上出票人，枚举扩为 `vote:<outcome>:<actor>`（schema v13）；
+  迁移前写的行没有出票人，重写为 `vote:<outcome>:unknown`。
 - `MemoryStore.aggregate_signals(month)` = **先 DELETE 该月再写入**（覆盖式），因此重跑、崩溃后补跑都幂等；
   每日步重算**当月 + 上月**，跨月自动补齐上月尾部的迟到事件。
 - `aggregated_through()` 返回 `MAX(month)`，是剪枝唯一允许的边界来源。

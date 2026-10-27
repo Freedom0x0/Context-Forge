@@ -6,8 +6,9 @@
 
 ## Overview
 
-- Python 3.12+, stdlib + `pydantic` / `typer` / `python-frontmatter` only. **No new runtime dependency** without an explicit decision.
+- Python 3.12+. Runtime dependencies are exactly what `pyproject.toml` declares: `pydantic`, `typer`, `python-frontmatter`, `httpx` (remote provider), `tomli-w` (writing `config.toml`). `watchdog` is the `[watch]` extra, not a base dependency. **No new runtime dependency** without an explicit decision recorded here.
 - No lint/typecheck toolchain is configured (`pyproject.toml` has only `pytest` as a dev dependency). **The verification gate is `python -m pytest tests/ -q`.**
+- The verification environment must have every declared dependency installed: `httpx` and `tomli-w` were declared in 2026-10 but the machine they were verified on did not have them, and `forge init` failed with `ModuleNotFoundError: tomli_w`. A green suite is not proof that a declared dependency is present.
 - Comment policy: **no explanatory comments for deleted code** and no decorative narration. A comment is justified only when it warns about a non-obvious trap that would otherwise be "fixed" back into a bug.
 
 ---

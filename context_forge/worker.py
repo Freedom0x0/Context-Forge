@@ -198,7 +198,8 @@ def process_pending_finalizations(store: JobStore, gateway, memory_store,
     from .provider_http import PROMPT_VERSION
     processed = 0
     service = FinalizationService(store, memory_store, gateway,
-                                  model=getattr(gateway, "model", None),
+                                  model=getattr(gateway, "model", None)
+                                  or getattr(gateway, "name", None),
                                   prompt_version=PROMPT_VERSION)
     for receipt in store.pending_receipts():
         try:
@@ -210,6 +211,10 @@ def process_pending_finalizations(store: JobStore, gateway, memory_store,
                     "WHERE finalization_id=?", (f"{type(exc).__name__}: {exc}",
                                                 datetime.now(timezone.utc).isoformat(),
                                                 receipt.finalization_id))
+            # The episode must leave `finalizing`, or it is never offered again
+            # and never cleaned up -- a zombie holding its transcript forever.
+            from .episodes import EpisodeCollector
+            EpisodeCollector(store).release_finalizing(receipt.session_id, receipt.segment)
             continue
         if projector is not None:
             try:

@@ -135,14 +135,24 @@ class EpisodeCollector:
         text, _ = _complete_text(Path(episode.transcript_path))
         snapshot = sanitize_text(text)
         digest = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+        end_line = min(event.final_line_count or episode.collected_through_line,
+                       episode.collected_through_line)
+        start_line = self._covered_through(episode.session_id, episode.segment)
+        # Only the lines this checkpoint newly covers. Storing the whole transcript
+        # every time is quadratic in episode length: 54 checkpoints of one machine
+        # reached 300 MB, and every one of them was a full copy from line 0.
+        delta = "\n".join(snapshot.split("\n")[start_line:end_line])
         checkpoint = EpisodeCheckpoint(
             checkpoint_id=f"checkpoint-{digest[:24]}", session_id=episode.session_id,
-            segment=episode.segment, start_line=0,
-            end_line=min(event.final_line_count or episode.collected_through_line,
-                         episode.collected_through_line),
-            input_digest=digest, snapshot=snapshot, created_at=_now(),
+            segment=episode.segment, start_line=min(start_line, end_line),
+            end_line=end_line,
+            input_digest=digest, snapshot=delta, created_at=_now(),
         )
         return self.store.save_checkpoint(checkpoint)
+
+    def _covered_through(self, session_id: str, segment: int) -> int:
+        return max((item.end_line for item in self.store.list_checkpoints(session_id)
+                    if item.segment == segment), default=0)
 
     def request_finalize(self, session_id: str, *, end_kind: str,
                          event_id: str) -> FinalizationReceipt:
@@ -166,9 +176,24 @@ class EpisodeCollector:
         counts["source_tombstones"] = tombstones
         return counts
 
+    def release_finalizing(self, session_id: str, segment: int) -> bool:
+        """Return a failed episode to `open` so it can be finalized again.
+
+        `active_episodes()` offers only `open` and `inferred_pending`, so an
+        episode left in `finalizing` is never offered again and never cleaned
+        up: it becomes a zombie that holds its transcript forever. Retrying is
+        bounded -- `request_finalize` returns the existing failed receipt while
+        the digest is unchanged, so only a changed transcript gets a new attempt.
+        """
+        episode = self.store.episode(session_id, segment)
+        if episode is None or episode.state != "finalizing":
+            return False
+        self.store.save_episode(episode.model_copy(update={"state": "open"}))
+        return True
+
     def apply_retention(self, days: int, *, memory_store=None,
                         now: datetime | None = None) -> list[str]:
-        targets = self.store.episode_retention_preview(days, at=now)
+        targets = [row["session_id"] for row in self.store.retention_preview(days, at=now)]
         for session_id in targets:
             self.delete(session_id, memory_store)
         return targets

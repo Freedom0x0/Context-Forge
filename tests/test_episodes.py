@@ -112,6 +112,30 @@ def test_precompact_creates_checkpoint_without_long_term_write(tmp_path: Path):
     assert store.list_checkpoints("session-1") == [checkpoint]
 
 
+def test_a_second_checkpoint_stores_only_the_lines_it_adds(tmp_path: Path):
+    """Copying the whole transcript per checkpoint is quadratic in episode length:
+    the store grew to 300 MB across 54 checkpoints, each from line 0."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_bytes(b'{"a":1}\n{"a":2}\n')
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    collector.collect("session-1", transcript, "demo", "claude_code")
+
+    first = collector.checkpoint(lifecycle_event(type="pre_compact", final_line_count=2))
+    assert (first.start_line, first.end_line) == (0, 2)
+    assert first.snapshot == '{"a":1}\n{"a":2}'
+
+    with transcript.open("ab") as handle:
+        handle.write(b'{"a":3}\n{"a":4}\n')
+    collector.collect("session-1", transcript, "demo", "claude_code")
+
+    second = collector.checkpoint(lifecycle_event(type="pre_compact", final_line_count=4))
+    assert (second.start_line, second.end_line) == (2, 4)
+    assert second.snapshot == '{"a":3}\n{"a":4}'
+    total = sum(len(item.snapshot) for item in store.list_checkpoints("session-1"))
+    assert total == len(first.snapshot) + len(second.snapshot)
+
+
 def test_manual_finalize_is_idempotent_and_marks_episode(tmp_path: Path):
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"message":"one"}\n', encoding="utf-8")
@@ -519,3 +543,34 @@ def test_status_reports_episode_host_counts(tmp_path: Path, monkeypatch):
 
     assert snapshot["episodes_by_host"] == "codex=1"
 
+
+
+def test_session_end_without_a_transcript_is_a_noop(tmp_path: Path):
+    """`claude mcp list` and one-shot prompts fire SessionEnd with no transcript file.
+    Raising there prints a hook failure into every such command."""
+    from context_forge.hooks.claude_code import handle_payload
+
+    store = JobStore(tmp_path / "queue.db")
+    missing = tmp_path / "absent.jsonl"
+
+    assert handle_payload({"hook_event_name": "SessionEnd", "session_id": "s1",
+                           "transcript_path": str(missing)}, store=store) is None
+    assert store.latest_episode("s1") is None
+    assert store.db.execute("SELECT COUNT(*) FROM session_lifecycle_events").fetchone()[0] == 0
+
+
+def test_the_hook_skips_a_sibling_tools_own_session(tmp_path: Path):
+    """The watcher skips these sessions; the hook path has to agree, or a tool's
+    prompts still reach the library through the other door."""
+    from context_forge.hooks.claude_code import handle_payload
+
+    transcript = tmp_path / "x.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+
+    result = handle_payload({"hook_event_name": "SessionEnd", "session_id": "tool-1",
+                              "cwd": r"C:\Users\me\.claude-mem\observer-sessions",
+                              "transcript_path": str(transcript)}, store=store)
+
+    assert result is None
+    assert store.latest_episode("tool-1") is None

@@ -13,6 +13,7 @@ so rewriting `~/.claude/settings.json` cannot disable it.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 TASK_NAME = "ContextForgeWatcher"
@@ -38,18 +39,41 @@ def heartbeat_path() -> Path:
     return runtime_dir() / "watcher-heartbeat"
 
 
+def _can_import(executable: Path) -> bool:
+    """True when that interpreter has this package installed.
+
+    The launcher runs from the Startup folder, where the working directory is not
+    the repo, so a launcher naming an interpreter without the package fails on
+    every single start. That is exactly what happened: the hard-coded order
+    preferred Python312, which had no `context_forge`, and the watcher died every
+    30 seconds for a month while every diagnostic read "launcher installed".
+    """
+    import subprocess
+    import tempfile
+
+    try:
+        # A neutral cwd on purpose: run from the repo and the import succeeds off the
+        # source tree alone, which would report a broken interpreter as usable.
+        completed = subprocess.run([str(executable), "-c", "import context_forge"],
+                                   capture_output=True, timeout=60,
+                                   cwd=tempfile.gettempdir())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def _python_exe(windowless: bool = False) -> str:
-    """Path to a Python interpreter, preferring the windowless one."""
+    """Path to a Python interpreter that can import this package."""
     names = ("pythonw.exe", "python.exe") if windowless else ("python.exe",)
+    candidates = [Path(sys.executable).with_name(name) for name in names]
     roots = [
-        Path.home() / "AppData/Local/Programs/Python/Python312",
         Path.home() / "AppData/Local/Programs/Python/Python313",
+        Path.home() / "AppData/Local/Programs/Python/Python312",
     ]
-    for root in roots:
-        for name in names:
-            candidate = root / name
-            if candidate.exists():
-                return str(candidate)
+    candidates.extend(root / name for root in roots for name in names)
+    for candidate in candidates:
+        if candidate.exists() and _can_import(candidate):
+            return str(candidate)
     return "pythonw" if windowless else "python"
 
 

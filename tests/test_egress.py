@@ -124,3 +124,34 @@ def test_egress_and_scheduled_are_wired_into_doctor(isolated, monkeypatch):
     rows = {name for name, _ok, _detail in doctor.run_all()}
 
     assert {'egress', 'scheduled', 'host-silence'} <= rows
+
+
+def test_a_failure_counts_only_until_a_later_attempt_succeeds(tmp_path: Path,
+                                                              monkeypatch) -> None:
+    """One network timeout must not turn the precipitation check red for good."""
+    from context_forge import doctor
+    from context_forge.queue import JobStore
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    store = JobStore(tmp_path / 'queue.db')
+    with store.db:
+        store.db.execute(
+            "INSERT INTO finalization_receipts (finalization_id,session_id,segment,"
+            "episode_digest,end_kind,extraction_json,write_plan_json,status,error,"
+            "created_at,updated_at,extraction_owner,extraction_lease_until) "
+            "VALUES ('f1','s1',1,'d','inferred',NULL,NULL,'failed','boom',"
+            "'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',NULL,NULL)")
+
+    ok, detail = doctor.check_precipitation_state()[1:]
+    assert ok is False and '1 failed receipt' in detail
+
+    with store.db:
+        store.db.execute(
+            "INSERT INTO finalization_receipts (finalization_id,session_id,segment,"
+            "episode_digest,end_kind,extraction_json,write_plan_json,status,error,"
+            "created_at,updated_at,extraction_owner,extraction_lease_until) "
+            "VALUES ('f2','s1',1,'d2','inferred',NULL,NULL,'projected',NULL,"
+            "'2026-01-02T00:00:00+00:00','2026-01-02T00:00:00+00:00',NULL,NULL)")
+
+    ok, detail = doctor.check_precipitation_state()[1:]
+    assert ok is True, detail

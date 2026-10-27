@@ -839,40 +839,87 @@ class JobStore:
             counts["jobs"] = cur.rowcount
         return counts
 
-    def episode_retention_preview(self, days: int, *, at: datetime | None = None) -> list[str]:
-        moment = at or datetime.now(timezone.utc)
-        cutoff = (moment - timedelta(days=days)).isoformat()
-        rows = self.db.execute(
-            "SELECT DISTINCT e.session_id FROM session_episodes e "
-            "WHERE e.state='finalized' AND e.last_activity_at<=? "
-            "AND NOT EXISTS (SELECT 1 FROM finalization_receipts r WHERE r.session_id=e.session_id "
-            "AND r.status IN ('extracting','planned','failed')) ORDER BY e.session_id", (cutoff,),
-        ).fetchall()
-        return [row[0] for row in rows]
+    def drop_checkpoint_bodies(self, session_id: str, segment: int) -> int:
+        """Keep the line ranges and digests; drop the text.
 
-    def retention_preview(self, days: int) -> list[dict[str, str]]:
+        A checkpoint body is a backup of the host log. Once the receipt commits,
+        the meaning lives in the frozen extraction and in `memory_versions`, so a
+        second copy of the transcript is pure cost. Rows stay, so what was
+        covered remains auditable.
+        """
+        empty = json.dumps("")
+        with self.db:
+            cur = self.db.execute(
+                "UPDATE episode_checkpoints SET snapshot_json=? "
+                "WHERE session_id=? AND segment=? AND snapshot_json<>?",
+                (empty, session_id, segment, empty),
+            )
+        return cur.rowcount
+
+    def retention_preview(self, days: int, *,
+                          at: datetime | None = None) -> list[dict[str, str]]:
         """List sessions older than `days` that retention would delete.
 
         Each row has `session_id` and `created_at`. Markdown files in
         the vault are not represented here; callers must delete those
         separately or rely on the user to keep them.
-        """
-        from datetime import datetime, timedelta, timezone
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        rows = self.db.execute(
-            "SELECT id, created_at FROM sessions WHERE created_at < ? "
-            "ORDER BY created_at", (cutoff,),
-        ).fetchall()
-        return [{"session_id": r["id"], "created_at": r["created_at"]} for r in rows]
 
-    def retention_apply(self, days: int, dry_run: bool = False) -> list[str]:
-        """Delete sessions older than `days`. Returns the list of removed IDs."""
-        targets = [r["session_id"] for r in self.retention_preview(days)]
-        if dry_run:
-            return targets
-        for session_id in targets:
-            self.delete_session(session_id)
-        return targets
+        Two row sources, one answer: `sessions` holds what the host registered
+        explicitly; `session_episodes` is the authoritative lifecycle record and
+        also covers sessions that never produced a `sessions` row. Reading only
+        the first source left 34 of 35 episodes -- and every checkpoint they own
+        -- unreachable by the retention step.
+        """
+        moment = at or datetime.now(timezone.utc)
+        cutoff = (moment - timedelta(days=days)).isoformat()
+        seen: dict[str, str] = {}
+        for row in self.db.execute(
+                "SELECT id, created_at FROM sessions WHERE created_at < ? ORDER BY created_at",
+                (cutoff,)):
+            seen.setdefault(row["id"], row["created_at"])
+        for row in self.db.execute(
+                "SELECT e.session_id, e.last_activity_at, e.retention_deadline "
+                "FROM session_episodes e "
+                "WHERE e.state='finalized' "
+                "AND NOT EXISTS (SELECT 1 FROM finalization_receipts r "
+                "WHERE r.session_id=e.session_id "
+                "AND r.status IN ('extracting','planned')) "
+                "ORDER BY e.last_activity_at").fetchall():
+            # A stamped deadline is compared against now: it is already the
+            # expiry date. Comparing it against `now - days` would keep the
+            # episode twice its window.
+            if row["retention_deadline"]:
+                if row["retention_deadline"] > moment.isoformat():
+                    continue
+            elif row["last_activity_at"] > cutoff:
+                continue
+            seen.setdefault(row["session_id"], row["last_activity_at"])
+        return [{"session_id": key, "created_at": value} for key, value in seen.items()]
+
+    def stamp_retention_deadlines(self, days: int) -> int:
+        """Give every finalized episode the date it is due for deletion.
+
+        The column was always NULL: it looked like a schedule and carried none.
+        The deadline is the last activity plus the retention window, so it agrees
+        with the cutoff the query already used.
+        """
+        stamped = 0
+        with self.db:
+            for row in self.db.execute(
+                    "SELECT session_id,segment,last_activity_at FROM session_episodes "
+                    "WHERE state='finalized' AND retention_deadline IS NULL").fetchall():
+                try:
+                    last = datetime.fromisoformat(row["last_activity_at"])
+                except (TypeError, ValueError):
+                    continue
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                deadline = (last + timedelta(days=days)).isoformat()
+                self.db.execute("UPDATE session_episodes SET retention_deadline=? "
+                                "WHERE session_id=? AND segment=?",
+                                (deadline, row["session_id"], row["segment"]))
+                stamped += 1
+        return stamped
 
     def session_info(self, session_id: str) -> dict[str, object]:
         """Return a structured view of one session for debugging.

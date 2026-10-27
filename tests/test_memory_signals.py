@@ -75,7 +75,8 @@ def test_feedback_lands_in_the_vote_signal(store: MemoryStore):
 
     store.aggregate_signals(this_month())
 
-    assert store.signal_totals()['vote:harmful'] == 1
+    # The actor is part of the key: a model's objection and a human's are different facts.
+    assert store.signal_totals()['vote:harmful:human'] == 1
 
 
 def test_nothing_is_pruned_before_an_aggregate_covers_it(tmp_path: Path, store: MemoryStore):

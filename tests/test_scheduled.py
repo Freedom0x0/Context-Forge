@@ -93,6 +93,46 @@ def test_retention_step_deletes_expired_sessions(tmp_path: Path, monkeypatch):
     assert remaining == {'new'}
 
 
+def test_retention_reaches_episodes_without_a_sessions_row(tmp_path: Path, monkeypatch):
+    """Measured on real data: one `sessions` row for 35 episodes. Reading only that
+    table left every checkpoint of the other 34 sessions immortal."""
+    from context_forge.episodes import EpisodeCollector
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('episode-only', transcript, 'demo', 'claude_code')
+    receipt = collector.request_finalize('episode-only', end_kind='explicit', event_id='end-1')
+    store.mark_receipt_committed(receipt.finalization_id)
+    with store.db:
+        store.db.execute("UPDATE session_episodes SET last_activity_at='2026-01-01T00:00:00+00:00'")
+
+    assert store.db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 0
+
+    assert scheduled.run_due(store, NOW) == ['retention']
+    assert store.latest_episode('episode-only') is None
+
+
+def test_retention_spares_an_episode_whose_receipt_never_finished(tmp_path: Path, monkeypatch):
+    """A pending extraction still owns the transcript; deleting it would lose the input."""
+    from context_forge.episodes import EpisodeCollector
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('unfinished', transcript, 'demo', 'claude_code')
+    collector.request_finalize('unfinished', end_kind='explicit', event_id='end-1')
+    with store.db:
+        store.db.execute("UPDATE session_episodes SET last_activity_at='2026-01-01T00:00:00+00:00'")
+
+    assert scheduled.run_due(store, NOW) == ['retention']
+    assert store.latest_episode('unfinished') is not None
+
+
 def test_doctor_reports_failing_silent_and_healthy_ledgers(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
     path = tmp_path / 'queue.db'
@@ -274,3 +314,111 @@ def test_re_running_the_hygiene_conflict_tier_keeps_a_single_note(tmp_path: Path
 
     scheduled.STEPS['hygiene'](ctx)
     assert len(_edges(memory, 'conflicts_with')) == 1
+
+
+def test_retention_is_not_blocked_by_a_failed_receipt(tmp_path: Path, monkeypatch):
+    """A failed extraction is terminal. Counting it as protection made the session
+    uncollectable forever, so a failed episode held its transcript indefinitely."""
+    from context_forge.episodes import EpisodeCollector
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('failed-one', transcript, 'demo', 'claude_code')
+    receipt = collector.request_finalize('failed-one', end_kind='explicit', event_id='end-1')
+    with store.db:
+        store.db.execute("UPDATE finalization_receipts SET status='failed' "
+                         "WHERE finalization_id=?", (receipt.finalization_id,))
+        store.db.execute("UPDATE session_episodes SET state='finalized', "
+                         "last_activity_at='2026-01-01T00:00:00+00:00'")
+
+    assert scheduled.run_due(store, NOW) == ['retention']
+    assert store.latest_episode('failed-one') is None
+
+
+def test_retention_stamps_the_deadline_it_keeps_promising(tmp_path: Path,
+                                                           monkeypatch) -> None:
+    """`retention_deadline` was NULL on every episode: a column that looked like a
+    schedule and carried none."""
+    from datetime import datetime, timezone
+    from context_forge.episodes import EpisodeCollector
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('s1', transcript, 'demo', 'claude_code')
+    receipt = collector.request_finalize('s1', end_kind='explicit', event_id='end-1')
+    store.mark_receipt_committed(receipt.finalization_id)
+    last = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+    with store.db:
+        store.db.execute("UPDATE session_episodes SET last_activity_at=?", (last,))
+
+    assert store.stamp_retention_deadlines(30) == 1
+
+    deadline = store.db.execute(
+        "SELECT retention_deadline FROM session_episodes WHERE session_id='s1'").fetchone()[0]
+    assert deadline == datetime(2026, 1, 31, tzinfo=timezone.utc).isoformat()
+
+
+def test_deleting_an_episode_marks_the_memory_sources_it_fed(tmp_path: Path,
+                                                              monkeypatch) -> None:
+    """The scheduled step deleted queue rows but left the memory claiming a session
+    that no longer exists; the explicit delete path tombstoned them."""
+    from context_forge.episodes import EpisodeCollector
+    from context_forge.memory import MemoryStore
+    from context_forge.memory_models import MemoryDraft, Provenance, Source
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('s1', transcript, 'demo', 'claude_code')
+    receipt = collector.request_finalize('s1', end_kind='explicit', event_id='end-1')
+    store.mark_receipt_committed(receipt.finalization_id)
+    with store.db:
+        store.db.execute("UPDATE session_episodes SET state='finalized', "
+                         "last_activity_at='2026-01-01T00:00:00+00:00'")
+
+    memory = MemoryStore.initialize(tmp_path / 'memory.db')
+    memory.put('m1', MemoryDraft(body='a lesson from that session', status='active',
+                                  provenance=Provenance(projects=('demo',), sessions=('s1',)),
+                                  sources=(Source(identity='episode:s1:1', kind='observation',
+                                                  session_id='s1', excerpt='the original words'),)),
+               expected_version=0, idempotency_key='put-1', actor='model', reason='test')
+
+    assert 'retention' in scheduled.run_due(store, NOW, memory_store=memory)
+    assert store.latest_episode('s1') is None
+
+    kept = memory.get('m1')
+    assert kept.draft.sources[0].excerpt == ''
+    assert kept.draft.sources[0].reference == 'source_deleted'
+
+
+def test_the_retention_window_is_the_configured_one_not_twice(tmp_path: Path,
+                                                              monkeypatch) -> None:
+    """The stamped deadline is the expiry date. Comparing it against `now - days`
+    kept every episode alive for twice its window."""
+    from datetime import datetime, timedelta, timezone
+    from context_forge.episodes import EpisodeCollector
+
+    monkeypatch.setenv('CONTEXT_FORGE_HOME', str(tmp_path))
+    transcript = tmp_path / 's.jsonl'
+    transcript.write_text('{"type":"user"}\n', encoding='utf-8')
+    store = JobStore(tmp_path / 'queue.db')
+    collector = EpisodeCollector(store)
+    collector.collect('s1', transcript, 'demo', 'claude_code')
+    receipt = collector.request_finalize('s1', end_kind='explicit', event_id='end-1')
+    store.mark_receipt_committed(receipt.finalization_id)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with store.db:
+        store.db.execute("UPDATE session_episodes SET last_activity_at=?", (base.isoformat(),))
+    store.stamp_retention_deadlines(30)
+
+    assert store.retention_preview(30, at=base + timedelta(days=29)) == []
+    due = store.retention_preview(30, at=base + timedelta(days=31))
+    assert [row['session_id'] for row in due] == ['s1']

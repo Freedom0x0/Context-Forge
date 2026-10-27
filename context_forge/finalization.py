@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -9,7 +10,61 @@ from .memory import MemoryStore, canonical_fingerprint, canonical_json, digest
 from .memory_models import MemoryDraft, Provenance, Relation
 from .queue import JobStore
 from .risk import requires_confirmation
-from .transcript import sanitize_text
+from .transcript import extract_conversation, sanitize_text
+
+# The finalizer's input budget, in tokens. The remote model reports a
+# 1,048,576-token context; 60% of it leaves room for the schema and the answer.
+FINALIZER_CONTEXT_TOKENS = 1_048_576
+FINALIZER_BUDGET_RATIO = 0.6
+FINALIZER_TOKEN_BUDGET = int(FINALIZER_CONTEXT_TOKENS * FINALIZER_BUDGET_RATIO)
+TRUNCATION_NOTICE = "[earlier transcript omitted: the episode exceeded the finalizer's input budget]\n"
+
+_CJK = re.compile(r'[぀-ヿ㐀-䶿一-鿿가-힯]')
+
+
+def estimate_tokens(text: str) -> int:
+    """A conservative token estimate.
+
+    One CJK character is about one token; Latin text is about four characters per
+    token. A character budget cannot stand in for a token budget: 2,000,000
+    characters is 500K tokens in English and 2M in Chinese, and this library's
+    text is Chinese.
+    """
+    cjk = len(_CJK.findall(text))
+    return cjk + (len(text) - cjk + 3) // 4
+
+
+def _fit_budget(conversation: str) -> str:
+    """Keep the tail that fits the finalizer's token budget.
+
+    The recent part is what the memory is about, so the head is dropped first.
+    The truncation notice is paid for out of the same budget.
+    """
+    if estimate_tokens(conversation) <= FINALIZER_TOKEN_BUDGET:
+        return conversation
+    budget = FINALIZER_TOKEN_BUDGET - estimate_tokens(TRUNCATION_NOTICE)
+    cut = len(conversation)
+    for _ in range(8):
+        estimate = estimate_tokens(conversation[len(conversation) - cut:])
+        if estimate <= budget:
+            break
+        cut = max(1, int(cut * budget / max(1, estimate)))
+    tail = conversation[len(conversation) - cut:]
+    newline = tail.find('\n')
+    if newline != -1:
+        tail = tail[newline + 1:]
+    return TRUNCATION_NOTICE + tail
+
+
+def _model_input(transcript: str) -> str:
+    """The conversation, not the raw log.
+
+    Raw transcript lines make the model improvise (see `transcript.py`) and do
+    not fit the context at all: one 21 MB session was 2.16M tokens against a
+    1.05M limit. Extraction cuts that to 3.5%. The tail is kept, because the
+    recent part is what the memory is about.
+    """
+    return _fit_budget(extract_conversation(transcript.splitlines()))
 
 
 class FinalizationService:
@@ -42,10 +97,12 @@ class FinalizationService:
             raw = self.gateway.finalize_episode({
                 "schema_version": 1, "session_id": episode.session_id,
                 "segment": episode.segment, "episode_digest": episode.transcript_digest,
-                "transcript": transcript,
+                "transcript": _model_input(transcript),
                 "existing_candidates": [{"id": item.id, "version": item.version,
                                           "body": item.draft.body[:500]} for item in existing],
-                "checkpoints": [item.model_dump(mode="json") for item in
+                # Metadata only: `transcript` above is already the whole episode. Sending
+                # each checkpoint's text too put m near-copies of it in the prompt.
+                "checkpoints": [item.model_dump(mode="json", exclude={"snapshot"}) for item in
                                 self.queue.list_checkpoints(episode.session_id)],
             })
             output = FinalizationOutput.model_validate(raw)
@@ -90,6 +147,10 @@ class FinalizationService:
                 )
             results.append(operation["memory_id"])
         self.queue.mark_receipt_committed(finalization_id)
+        # The frozen extraction and the written versions now carry the meaning, so
+        # the checkpoint keeps only its coverage (lines + digest), not a second copy
+        # of the transcript.
+        self.queue.drop_checkpoint_bodies(episode.session_id, episode.segment)
         return results
 
     @staticmethod

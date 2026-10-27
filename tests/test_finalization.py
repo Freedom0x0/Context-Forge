@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,16 @@ class Gateway:
     def finalize_episode(self, payload):
         self.calls += 1
         return self.output
+
+
+class CapturingGateway(Gateway):
+    def __init__(self, output):
+        super().__init__(output)
+        self.payload = None
+
+    def finalize_episode(self, payload):
+        self.payload = payload
+        return super().finalize_episode(payload)
 
 
 def setup_receipt(tmp_path: Path):
@@ -315,3 +326,176 @@ def test_the_status_line_announces_an_absorbed_veto_and_stays_quiet_otherwise():
 
     assert "2 write(s) landed on a memory you archived" in status_mod.render_text(snapshot)
     assert "landed on a memory" not in status_mod.render_text({**snapshot, "veto_absorbed": 0})
+
+
+def test_the_prompt_carries_checkpoint_metadata_not_their_text(tmp_path: Path):
+    """`transcript` is already the whole episode. Repeating each checkpoint's text put
+    m near-copies of it in the prompt -- the same quadratic copy the store had."""
+    from context_forge.domain import SessionLifecycleEvent
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "one"}}) + "\n",
+        encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    event = SessionLifecycleEvent(
+        event_id="pre-1", type="pre_compact", source="test", session_id="s1",
+        transcript_path=str(transcript), observed_at="2026-09-24T00:00:00+00:00",
+        final_line_count=1, reason="context_compaction")
+    queue.ingest_session_event(event)
+    collector.checkpoint(event)
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    gateway = CapturingGateway(output())
+
+    FinalizationService(queue, MemoryStore.initialize(tmp_path / "memory.db"),
+                        gateway).finalize(receipt.finalization_id)
+
+    checkpoint = gateway.payload["checkpoints"][0]
+    assert "snapshot" not in checkpoint
+    assert checkpoint["end_line"] == 1
+    assert gateway.payload["transcript"] == "user: one"
+
+
+def test_committing_a_receipt_drops_the_checkpoint_text_and_keeps_its_coverage(tmp_path: Path):
+    """The body is a backup of the host log; once the extraction is frozen it only
+    duplicates the transcript. Line ranges stay so coverage remains auditable."""
+    from context_forge.domain import SessionLifecycleEvent
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    event = SessionLifecycleEvent(
+        event_id="pre-1", type="pre_compact", source="test", session_id="s1",
+        transcript_path=str(transcript), observed_at="2026-09-24T00:00:00+00:00",
+        final_line_count=1, reason="context_compaction")
+    queue.ingest_session_event(event)
+    collector.checkpoint(event)
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+
+    FinalizationService(queue, MemoryStore.initialize(tmp_path / "memory.db"),
+                        Gateway(output())).finalize(receipt.finalization_id)
+
+    [checkpoint] = queue.list_checkpoints("s1")
+    assert checkpoint.snapshot == ""
+    assert (checkpoint.start_line, checkpoint.end_line) == (0, 1)
+    assert checkpoint.input_digest
+
+
+def test_the_finalizer_receives_the_conversation_not_the_raw_log(tmp_path: Path):
+    """Raw transcript lines make the model improvise (see transcript.py)."""
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"role": "user",
+                                                "content": "investigate the cache"}}) + "\n",
+        encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    gateway = CapturingGateway(output())
+
+    FinalizationService(queue, MemoryStore.initialize(tmp_path / "memory.db"),
+                        gateway).finalize(receipt.finalization_id)
+
+    assert gateway.payload["transcript"] == "user: investigate the cache"
+
+
+def test_a_huge_episode_is_truncated_to_the_finalizer_budget(tmp_path: Path):
+    """A 21 MB session was 2.16M tokens against a 1.05M limit: the call was rejected
+    outright and the episode was left dead."""
+    from context_forge import finalization as fin
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        "".join(json.dumps({"type": "user", "message": {"role": "user",
+                                                         "content": "x" * 400}}) + "\n"
+                    for _ in range(20000)), encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    gateway = CapturingGateway(output())
+
+    FinalizationService(queue, MemoryStore.initialize(tmp_path / "memory.db"),
+                        gateway).finalize(receipt.finalization_id)
+
+    payload = gateway.payload["transcript"]
+    assert fin.estimate_tokens(payload) <= fin.FINALIZER_TOKEN_BUDGET
+    assert payload.startswith(fin.TRUNCATION_NOTICE)
+
+
+def test_a_failed_finalization_releases_the_episode(tmp_path: Path):
+    """`active_episodes()` offers only `open` and `inferred_pending`, so an episode
+    left in `finalizing` is never offered again and never cleaned up."""
+    from context_forge.worker import process_pending_finalizations
+
+    class FailingGateway:
+        def finalize_episode(self, payload):
+            raise RuntimeError("provider refused")
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+
+    process_pending_finalizations(queue, FailingGateway(), memory)
+
+    assert queue.receipt(receipt.finalization_id).status == "failed"
+    assert queue.latest_episode("s1").state == "open"
+
+
+def test_a_protocol_conforming_gateway_still_names_itself(tmp_path: Path):
+    """`LlmGateway` declares `name`, not `model`. The finalizer took only `model`,
+    so a conforming gateway's memories were recorded with an empty model."""
+    from context_forge.worker import process_pending_finalizations
+
+    class NamedOnlyGateway:
+        name = "my-gateway"
+
+        def finalize_episode(self, payload):
+            return output()
+
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "one"}}) + "\n",
+        encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+
+    process_pending_finalizations(queue, NamedOnlyGateway(), memory)
+
+    written = memory.current_records()
+    assert len(written) == 1
+    assert written[0].draft.model == "my-gateway"
+
+
+def test_the_budget_is_counted_in_tokens_not_characters(tmp_path: Path):
+    """A character budget cannot stand in for a token budget: 2,000,000 characters is
+    500K tokens in English and 2M in Chinese, and this library's text is Chinese."""
+    from context_forge import finalization as fin
+
+    chinese = "缓存失效要成对执行，否则会读到半旧的权限。" * 40_000
+    assert len(chinese) > fin.FINALIZER_TOKEN_BUDGET          # way over in characters
+    assert fin.estimate_tokens(chinese) > fin.FINALIZER_TOKEN_BUDGET
+
+    fitted = fin._fit_budget(chinese)
+
+    assert fitted.startswith(fin.TRUNCATION_NOTICE)
+    assert fin.estimate_tokens(fitted) <= fin.FINALIZER_TOKEN_BUDGET
+
+
+def test_a_short_chinese_episode_is_not_truncated(tmp_path: Path):
+    from context_forge import finalization as fin
+
+    chinese = "缓存失效要成对执行，否则会读到半旧的权限。"
+    assert fin._fit_budget(chinese) == chinese

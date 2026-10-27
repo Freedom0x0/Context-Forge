@@ -108,7 +108,7 @@ for ep in episodes:
 
 ## `conflicted` is an absorbing state for non-human writes
 
-**Rule**: a non-`human` write may **enrich** a `conflicted` record but may **not move it out of** `conflicted`. `MemoryStore._put` raises `ProtectedMemory` when `actor != 'human'` and a `conflicted` record's status would change to anything else. The condition is "moves *out*", not "touches a conflicted row" — `support()` appending evidence (status preserved) must still pass, and the `harmful` feedback write that *creates* the conflict (`memory.py`, `record_feedback` → actor `system`, status → `conflicted`) must still pass.
+**Rule**: a non-`human` write may **enrich** a `conflicted` record but may **not move it out of** `conflicted`. `MemoryStore._put` raises `ProtectedMemory` when `actor != 'human'` and a `conflicted` record's status would change to anything else. The condition is "moves *out*", not "touches a conflicted row" — `support()` appending evidence (status preserved) must still pass, and the `harmful` feedback write that *creates* the conflict (`memory.py`, `record_feedback` → actor `model` or `human`, status → `conflicted`) must still pass.
 
 **Why**: the protection set was `suppressed / user_owned / disabled`. A human `harmful` verdict sets `conflicted` (pending review); `MemoryLifecycle.publish` then wrote `status="active"` unconditionally, so the next model-authored proposal silently erased the human's dissent — the worker path (`worker.py` → `publish_session`) is unattended. Human dissent has to be absorbing against machine rewrites; only `suppress` used to be.
 

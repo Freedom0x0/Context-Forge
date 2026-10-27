@@ -425,7 +425,7 @@ provenance.paths 命中 changed_path             → 来源加分 +0.15
 
 **关键行为差异**：旧逻辑下 platform-web 的记忆在 context-forge 里**看不见**；新逻辑下它**看得见但排得靠后，且必须说明为什么适用**。这正是「脏记忆不该删、该改标签」的结构性根据——跨项目联想是个人长期学习的全部价值。
 
-**`AccessPolicy` 不是项目授权**（2026-10-19 起）。跨项目使用是默认行为：任何记录都可被其它项目检索，也可按 id 读取；`visibility` 只剩 `owner`（主体隔离）与 `shared`。原 `selected_projects` + `allowed_projects` 机制已连同 schema 字段、自动打标与迁移逻辑一起移除，存量记录在 v12 迁移中统一改写为 `shared`。敏感内容的隔离只剩 `space.privacy='private'` 这一层主体边界。
+**`AccessPolicy` 不是项目授权**（2026-10-19 起）。跨项目使用是默认行为：任何记录都可被其它项目检索，也可按 id 读取；`visibility` 只剩 `owner`（主体隔离）与 `shared`。原 `selected_projects` + `allowed_projects` 机制已连同 schema 字段、自动打标与迁移逻辑一起移除，存量记录中只有 `selected_projects` 在 v12 迁移中改写为 `shared`（`owner` 保持 `owner`）。敏感内容的隔离只剩 `space.privacy='private'` 这一层主体边界。
 
 **当前项目技术栈自动检测**，不需要人工标注：
 
@@ -824,7 +824,7 @@ Obsidian Vault 是**用户拥有的数据**，不是供应商格式：
 | `kind: rule`（103 条） | **保留 `project` 作来源**，但从默认过滤路径移出；按内容改 `role` 为 `claim`/`procedure`/`preference`；把技术/领域词迁到 `technologies`/`domains` |
 | `kind: knowledge` 且是具体项目细节 | `role: observation`，**保留** `project`/`paths` 作 `Provenance` |
 | `kind: knowledge` 但结论跨项目通用 | 升为 `role: claim`/`procedure`，**保留 `project` 作来源**，补 `technologies`/`domains`（这是一次离线巩固） |
-| 内容含凭据 / 内部 URL / 客户名 | 标 `space.privacy: private`（主体级不可跨主体）；项目级限制已移除，跨项目可见 |
+| 内容含凭据 | 标 `space.privacy: private`（主体级不可跨主体）；项目级限制已移除，跨项目可见。内部 URL / 客户名**不再**打标签：`selected_projects` 已移除，主体边界是唯一的门（见 `vault_retag.detect_sensitive`） |
 
 **判据**：看这条记忆描述的是「某时某地发生了什么」还是「一般而言什么为真」。文本是否出现项目名不能单独决定类型；所有类型都保留来源。
 
@@ -956,7 +956,7 @@ P0 是唯一必须立刻做的——它修的是当前真实存在的上下文�
 
 召回顺序为候选池（最多 100，返回截断标志）、边界准入、评分、非传递 presentation family、条数/字节预算。family 不改变 identity、不自动建关系，也不产生反馈强化。Episode 和 Checkpoint 不进入默认长期召回。
 
-自动 retention 只处理已 finalized 且没有 extracting/planned/failed receipt 的 Episode。会话删除会清除 queue 上下文并将长期来源摘录改为 `source_deleted` 最小墓碑；长期断言和稳定 ID 不级联删除。生产 watcher 不随 hook 安装自动启用。
+自动 retention 只处理已 finalized 且没有 extracting/planned receipt 的 Episode（`failed` 是终态，不再永久保护该 Episode；失败的 Episode 会被释放回 `open`）。会话删除会清除 queue 上下文并将长期来源摘录改为 `source_deleted` 最小墓碑；长期断言和稳定 ID 不级联删除。生产 watcher 不随 hook 安装自动启用。
 
 - [cross-project-memory-competitor-analysis.md](research/cross-project-memory-competitor-analysis.md) — **边界三分模型、project 软排序、曝光≠强化、评估指标**的主要来源
 - [competitor-landscape-human-ai-learning.md](research/competitor-landscape-human-ai-learning.md) — 八家竞品的结构性盲区、双向复利论据

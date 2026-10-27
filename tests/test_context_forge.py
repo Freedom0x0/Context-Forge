@@ -723,7 +723,7 @@ def test_read_session_meta_finds_cwd(tmp_path: Path) -> None:
     tx = _write_cc_transcript(
         tmp_path / "abc-123.jsonl", r"C:\work\my-app", "hi", "hello")
     meta = read_session_meta(tx)
-    assert meta == ("abc-123", "my-app")
+    assert meta == ("abc-123", "my-app", r"C:\work\my-app")
 
 
 def test_read_session_meta_none_when_no_cwd(tmp_path: Path) -> None:
@@ -1186,3 +1186,50 @@ def test_excerpt_keeps_head_and_tail() -> None:
         assert len(out) < 20000
     finally:
         p.unlink()
+
+
+def test_the_launcher_names_an_interpreter_that_can_import_the_package(tmp_path: Path,
+                                                                     monkeypatch) -> None:
+    """The Startup launcher runs outside the repo, so it must name an interpreter with
+    the package installed. The old hard-coded order preferred Python312, which had no
+    `context_forge`: the watcher failed every 30 seconds for a month while every
+    diagnostic still read "launcher installed"."""
+    import re
+    import subprocess
+    from context_forge import autostart
+
+    monkeypatch.setattr(autostart, "_startup_dir", lambda: tmp_path)
+    autostart.install()
+    script = (tmp_path / "ContextForgeWatcher.vbs").read_text(encoding="utf-8")
+    python = re.search(r'"""(.*?)""', script).group(1)
+
+    # Deliberately not the repo cwd: that is where the launcher will not be, and
+    # importing off the source tree would report a broken interpreter as usable.
+    completed = subprocess.run([python, "-c", "import context_forge"],
+                               capture_output=True, timeout=60, cwd=tmp_path)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_scan_once_skips_a_sibling_tools_own_sessions(tmp_path: Path,
+                                                       monkeypatch) -> None:
+    """`~/.claude/projects/` is keyed by working directory, and claude-mem runs its
+    compressor as a Claude Code session under `~/.claude-mem/observer-sessions`.
+    304 of this machine's 346 transcripts were that tool's own logs."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects"
+    _write_cc_transcript(projects / "C--Users-15532--claude-mem-observer-sessions" / "o1.jsonl",
+                         r"C:\Users\15532\.claude-mem\observer-sessions",
+                         "Condense the tool payload below to under 12800 characters.",
+                         "preserved")
+    _write_cc_transcript(projects / "C--work-demo" / "s1.jsonl", r"C:\work\demo",
+                         "my app 502s", "check upstream timeouts")
+    monkeypatch.setattr(watcher, "transcript_root", lambda: projects)
+
+    store = JobStore(tmp_path / "queue.db")
+    vault = Vault(tmp_path / "vault")
+
+    assert watcher.scan_once(store, vault, FixtureGateway(), settle_seconds=0,
+                             baseline=0) == 1
+    assert store.latest_episode("s1") is not None
+    assert store.latest_episode("o1") is None

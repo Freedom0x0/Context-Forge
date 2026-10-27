@@ -39,6 +39,22 @@ def transcript_root() -> Path:
 # host must not mean adding another collection pipeline.
 HOST = "claude_code"
 
+# Working directories that belong to a tool, not to the user's work.
+#
+# `~/.claude/projects/` is keyed by working directory, and a sibling tool that is
+# itself a Claude Code client files its own sessions in the same tree: claude-mem
+# runs its compressor as a Claude Code session under
+# `~/.claude-mem/observer-sessions`, so 304 of this machine's 346 transcripts were
+# claude-mem's internal logs. Precipitating those writes the tool's own prompts
+# into the user's library and spends a model call per file. claaude-mem excludes
+# the same folder from its own import (`src/shared/should-track-project.ts`).
+EXCLUDED_SESSION_DIRS = frozenset({'.claude-mem', '.claude'})
+
+
+def excluded_cwd(cwd: str) -> bool:
+    """True when the session ran in a tool's own directory rather than a project."""
+    return any(part in EXCLUDED_SESSION_DIRS for part in Path(cwd).parts)
+
 
 def liveness_evidence(*, process_alive: bool | None = None,
                       active_tools: bool | None = None) -> tuple[bool | None, bool | None]:
@@ -116,8 +132,8 @@ def reset_baseline(when: float | None = None) -> float:
     return value
 
 
-def read_session_meta(transcript: Path) -> tuple[str, str] | None:
-    """Return (session_id, project) for a transcript, or None.
+def read_session_meta(transcript: Path) -> tuple[str, str, str] | None:
+    """Return (session_id, project, cwd) for a transcript, or None.
 
     `cwd` lives on ordinary records, not on the leading bookkeeping
     ones, so we scan a bounded prefix. The project name is the
@@ -134,7 +150,7 @@ def read_session_meta(transcript: Path) -> tuple[str, str] | None:
                     continue
                 cwd = rec.get("cwd")
                 if cwd:
-                    return transcript.stem, Path(cwd).name
+                    return transcript.stem, Path(cwd).name, str(cwd)
     except OSError:
         return None
     return None
@@ -189,7 +205,9 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         if meta is None:
             store.record_scan_failure(HOST, 'no-meta')
             continue
-        _, project = meta
+        _, project, cwd = meta
+        if excluded_cwd(cwd):
+            continue
         from .episodes import EpisodeCollector
         EpisodeCollector(store).collect(session_id, transcript, project, HOST)
         new_activity = True

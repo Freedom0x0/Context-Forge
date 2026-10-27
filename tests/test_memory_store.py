@@ -456,3 +456,35 @@ def test_migrate_removes_the_project_level_access_policy(tmp_path):
         columns = [row[1] for row in connection.execute(
             'PRAGMA table_info(memory_access_projection)')]
     assert 'allowed_projects_json' not in columns
+
+
+def test_migrate_does_not_widen_an_owner_record(tmp_path):
+    """v11 serialised `allowed_projects: []` on every record, so key-presence must not
+    mean "needs rewriting": only the removed `selected_projects` value may change visibility.
+    Treating the key as the trigger promoted every `owner` record to `shared`."""
+    path = tmp_path / 'memory.db'
+    store = MemoryStore.initialize(path)
+    put(store, 'mine', draft(body='owner 私有 记忆'))
+    put(store, 'shared-one', draft(body='共享 记忆 内容'))
+    with sqlite3.connect(path) as connection:
+        for memory_id, visibility in (('mine', 'owner'), ('shared-one', 'shared')):
+            raw = connection.execute(
+                'SELECT snapshot_json FROM memory_versions WHERE memory_id=?',
+                (memory_id,)).fetchone()[0]
+            data = json.loads(raw)
+            data['access'] = {'visibility': visibility, 'allowed_projects': []}
+            connection.execute('UPDATE memory_versions SET snapshot_json=? WHERE memory_id=?',
+                               (json.dumps(data), memory_id))
+        connection.execute('PRAGMA user_version=11')
+
+    report = MemoryStore.migrate(path, dry_run=True)
+    assert report['access_rewrites'] == 0
+    assert report['access_key_drops'] == 2
+
+    MemoryStore.migrate(path, dry_run=False)
+    store = MemoryStore.initialize(path)
+    assert store.get('mine').draft.access.visibility == 'owner'
+    assert store.get('shared-one').draft.access.visibility == 'shared'
+    with sqlite3.connect(path) as connection:
+        for (raw,) in connection.execute('SELECT snapshot_json FROM memory_versions'):
+            assert 'allowed_projects' not in json.loads(raw)['access']

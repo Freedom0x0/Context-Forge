@@ -8,7 +8,11 @@
 #    cross-project recall is the product, so every stored record is rewritten to `shared`
 #    and the projection table loses the column. Snapshots are rewritten in place and
 #    fingerprints recomputed, because visibility is part of the canonical form.
-SCHEMA_VERSION = 12
+# 13 makes the actor part of the vote key (`vote:<outcome>:<actor>`): a model's
+#    objection and a human's objection are different facts, and pooling them made
+#    every opposed bucket look unanimous. No DDL change -- the key is a text column --
+#    but rows written before the actor was recorded are rewritten to `unknown`.
+SCHEMA_VERSION = 13
 
 CORE = """
 CREATE TABLE memories (
