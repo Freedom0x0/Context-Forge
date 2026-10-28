@@ -107,9 +107,14 @@ def process_session(store: JobStore, vault: Vault,
             store.set_lines_processed(session_id, total_lines)
             return "skipped"
 
+        import os
         import tempfile
-        tmp = Path(tempfile.gettempdir()) / f"cf-slice-{session_id}.jsonl"
-        tmp.write_text(conversation, encoding="utf-8")
+        # mkstemp, not a predictable name in a shared directory: another local
+        # process could pre-create `cf-slice-<session>.jsonl` as a link.
+        handle, slice_path = tempfile.mkstemp(prefix="cf-slice-", suffix=".jsonl")
+        tmp = Path(slice_path)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(conversation)
         try:
             artifacts = gateway.extract_session(
                 str(tmp), transcript_hash, session_id,

@@ -21,12 +21,12 @@ cannot find it. `_migrate_legacy` drops just that key, with a backup.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
-from datetime import datetime
 from pathlib import Path
+
+from .host_config import load_config, save_config
 
 MCP_KEY = "context_forge"
 SERVER_ARGS = ("-m", "context_forge.mcp_server")
@@ -225,34 +225,13 @@ def _legacy_settings_path() -> Path:
 
 
 def _load(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return load_config(path)
 
 
 def _save(path: Path, payload: dict) -> None:
-    # Preserve the file's existing newline and trailing-newline presence:
-    # text-mode write_text would rewrite every CRLF line as LF and add a
-    # trailing newline, silently churning the user's whole global config.
-    text = json.dumps(payload, indent=2, ensure_ascii=False)
-    existing = path.read_bytes() if path.exists() else b""
-    newline = "\r\n" if b"\r\n" in existing else "\n"
-    if not existing or existing.endswith((b"\n", b"\r\n")):
-        text += newline
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(text.replace("\n", newline).encode("utf-8"))
+    save_config(path, payload)
 
 
-def _backup(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    target = path.with_name(f"{path.name}.bak-{stamp}")
-    shutil.copy2(path, target)
-    return str(target)
 
 
 def _migrate_legacy() -> str | None:
@@ -269,7 +248,6 @@ def _migrate_legacy() -> str | None:
     servers = payload.get("mcpServers", {})
     if not isinstance(servers, dict) or MCP_KEY not in servers:
         return None
-    _backup(path)
     servers.pop(MCP_KEY, None)
     if not servers:
         payload.pop("mcpServers", None)

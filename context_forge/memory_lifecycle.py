@@ -577,8 +577,11 @@ class MemoryLifecycle:
             if noted:
                 conflict_skipped += 1
                 continue
+            left = self.store.get(candidate.left_id)
+            if left is None:
+                continue
             merge.apply_conflict(candidate, idempotency_key=f'hygiene:conflict:{candidate.left_id}'
-                                                            f'@{self.store.get(candidate.left_id).version}'
+                                                            f'@{left.version}'
                                                             f':{candidate.right_id}')
             conflict_applied += 1
 

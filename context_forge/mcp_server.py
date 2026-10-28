@@ -404,9 +404,13 @@ def create_server():
                                    status: str = "") -> list[dict[str, str]]:
         v = _vault()
         out: list[dict[str, str]] = []
+        from .index import parse_frontmatter
+
         for path in sorted(v.root.glob("rules/**/*.md"), reverse=True):
-            if status and f"status: {status}" not in path.read_text(encoding="utf-8"):
-                continue
+            if status:
+                values, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+                if values.get("status") != status:
+                    continue
             out.append({"path": str(path.relative_to(v.root)),
                         "name": path.stem})
             if len(out) >= limit:

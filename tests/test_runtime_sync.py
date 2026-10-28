@@ -88,13 +88,14 @@ def test_sync_failure_is_surfaced_not_swallowed(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     write_doc(vault, "knowledge/accepted/a.md", "alpha")
 
-    from context_forge import memory_import, watcher
+    from context_forge import memory_import, runtime_sync
 
     def boom(*args, **kwargs):
         raise RuntimeError("disk fault")
 
     monkeypatch.setattr(memory_import, "import_vault", boom)
-    watcher._sync_after_pass(vault)  # must not raise
+    with pytest.raises(RuntimeError):
+        runtime_sync.sync(vault, dry_run=False)
 
     assert "disk fault" in (runtime_sync.read_failure() or "")
     warnings = diag.check_memory_sync(vault)

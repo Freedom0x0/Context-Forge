@@ -136,7 +136,7 @@ class MemoryRecall:
         selected = [item for family in families for item in family.members]
         if limit is not None:
             selected = selected[:limit]
-        scored = self.store._fit(selected, byte_budget)
+        scored = self.store.fit_to_budget(selected, byte_budget)
         expanded = self._expanded([record.id for record, _ in scored], ctx)
         results = tuple(self._result(record, score, expanded, request_id=request_id,
                                      session_id=session_id) for record, score in scored)

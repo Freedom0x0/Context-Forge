@@ -147,7 +147,7 @@ def _is_stale(report: dict) -> bool:
 def sync(root: Path, *, dry_run: bool = True) -> SyncReport:
     """Import `root` (a Gen1 vault) into `memory.db`; incremental and idempotent.
 
-    Owns the sync-failure marker so every caller (CLI, watcher) gets the same
+    Owns the sync-failure marker so every caller gets the same
     record-on-failure / clear-on-success policy. `dry_run=True` writes nothing,
     marker included.
     """

@@ -14,9 +14,10 @@ Both are idempotent; `--uninstall` removes only what this owns.
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
+
+from .host_config import ConfigUnreadable, load_config, save_config
 
 HOOK_OWNER_KEY = "context_forge_managed"
 
@@ -48,18 +49,16 @@ def _settings_path(target: Path | None) -> Path:
 
 
 def _load(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+    """Read the host config; a corrupt file raises instead of reading as empty.
+
+    Returning `{}` here made `install` write a file containing only this tool's
+    hooks over the user's env, permissions and every other tool's entries.
+    """
+    return load_config(path)
 
 
 def _save(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8", newline="\n")
+    save_config(path, payload)
 
 
 def _owned_entries(hooks: list[dict]) -> list[dict]:
@@ -122,7 +121,11 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
 
 def status(target: Path | None = None) -> dict[str, object]:
     path = _settings_path(target)
-    hooks = _load(path).get("hooks", {})
+    try:
+        hooks = _load(path).get("hooks", {})
+    except ConfigUnreadable as exc:
+        # A diagnostic must report the failure, not raise through it.
+        return {"path": str(path), "events": {}, "ok": False, "error": str(exc)}
     installed = {event: bool(_owned_entries(hooks.get(event, [])))
                  for event in (*HOOK_EVENTS, SESSION_START_EVENT)}
     return {"path": str(path), "events": installed, "ok": all(installed.values())}

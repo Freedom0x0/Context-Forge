@@ -205,7 +205,14 @@ def install_hook(target: Path = typer.Option(None, "--target"),
         if not ok:
             raise typer.Exit(1)
         return
-    result = installer.uninstall(target) if uninstall else installer.install(target)
+    from .host_config import ConfigUnreadable
+
+    try:
+        result = installer.uninstall(target) if uninstall else installer.install(target)
+    except ConfigUnreadable as exc:
+        # Writing over a config we could not parse would delete everything in it.
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
     if uninstall:
         typer.echo(f"removed {result['removed']} hook entries at {result['path']}")
     else:
@@ -242,9 +249,11 @@ def mcp_install_cmd(uninstall: bool = typer.Option(False, "--uninstall")) -> Non
     """
     from . import mcp_install
 
+    from .host_config import ConfigUnreadable
+
     try:
         result = mcp_install.uninstall() if uninstall else mcp_install.install()
-    except mcp_install.McpInstallError as exc:
+    except (mcp_install.McpInstallError, ConfigUnreadable) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
     if uninstall:

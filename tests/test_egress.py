@@ -155,3 +155,22 @@ def test_a_failure_counts_only_until_a_later_attempt_succeeds(tmp_path: Path,
 
     ok, detail = doctor.check_precipitation_state()[1:]
     assert ok is True, detail
+
+
+def test_the_outbound_path_and_the_vault_tag_share_one_definition(tmp_path: Path) -> None:
+    """They used to answer "is this a credential?" with different patterns, and the
+    weaker one was on the outbound path: bare key shapes shipped to the model."""
+    from context_forge import secrets
+    from context_forge.transcript import sanitize_text
+    from context_forge.vault_retag import detect_sensitive
+
+    for bare_key in ("sk-ant-abcdefghijklmnop1234", "ghp_abcdefghijklmnopqrstuvwxyz012345",
+                     "AKIAABCDEFGHIJKLMNOP", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij"):
+        redacted = sanitize_text(f"here it is: {bare_key}")
+        assert bare_key not in redacted, bare_key
+        assert detect_sensitive(f"here it is: {bare_key}")[0] == "private", bare_key
+
+    # Chinese prose after a colon must not trip the privacy tag, but a redaction
+    # of `key=value` is cheap enough to stay aggressive.
+    assert detect_sensitive("token: 生成方式")[0] is None
+    assert "hunter2" not in sanitize_text("password=hunter2")

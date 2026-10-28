@@ -39,6 +39,21 @@ The config-file rule (the host's `I0()`): if `<config_dir>/.config.json` exists 
 
 We install at **user scope** (no approval needed) and identify the package with `env.PYTHONPATH` rather than `cwd`, because `context_forge` is not globally installed while `memory.db` resolves through `config.runtime_dir()` and never through the working directory.
 
+### Writing a host config: one reader/writer, and never over an unreadable file
+
+`forge install-hook` and `forge mcp-install` both edit `~/.claude/settings.json`, and both go
+through `host_config.load_config` / `save_config`.
+
+- **A file that exists but does not parse is not empty.** `load_config` raises
+  `ConfigUnreadable`; the command reports it and exits non-zero. Reading it as `{}` and writing
+  back replaced `env`, `permissions` and every other tool's hooks with a file containing only
+  this tool's entries.
+- **`save_config` is atomic** (mkstemp + `os.replace`), backs the file up first, and preserves
+  its newline style and trailing-newline presence. Text-mode `write_text` rewrote every CRLF
+  line as LF and appended a newline, churning the user's whole global config.
+- `install_hook.status()` reports an unreadable config as `{"ok": false, "error": …}` instead of
+  raising: a diagnostic that raises through its own check is worse than no check.
+
 ## Validation & Error Matrix
 
 | Input/state | Required behavior |

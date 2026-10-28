@@ -16,6 +16,7 @@ import re
 import shutil
 from pathlib import Path
 
+from .secrets import contains_secret
 from .index import iter_vault_documents, parse_frontmatter, yaml_scalar
 from .memory_models import DEFAULT_OWNER
 
@@ -59,10 +60,6 @@ _DOMAINS = {
     'memory': ('memory', 'recall', 'vault', '记忆', '召回', '复盘', '沉淀'),
 }
 
-_SECRET = re.compile(
-    r'(-----BEGIN [A-Z ]*PRIVATE KEY-----)|(sk-[A-Za-z0-9]{16,})|(ghp_[A-Za-z0-9]{20,})|'
-    r'(AKIA[0-9A-Z]{16})|((?:api[_-]?key|password|passwd|secret|token)\s*[:=]\s*["\']?[^\s,;\'"]{8,})',
-    re.I)
 _CONCRETE_FILE = re.compile(
     r'([\w.-]+/[\w.*-]+)'
     r'|(\b[\w-]+\.(?:ts|tsx|js|jsx|py|md|json|toml|ya?ml|css|go|rs)\b)'
@@ -155,7 +152,7 @@ def detect_sensitive(text: str) -> tuple[str | None, str]:
     Cross-project recall is the product, so that tag no longer exists; the URL text is left
     untouched and the owner boundary is the only gate.
     """
-    if _SECRET.search(text):
+    if contains_secret(text):
         return 'private', 'credential-shaped content detected'
     return None, ''
 

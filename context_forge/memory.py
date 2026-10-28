@@ -1965,7 +1965,7 @@ class MemoryStore:
                     continue
                 candidates.append((record, text, applied.get(f'{memory_id}@{record.version}', 0)))
             if legacy_filter:
-                return self._fit([(record, relevance(record, ctx, text=text, applied=count,
+                return self.fit_to_budget([(record, relevance(record, ctx, text=text, applied=count,
                                                      risks=extras.get(record.id, ())))
                                   for record, text, count in candidates], byte_budget)
             base = {record.id: (text, count) for record, text, count in candidates}
@@ -2010,11 +2010,11 @@ class MemoryStore:
                     semantic_score=semantic_scores.get(record.id),
                     risks=[*extras.get(record.id, ()), *notes[record.id]])))
             rescored.sort(key=lambda item: (-item[1].total, item[0].id))
-            return self._fit(rescored if effective_limit is None else rescored[:effective_limit],
+            return self.fit_to_budget(rescored if effective_limit is None else rescored[:effective_limit],
                              byte_budget)
 
     @staticmethod
-    def _fit(ranked: list[tuple[MemoryRecord, ScoreBreakdown]],
+    def fit_to_budget(ranked: list[tuple[MemoryRecord, ScoreBreakdown]],
              byte_budget: int) -> list[tuple[MemoryRecord, ScoreBreakdown]]:
         result = []
         used_bytes = 0

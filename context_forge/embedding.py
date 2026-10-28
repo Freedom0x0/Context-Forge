@@ -6,6 +6,8 @@ provider as lexical-only mode.
 """
 from __future__ import annotations
 
+import sys
+
 from array import array
 import hashlib
 import os
@@ -25,7 +27,7 @@ def pack_vector(values: Sequence[float], *, dimensions: int = DIMENSIONS) -> byt
     vector = array("f", (float(value) for value in values))
     if vector.itemsize != 4:
         raise EmbeddingError("platform float size is not supported")
-    if vector.typecode == "f" and __import__("sys").byteorder != "little":
+    if vector.typecode == "f" and sys.byteorder != "little":
         vector.byteswap()
     return vector.tobytes()
 
@@ -35,7 +37,7 @@ def unpack_vector(blob: bytes | None, *, dimensions: int = DIMENSIONS) -> tuple[
         return None
     vector = array("f")
     vector.frombytes(blob)
-    if __import__("sys").byteorder != "little":
+    if sys.byteorder != "little":
         vector.byteswap()
     return tuple(vector)
 

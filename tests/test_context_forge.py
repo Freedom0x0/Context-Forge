@@ -1233,3 +1233,46 @@ def test_scan_once_skips_a_sibling_tools_own_sessions(tmp_path: Path,
                              baseline=0) == 1
     assert store.latest_episode("s1") is not None
     assert store.latest_episode("o1") is None
+
+
+def test_install_hook_refuses_to_overwrite_an_unreadable_host_config(tmp_path: Path) -> None:
+    """A corrupt settings.json is someone's whole host configuration. Parsing it as
+    `{}` and writing back replaced env, permissions and every other tool's hooks."""
+    import pytest
+    from context_forge import install_hook
+    from context_forge.host_config import ConfigUnreadable
+
+    settings = tmp_path / "settings.json"
+    broken = '{"env": {"PATH": "/usr/bin"}, "permissions": '
+    settings.write_text(broken, encoding="utf-8")
+
+    with pytest.raises(ConfigUnreadable):
+        install_hook.install(settings)
+
+    assert settings.read_text(encoding="utf-8") == broken          # untouched
+
+
+def test_a_corrupt_config_is_reported_by_status_not_raised(tmp_path: Path) -> None:
+    from context_forge import install_hook
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{not json", encoding="utf-8")
+
+    status = install_hook.status(settings)
+
+    assert status["ok"] is False
+    assert "not valid JSON" in status["error"]
+
+
+def test_saving_a_host_config_preserves_newlines_and_writes_atomically(tmp_path: Path) -> None:
+    from context_forge import host_config
+
+    settings = tmp_path / "settings.json"
+    settings.write_bytes(b'{\r\n  "env": {}\r\n}\r\n')
+
+    host_config.save_config(settings, {"env": {"A": "1"}}, backup=False)
+
+    written = settings.read_bytes()
+    assert b"\r\n" in written and b"\n" not in written.replace(b"\r\n", b"")
+    assert written.endswith(b"\r\n")
+    assert list(tmp_path.glob("*.tmp")) == []            # no temp leftovers

@@ -117,6 +117,19 @@ lines.append(f"{key}: {value}")      # value is "**/*", or "a: b", or ""
 
 ---
 
+### Don't: Keep two definitions of "is this a credential"
+
+**Problem**: `transcript._SECRET_PATTERNS` (the outbound sanitizer) and `vault_retag._SECRET`
+(the vault privacy tag) both answered it, and they disagreed: the vault one knew the bare key
+shapes — `sk-…`, `ghp_…`, `AKIA…` — that the outbound one did not. The weaker definition sat on
+the path that sends text to a remote model.
+
+**Instead**: `secrets._patterns(min_assignment_value)` is the only definition. `redact()` and
+`contains_secret()` differ only in the assignment threshold — 1 character for redaction, 8 for a
+privacy tag, because tagging a whole document private must not trip on Chinese prose after a colon.
+
+---
+
 ### Don't: Let one caller silently swallow a new field
 
 **Problem**:
