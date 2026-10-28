@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Callable
 
+from .runtime_log import report
 from .memory import MemoryStore
 from .queue import JobStore
 
@@ -80,9 +81,9 @@ def _hygiene(ctx: Context) -> None:
     changed = actions['exact_applied'] + actions['conflicts_annotated']
     deferred = actions['exact_deferred'] + actions['conflicts_deferred']
     if changed or deferred:
-        print(f'[scheduled] hygiene archived {actions["exact_applied"]} duplicate(s), '
-              f'noted {actions["conflicts_annotated"]} contradiction(s), '
-              f'deferred {deferred} for the next pass')
+        report(f'[scheduled] hygiene archived {actions["exact_applied"]} duplicate(s), '
+               f'noted {actions["conflicts_annotated"]} contradiction(s), '
+               f'deferred {deferred} for the next pass')
 
 
 STEPS: dict[str, Callable[[Context], None]] = {
@@ -112,7 +113,7 @@ def run_due(store: JobStore, now: datetime | None = None, *,
             step(ctx)
         except Exception as exc:  # noqa: BLE001 - one step must not stop the rest
             store.record_scheduled_failure(name, moment, f'{type(exc).__name__}: {exc}')
-            print(f'[scheduled] {name} failed: {type(exc).__name__}: {exc}')
+            report(f'[scheduled] {name} failed: {type(exc).__name__}: {exc}')
             continue
         store.record_scheduled_success(name, moment)
         executed.append(name)

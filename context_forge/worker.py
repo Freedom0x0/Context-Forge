@@ -17,6 +17,7 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .runtime_log import report
 from .config import load_settings
 from .domain import (
     EventType,
@@ -244,9 +245,9 @@ def _write_session_artifacts(vault: Vault, session_id: str, project: str,
         try:
             vault.write_knowledge_auto(session_id, artifacts.knowledge, artifacts)
         except FileExistsError as exc:
-            print(f"[worker] knowledge skip: {exc}")
+            report(f"[worker] knowledge skip: {exc}")
         except Exception as exc:
-            print(f"[worker] knowledge write failed: {exc}")
+            report(f"[worker] knowledge write failed: {exc}")
 
     if artifacts.rule_candidate is not None and artifacts.knowledge is not None:
         try:
@@ -255,9 +256,9 @@ def _write_session_artifacts(vault: Vault, session_id: str, project: str,
                 artifacts.rule_candidate,
             )
         except FileExistsError as exc:
-            print(f"[worker] rule skip: {exc}")
+            report(f"[worker] rule skip: {exc}")
         except Exception as exc:
-            print(f"[worker] rule write failed: {exc}")
+            report(f"[worker] rule write failed: {exc}")
 
 
 def run_loop(store: JobStore, vault: Vault,
@@ -274,7 +275,7 @@ def run_loop(store: JobStore, vault: Vault,
     except (AttributeError, ValueError):
         pass
     processed_total = 0
-    print(f"[worker] loop started; interval={interval_seconds}s "
+    report(f"[worker] loop started; interval={interval_seconds}s "
           f"max_attempts={max_attempts}")
     try:
         while True:
@@ -282,7 +283,7 @@ def run_loop(store: JobStore, vault: Vault,
                 processed = process_one(store, vault, gateway, max_attempts, memory_store)
                 process_pending_finalizations(store, gateway or NoOpGateway(), memory_store)
             except Exception as exc:  # noqa: BLE001
-                print(f"[worker] loop error: {type(exc).__name__}: {exc}")
+                report(f"[worker] loop error: {type(exc).__name__}: {exc}")
                 processed = False
             if processed:
                 processed_total += 1
@@ -293,7 +294,7 @@ def run_loop(store: JobStore, vault: Vault,
                     break
                 time.sleep(interval_seconds)
     except KeyboardInterrupt:
-        print("[worker] interrupted; exiting")
+        report("[worker] interrupted; exiting")
     return processed_total
 
 

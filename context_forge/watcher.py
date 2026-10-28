@@ -21,6 +21,7 @@ import os
 import time
 from pathlib import Path
 
+from .runtime_log import log_path, report
 from .gateways import NoOpGateway, select_gateway
 from .queue import JobStore
 from .vault import Vault
@@ -389,7 +390,8 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
     try:
         lock.acquire()
     except WatcherAlreadyRunning as exc:
-        print(f"[watcher] {exc}")
+        # A duplicate launcher retries every 30 seconds: print each time, log hourly.
+        report(f"[watcher] {exc}", dedupe_seconds=3600)
         raise SystemExit(1)
 
     def _sigterm(signum, frame):  # noqa: ARG001
@@ -405,8 +407,9 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
         settings = load_settings()
         max_attempts = settings.max_attempts if settings else 3
 
-    print(f"[watcher] watching {transcript_root()} "
-          f"(every {interval_seconds:g}s, settle {settle_seconds:g}s)")
+    report(f"[watcher] watching {transcript_root()} "
+           f"(every {interval_seconds:g}s, settle {settle_seconds:g}s); "
+           f"log {log_path()}")
     try:
         try:
             while True:
@@ -425,15 +428,15 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
                             MemoryProjector(memory_store, vault.root),
                         )
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+                    report(f"[watcher] scan error: {type(exc).__name__}: {exc}")
                 try:
                     from . import scheduled
                     for name in scheduled.run_due(store, memory_store=memory_store):
-                        print(f"[scheduled] {name} ran")
+                        report(f"[scheduled] {name} ran")
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[scheduled] ledger error: {type(exc).__name__}: {exc}")
+                    report(f"[scheduled] ledger error: {type(exc).__name__}: {exc}")
                 time.sleep(interval_seconds)
         except KeyboardInterrupt:
-            print("[watcher] interrupted; exiting")
+            report("[watcher] interrupted; exiting")
     finally:
         lock.release()

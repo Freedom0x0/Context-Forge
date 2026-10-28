@@ -363,6 +363,15 @@ Pin the **source text of the two functions**, not the module. A module-level gre
 These are the invariants of the one long-running process (`forge watch-transcripts`, also
 launched by the Windows VBS autostart). They are easy to undo by "simplifying" one call site.
 
+### A resident process writes its failures to a file, not only to stdout
+
+`pythonw` from the Startup folder has no console: `print()` goes nowhere. A scan error could
+repeat for weeks while `doctor` showed only the instantaneous state — there was literally
+nothing to look at. Every message that matters in `watcher.py`, `worker.py` and
+`scheduled.py` goes through `runtime_log.report()`, which prints **and** appends to
+`runtime_dir()/runtime.log` (rotating once at 1 MB). `report` never raises: a diagnostic
+must not be the reason a pass fails. `forge doctor` prints the log path in the watcher line.
+
 ### Liveness must come from the lock, not the heartbeat
 
 `doctor.check_watcher` must read **who holds `runtime_dir()/watcher.lock`** (`watcher.lock_holder_pid()`),

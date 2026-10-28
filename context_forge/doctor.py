@@ -114,6 +114,7 @@ def check_watcher() -> tuple[str, bool, str]:
     holder reads as "not running", never as alive.
     """
     from .autostart import status
+    from .runtime_log import log_path
     from .watcher import lock_holder_pid
 
     info = status()
@@ -122,7 +123,7 @@ def check_watcher() -> tuple[str, bool, str]:
                 "autostart missing — run `forge install-hook`")
     pid = lock_holder_pid()
     if pid is not None:
-        return ("watcher", True, f"watcher 在跑（pid={pid}）")
+        return ("watcher", True, f"watcher 在跑（pid={pid}）；日志 {log_path()}")
     age = info["age_seconds"]
     if age is None:
         return ("watcher", False, "未运行（尚无 heartbeat）")
