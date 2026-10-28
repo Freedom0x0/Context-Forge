@@ -40,6 +40,15 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+# pytest's per-run temp dirs land in the cwd when TMPDIR is unset for the session;
+# one run left 99 MB of them here.
+pytest-of-*/
+# Coverage data, including the per-worker files pytest-cov writes.
+.coverage
+.coverage.*
+
+# Code index built by the local codebase-memory tooling
+.codegraph/
 
 # Local test fixtures
 test_*.md
