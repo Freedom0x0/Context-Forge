@@ -1276,3 +1276,29 @@ def test_saving_a_host_config_preserves_newlines_and_writes_atomically(tmp_path:
     assert b"\r\n" in written and b"\n" not in written.replace(b"\r\n", b"")
     assert written.endswith(b"\r\n")
     assert list(tmp_path.glob("*.tmp")) == []            # no temp leftovers
+
+
+def test_a_dribbling_response_is_abandoned_at_the_total_deadline() -> None:
+    """`httpx`'s read timeout resets on every chunk. One finalization held the
+    watcher loop for six minutes because the server kept trickling."""
+    import time
+
+    import httpx
+    import pytest as _pytest
+    from context_forge.provider_http import GatewayUnavailable, RemoteGateway
+
+    def slow(request):
+        time.sleep(1.0)                      # never finishes inside the budget
+        return httpx.Response(200, text="{}")
+
+    gw = RemoteGateway(api_url="https://api.test", api_key="sk-x", model="m",
+                       max_attempts=1)
+    gw._client = httpx.Client(transport=httpx.MockTransport(slow))
+    gw.base_delay = 0.0
+    gw.total_timeout = 0.2
+    started = time.time()
+
+    with _pytest.raises(GatewayUnavailable):
+        gw.extract_session(None, None, "s1")
+
+    assert time.time() - started < 0.9      # the deadline, not the read timeout

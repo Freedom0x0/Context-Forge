@@ -285,10 +285,15 @@ def check_precipitation_state() -> tuple[str, bool, str]:
         ).fetchone()[0]
         pending = store.db.execute(
             "SELECT COUNT(*) FROM finalization_receipts WHERE status IN ('extracting','planned')").fetchone()[0]
+        failed_writes = store.db.execute(
+            "SELECT COUNT(*) FROM finalization_operations WHERE status='failed'").fetchone()[0]
         if failed:
             issues.append(f"{failed} failed receipt(s)")
         if pending:
             issues.append(f"{pending} unfinished receipt(s)")
+        if failed_writes:
+            # One candidate's write failed; its siblings are in. Visible, not fatal.
+            issues.append(f"{failed_writes} failed write(s)")
     if memory_path.exists():
         try:
             with closing(sqlite3.connect(memory_path.as_uri() + "?mode=ro", uri=True)) as db:

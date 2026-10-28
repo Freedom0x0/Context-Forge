@@ -133,6 +133,27 @@ def test_memory_search_detects_the_stack_when_no_tags_are_supplied(tmp_path, mon
     found = tools["context_forge_memory_search"]("select", "demo", root=str(tmp_path))
     assert [item["id"] for item in found] == ["pattern"]
     assert found[0]["score"]["applicability"] > 0
+    # A project with nothing to detect is not a verdict: with no context to match
+    # against, scoped memories stay visible instead of silently disappearing.
     bare = tmp_path / "bare"
     bare.mkdir()
-    assert tools["context_forge_memory_search"]("select", "demo", root=str(bare)) == []
+    assert [item["id"] for item in
+            tools["context_forge_memory_search"]("select", "demo", root=str(bare))] == ["pattern"]
+
+
+def test_a_scoped_memory_survives_an_empty_or_differently_cased_context(tmp_path):
+    """Admission compared tags as raw strings: `jwt` missed `JWT`, and a caller that
+    said nothing about its stack hid every scoped memory."""
+    from context_forge.memory_models import ApplicabilityScope
+
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    store.put("scoped", MemoryDraft(body="clock tolerance for jwt refresh", status="active",
+                                    role="claim",
+                                    scope=ApplicabilityScope(technologies=("JWT",)),
+                                    sources=(Source(identity="tool:1", kind="tool",
+                                                    excerpt="observed"),)),
+              expected_version=0, idempotency_key="put:scoped", reason="test")
+
+    for tags in (frozenset(), frozenset({"jwt"}), frozenset({"JWT"})):
+        found = store.search("clock tolerance", project=None, technologies=tags)
+        assert [record.id for record in found] == ["scoped"], tags

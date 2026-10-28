@@ -1,6 +1,7 @@
 # Memory Recall Contracts
 
-- Recall filters current status, suppression and the three boundary eliminations (owner, privacy, exclusions) before returning the requested number of records. Source project is provenance, not a filter; the project-level access policy was removed in schema v12, so every record is reachable across projects and by id.
+- Recall filters current status, suppression and the three boundary eliminations (owner, privacy, exclusions) before returning the requested number of records.
+- **Candidate admission compares tags case-insensitively, and an empty context admits.** A `pattern`-level memory is admitted when its technologies/domains intersect the caller's. Two traps that shipped: the intersection was case-sensitive (`jwt` missed `JWT`), and a caller that supplied no tags intersected with the empty set, so every scoped memory disappeared while sitting in the store. "The caller did not say what it is working on" is not evidence that the memory does not apply. Source project is provenance, not a filter; the project-level access policy was removed in schema v12, so every record is reachable across projects and by id.
 - A result unit retains the conclusion together with applicability, sources, relationships and unresolved conflicts.
 - `get` may inspect historical versions; user-facing search returns current active or conflicted records only.
 - Retrieval stages are separate events: retrieved, tool-returned, presented, referenced, applied and validated.

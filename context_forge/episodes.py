@@ -51,12 +51,27 @@ def _awaiting_tool_result(path: Path) -> bool:
     return any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content)
 
 
+def project_name(value: object) -> str | None:
+    """The directory the work happened in.
+
+    A host may hand over a project name or a full working directory; the hook
+    passes `cwd` and the transcript scan passes the directory itself. Deriving
+    the name here, at the one place every episode passes through, is what keeps
+    the same session from being filed under two different projects.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return Path(text).name or None
+
+
 class EpisodeCollector:
     def __init__(self, store: JobStore) -> None:
         self.store = store
 
     def collect(self, session_id: str, transcript_path: Path, project: str | None,
                 host: str) -> EpisodeRecord:
+        project = project_name(project)
         text, lines = _complete_text(Path(transcript_path))
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         current = self.store.latest_episode(session_id)

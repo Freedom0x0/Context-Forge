@@ -99,6 +99,10 @@ class GatewayError(RuntimeError):
     """Raised by HTTP gateways when the model is unreachable or misbehaves."""
 
 
+class GatewayUnavailable(GatewayError):
+    """The provider did not answer. The same request may succeed later."""
+
+
 class RateLimited(GatewayError):
     """The provider is throttling us; retrying later will help.
 
@@ -128,10 +132,14 @@ class HttpGateway:
     rate_limit_delay = 20.0
 
     def __init__(self, max_attempts: int = 3, base_delay: float = 1.0,
-                 timeout: float = 30.0) -> None:
+                 timeout: float = 30.0, total_timeout: float = 90.0) -> None:
         self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.timeout = timeout
+        # `timeout` above is per read, and a server that keeps trickling resets
+        # it: one finalization held the watcher loop for six minutes. This is the
+        # bound on the whole call, retries and backoff included.
+        self.total_timeout = total_timeout
         self._client = None  # lazy: tests inject a MockTransport
 
     def _client_instance(self):
@@ -140,15 +148,37 @@ class HttpGateway:
             self._client = httpx.Client(timeout=self.timeout)
         return self._client
 
+    def _post_once(self, client, url: str, headers: dict[str, str],
+                   body: dict[str, Any], budget: float):
+        """One attempt, bounded by a wall-clock budget rather than a read timeout."""
+        import concurrent.futures
+
+        import httpx
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(client.post, url, headers=headers, json=body)
+            return future.result(timeout=max(0.1, budget))
+        except concurrent.futures.TimeoutError as exc:
+            raise httpx.ReadTimeout(
+                f"no complete response within {self.total_timeout:g}s") from exc
+        finally:
+            # Never wait for the stuck read: the whole point is to stop waiting.
+            pool.shutdown(wait=False)
+
     def _post(self, url: str, headers: dict[str, str],
               body: dict[str, Any]) -> _CallResult:
         import httpx
 
         client = self._client_instance()
+        deadline = time.monotonic() + self.total_timeout
         last_exc: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                response = client.post(url, headers=headers, json=body)
+                response = self._post_once(client, url, headers, body, remaining)
             except httpx.HTTPError as exc:
                 last_exc = exc
                 self._sleep_backoff(attempt)
@@ -157,11 +187,12 @@ class HttpGateway:
                 # The local proxy is shared with Claude Code itself, so
                 # we compete for quota. Honour Retry-After when present
                 # and back off far longer than for a transient 5xx.
-                delay = _retry_after(response) or self.rate_limit_delay * attempt
+                delay = min(_retry_after(response) or self.rate_limit_delay * attempt,
+                            max(0.0, deadline - time.monotonic()), 300.0)
                 last_exc = RateLimited(
                     f"429 rate limited; sleeping {delay:.0f}s"
                 )
-                time.sleep(min(delay, 300.0))
+                time.sleep(delay)
                 continue
             if response.status_code in {500, 502, 503, 504}:
                 last_exc = GatewayError(
@@ -176,7 +207,7 @@ class HttpGateway:
             return _CallResult(text=response.text, attempts=attempt)
         if isinstance(last_exc, RateLimited):
             raise last_exc
-        raise GatewayError(f"max attempts exhausted: {last_exc}")
+        raise GatewayUnavailable(f"max attempts exhausted: {last_exc}")
 
     def _sleep_backoff(self, attempt: int) -> None:
         time.sleep(min(self.base_delay * (2 ** (attempt - 1)), 8.0))

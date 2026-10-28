@@ -56,6 +56,27 @@ def _fit_budget(conversation: str) -> str:
     return TRUNCATION_NOTICE + tail
 
 
+def _content_addressed(draft: MemoryDraft) -> MemoryDraft:
+    """Rename each source after what it carries, not after which file it came from.
+
+    The model names a source by file and then quotes different passages in
+    different candidates, so two candidates claim one identity with two contents
+    and `memory_sources` refuses the second. Naming it after the passage makes
+    that collision impossible and still de-duplicates a genuine repeat.
+    """
+    if not draft.sources:
+        return draft
+    mapping = {source.identity: f"{source.identity}#{digest(source.excerpt)[:8]}"
+               for source in draft.sources}
+    sources = tuple(source.model_copy(update={"identity": mapping[source.identity]})
+                    for source in draft.sources)
+    applicability = tuple(
+        entry.model_copy(update={"evidence_ids": tuple(
+            mapping.get(item, item) for item in entry.evidence_ids)})
+        for entry in draft.applicability)
+    return draft.model_copy(update={"sources": sources, "applicability": applicability})
+
+
 def _model_input(transcript: str) -> str:
     """The conversation, not the raw log.
 
@@ -131,19 +152,29 @@ class FinalizationService:
                     )
                     results.append(operation["memory_id"])
                     continue
-                record = self.memory.put(
-                    operation["memory_id"], draft,
-                    expected_version=payload["expected_version"],
-                    idempotency_key=operation["operation_key"], actor="model",
-                    reason="episode finalization",
-                    relations=tuple(Relation.model_validate(item)
-                                    for item in payload.get("relations", [])),
-                )
+                try:
+                    record = self.memory.put(
+                        operation["memory_id"], draft,
+                        expected_version=payload["expected_version"],
+                        idempotency_key=operation["operation_key"], actor="model",
+                        reason="episode finalization",
+                        relations=tuple(Relation.model_validate(item)
+                                        for item in payload.get("relations", [])),
+                    )
+                except Exception as exc:  # noqa: BLE001 - one candidate must not void the rest
+                    # The writes before this one are already committed. Failing the whole
+                    # receipt over one bad candidate threw its siblings away as well. Only
+                    # the candidate write is caught: a ledger write that fails after the
+                    # memory landed is recoverable by replaying the receipt.
+                    self.queue.fail_finalization_operation(
+                        operation["operation_key"], f"{type(exc).__name__}: {exc}")
+                    continue
                 if record.draft.status == 'candidate' and requires_confirmation(record.draft):
                     self.memory.issue_confirmation(
                         record.id, record.version, reason='high-risk rule awaiting approval')
                 self.queue.complete_finalization_operation(
-                    operation["operation_key"], {"memory_id": record.id, "version": record.version},
+                    operation["operation_key"],
+                    {"memory_id": record.id, "version": record.version},
                 )
             results.append(operation["memory_id"])
         self.queue.mark_receipt_committed(finalization_id)
@@ -180,7 +211,7 @@ class FinalizationService:
               session_id: str, project: str | None, host: str = 'unknown') -> list[dict]:
         operations = []
         for ordinal, candidate in enumerate(output.candidates):
-            draft = candidate.draft
+            draft = _content_addressed(candidate.draft)
             projects = tuple(sorted(set(draft.provenance.projects) | ({project} if project else set())))
             sessions = tuple(sorted(set(draft.provenance.sessions) | {session_id}))
             draft = draft.model_copy(update={

@@ -346,9 +346,17 @@ def admitted(record: MemoryRecord, ctx: RetrievalContext) -> bool:
     if level == 'principle':
         return True
     if level == 'pattern':
-        if set(draft.scope.technologies) & set(ctx.technologies):
+        # A caller that did not say what it is working on has not ruled anything
+        # out. Filtering on an empty context hid every scoped memory: the store
+        # had the answer and refused to show it.
+        wanted_tech = {value.casefold() for value in ctx.technologies}
+        wanted_domains = {value.casefold() for value in ctx.domains}
+        if not wanted_tech and not wanted_domains:
             return True
-        if set(draft.scope.domains) & set(ctx.domains):
+        # Tags are identifiers, not prose: `JWT` and `jwt` are the same tag.
+        if {value.casefold() for value in draft.scope.technologies} & wanted_tech:
+            return True
+        if {value.casefold() for value in draft.scope.domains} & wanted_domains:
             return True
         # A constraints-only pattern has no technology or domain to hit; a
         # decidable, satisfied constraint is its only admission evidence.

@@ -574,3 +574,27 @@ def test_the_hook_skips_a_sibling_tools_own_session(tmp_path: Path):
 
     assert result is None
     assert store.latest_episode("tool-1") is None
+
+
+def test_a_cwd_and_a_directory_name_land_on_the_same_project(tmp_path: Path):
+    """The hook hands over `cwd`; the transcript scan hands over the directory
+    name. One session filed under two projects cannot be recalled by either."""
+    from context_forge.hooks.claude_code import handle_payload
+    from context_forge import watcher
+
+    transcript = tmp_path / "projects" / "C--work-demo" / "s1.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({"cwd": r"C:\work\demo",
+                                      "message": {"role": "user", "content": "x"}}) + "\n",
+                          encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+
+    handle_payload({"hook_event_name": "SessionEnd", "session_id": "s1",
+                    "cwd": r"C:\work\demo", "transcript_path": str(transcript)},
+                   store=store)
+    assert store.latest_episode("s1").project == "demo"
+
+    watcher.transcript_root = lambda: tmp_path / "projects"
+    watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                      settle_seconds=0, baseline=0)
+    assert store.latest_episode("s1").project == "demo"

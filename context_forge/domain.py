@@ -210,6 +210,9 @@ class FinalizationReceipt(BaseModel):
     updated_at: str
     extraction_owner: str | None = None
     extraction_lease_until: str | None = None
+    # How many times the attempt has failed. Kept so a timeout can be retried
+    # instead of throwing the episode away.
+    attempts: int = 0
 
 
 class DeferredTopic(BaseModel):

@@ -211,12 +211,14 @@ def process_pending_finalizations(store: JobStore, gateway, memory_store,
         try:
             memory_ids = service.finalize(receipt.finalization_id)
         except Exception as exc:
-            with store.db:
-                store.db.execute(
-                    "UPDATE finalization_receipts SET status='failed',error=?,updated_at=? "
-                    "WHERE finalization_id=?", (f"{type(exc).__name__}: {exc}",
-                                                datetime.now(timezone.utc).isoformat(),
-                                                receipt.finalization_id))
+            from .provider_http import GatewayUnavailable, RateLimited
+
+            # "The provider did not answer" may pass next time; a bad candidate will
+            # not. Retrying everything wastes calls, retrying nothing loses memories.
+            transient = isinstance(exc, (GatewayUnavailable, RateLimited))
+            store.fail_finalization(receipt.finalization_id,
+                                    f"{type(exc).__name__}: {exc}",
+                                    max_attempts=3 if transient else 1)
             # The episode must leave `finalizing`, or it is never offered again
             # and never cleaned up -- a zombie holding its transcript forever.
             from .episodes import EpisodeCollector

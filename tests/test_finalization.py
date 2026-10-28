@@ -186,8 +186,9 @@ def test_a_case_variant_lands_on_the_same_memory(tmp_path):
     records = list(memory.current_records())
     assert len(records) == 1
     assert records[0].version == 2
-    assert {item.identity for item in records[0].draft.sources} == {"episode:s0:1:1",
-                                                                   "episode:s1:1:1"}
+    # a source is named after its own text now, so compare the origin part
+    origins = {item.identity.split("#")[0] for item in records[0].draft.sources}
+    assert origins == {"episode:s0:1:1", "episode:s1:1:1"}
 
 
 def test_a_second_project_widens_provenance_instead_of_replacing_it(tmp_path):
@@ -287,12 +288,15 @@ def test_a_suppressed_row_refuses_the_write_instead_of_absorbing_it(tmp_path):
     written, _ = _precipitate(queue, memory, collector, tmp_path, "s1", body)
     _put_as_human(memory, written[0], suppressed=True)
 
-    with pytest.raises(ProtectedMemory):
-        _precipitate(queue, memory, collector, tmp_path, "s2", body)
+    # The refusal is per candidate now: the batch survives, the refusal is recorded.
+    _, finalization_id = _precipitate(queue, memory, collector, tmp_path, "s2", body)
 
     assert memory.get(written[0]).draft.suppressed is True
     assert memory.search(body, project="demo") == []
     assert queue.metrics()["veto_absorbed"] == 0        # refused, not absorbed
+    failed = [row for row in queue.finalization_operations(finalization_id)
+              if row["status"] == "failed"]
+    assert failed and "ProtectedMemory" in failed[0]["error"]
 
 
 def test_an_older_queue_database_gains_the_column_without_breaking_writes(tmp_path):
@@ -499,3 +503,54 @@ def test_a_short_chinese_episode_is_not_truncated(tmp_path: Path):
 
     chinese = "缓存失效要成对执行，否则会读到半旧的权限。"
     assert fin._fit_budget(chinese) == chinese
+
+
+def test_two_candidates_may_quote_one_source_differently(tmp_path: Path):
+    """The model names a source by file and then quotes different passages in two
+    candidates. Naming the source after the passage is what stops the second write
+    from colliding with the first."""
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "one"}}) + "\n",
+        encoding="utf-8")
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+
+    def source(excerpt):
+        return Source(identity="s1/transcript", kind="observation", session_id="s1",
+                      excerpt=excerpt)
+
+    first, second = source("the clocks differ by 47 seconds"), source("gateways must use NTP")
+    output = {"schema_version": 1, "candidates": [
+        {"candidate_id": "a", "evidence_refs": [first.identity],
+         "draft": MemoryDraft(body="clock skew causes 401s", status="active",
+                              provenance=Provenance(sessions=("s1",)),
+                              sources=(first,)).model_dump(mode="json")},
+        {"candidate_id": "b", "evidence_refs": [second.identity],
+         "draft": MemoryDraft(body="gateways must force NTP", status="active",
+                              provenance=Provenance(sessions=("s1",)),
+                              sources=(second,)).model_dump(mode="json")},
+    ], "deferred_topics": [], "no_memory_reason": None}
+
+    FinalizationService(queue, memory, Gateway(output)).finalize(receipt.finalization_id)
+
+    assert len(memory.current_records()) == 2
+    assert queue.receipt(receipt.finalization_id).status == "committed"
+    assert [row for row in queue.finalization_operations(receipt.finalization_id)
+            if row["status"] == "failed"] == []
+
+
+def test_a_failed_attempt_keeps_the_receipt_retryable_until_the_cap(tmp_path: Path):
+    """Bounding the wait without a retry would trade "blocks the watcher" for
+    "loses the memory"."""
+    queue, receipt = setup_receipt(tmp_path)
+
+    assert queue.fail_finalization(receipt.finalization_id, "timeout", max_attempts=3) == "planned"
+    assert receipt.finalization_id in [item.finalization_id for item in queue.pending_receipts()]
+    assert queue.fail_finalization(receipt.finalization_id, "timeout", max_attempts=3) == "planned"
+    assert queue.fail_finalization(receipt.finalization_id, "timeout", max_attempts=3) == "failed"
+    assert queue.receipt(receipt.finalization_id).attempts == 3
+    assert receipt.finalization_id not in [item.finalization_id for item in queue.pending_receipts()]

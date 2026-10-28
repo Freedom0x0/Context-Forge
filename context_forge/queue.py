@@ -124,6 +124,7 @@ class JobStore:
           end_kind TEXT NOT NULL, extraction_json TEXT, write_plan_json TEXT,
           status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL, extraction_owner TEXT, extraction_lease_until TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
           UNIQUE(session_id,segment,episode_digest)
         );
         CREATE TABLE IF NOT EXISTS finalization_operations (
@@ -154,6 +155,9 @@ class JobStore:
         for name in ("extraction_owner", "extraction_lease_until"):
             if name not in receipt_columns:
                 self.db.execute(f"ALTER TABLE finalization_receipts ADD COLUMN {name} TEXT")
+        if "attempts" not in receipt_columns:
+            self.db.execute(
+                "ALTER TABLE finalization_receipts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         episode_columns = {row[1] for row in self.db.execute(
             "PRAGMA table_info(session_episodes)").fetchall()}
         if "host" not in episode_columns:
@@ -564,6 +568,34 @@ class JobStore:
                 "WHERE operation_key=?",
                 (json.dumps(result, sort_keys=True), _now(), operation_key),
             )
+
+    def fail_finalization(self, finalization_id: str, error: str, *,
+                          max_attempts: int = 3) -> str:
+        """Record a failed attempt; keep the receipt retryable until the cap.
+
+        A timeout is not a verdict. Bounding the wait without a retry would have
+        traded "blocks the watcher forever" for "loses the memory", so the receipt
+        goes back to `planned` until it has burned its attempts.
+        """
+        with self.db:
+            row = self.db.execute(
+                "SELECT attempts FROM finalization_receipts WHERE finalization_id=?",
+                (finalization_id,)).fetchone()
+            if row is None:
+                raise KeyError(finalization_id)
+            attempts = int(row["attempts"] or 0) + 1
+            status = "failed" if attempts >= max_attempts else "planned"
+            self.db.execute(
+                "UPDATE finalization_receipts SET status=?,error=?,attempts=?,updated_at=? "
+                "WHERE finalization_id=?", (status, error, attempts, _now(), finalization_id))
+        return status
+
+    def fail_finalization_operation(self, operation_key: str, error: str) -> None:
+        """Mark one write as failed without voiding the ones already applied."""
+        with self.db:
+            self.db.execute(
+                "UPDATE finalization_operations SET status='failed',error=?,updated_at=? "
+                "WHERE operation_key=?", (error, _now(), operation_key))
 
     def mark_receipt_committed(self, finalization_id: str) -> FinalizationReceipt:
         with self.db:
