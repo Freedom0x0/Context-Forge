@@ -157,3 +157,40 @@ def test_a_scoped_memory_survives_an_empty_or_differently_cased_context(tmp_path
     for tags in (frozenset(), frozenset({"jwt"}), frozenset({"JWT"})):
         found = store.search("clock tolerance", project=None, technologies=tags)
         assert [record.id for record in found] == ["scoped"], tags
+
+
+def test_memory_search_is_lexical_unless_semantic_is_asked_for(tmp_path, monkeypatch):
+    """Recall runs mid-conversation. The vector channel loads a model (22 s warm,
+    69 s cold on this machine), so the tool must not pay that unless asked."""
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    add(store, "one", "mcp memory")
+
+    class Exploding:
+        dimensions = 384
+        identity = "sentence-transformers:all-MiniLM-L6-v2:384"
+
+        def encode(self, text):
+            raise AssertionError("the semantic channel ran without being asked")
+
+    store.embedder = Exploding()
+    tools = mcp_tools(store, monkeypatch)
+
+    found = tools["context_forge_memory_search"]("mcp", "demo", technologies="antd")
+
+    assert [item["id"] for item in found] == ["one"]
+    assert "语义" not in found[0]["explanation"]
+
+
+def test_a_tool_recall_is_written_to_the_retrieval_ledger(tmp_path, monkeypatch):
+    """The host never mints a request id, so `retrieval_events` stayed empty and
+    the effectiveness report could not see any tool recall at all."""
+    store = MemoryStore.initialize(tmp_path / "memory.db")
+    add(store, "one", "mcp memory")
+    tools = mcp_tools(store, monkeypatch)
+
+    tools["context_forge_memory_search"]("mcp", "demo", technologies="antd")
+
+    events = store.retrieval_events()
+    assert [(event["memory_id"], event["stage"]) for event in events] == [
+        ("one", "tool_returned")]
+    assert events[0]["request_id"].startswith("mcp:")

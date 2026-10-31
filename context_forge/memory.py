@@ -1817,11 +1817,12 @@ class MemoryStore:
     def search(self, query: str, *, project: str | None, changed_path: str | None = None,
                limit: int | None = 8, byte_budget: int = 65536,
                owner: str = DEFAULT_OWNER, technologies: frozenset[str] = frozenset(),
-               domains: frozenset[str] = frozenset(), legacy_filter: bool = False) -> list[MemoryRecord]:
+               domains: frozenset[str] = frozenset(), legacy_filter: bool = False,
+               semantic: bool = True) -> list[MemoryRecord]:
         return [record for record, _ in self.search_scored(
             query, project=project, changed_path=changed_path, limit=limit,
             byte_budget=byte_budget, owner=owner, technologies=technologies,
-            domains=domains, legacy_filter=legacy_filter)]
+            domains=domains, legacy_filter=legacy_filter, semantic=semantic)]
 
     def search_candidates(self, query: str, *, project: str | None,
                           candidate_limit: int = 100, **kwargs) -> CandidatePool:
@@ -1835,6 +1836,7 @@ class MemoryStore:
                       limit: int | None = 8, byte_budget: int = 65536,
                       owner: str = DEFAULT_OWNER, technologies: frozenset[str] = frozenset(),
                       domains: frozenset[str] = frozenset(), legacy_filter: bool = False,
+                      semantic: bool = True,
                       extra_risks: dict[str, Sequence[str]] | None = None
                       ) -> list[tuple[MemoryRecord, ScoreBreakdown]]:
         """Ranked recall with a five-dimension breakdown per record.
@@ -1846,6 +1848,10 @@ class MemoryStore:
         filter, provenance retention, or the tri-state exclusion semantics \u2014
         those are correctness fixes, and undoing them would hide
         cross-project memories and silently drop records again.
+
+        `semantic=False` keeps the lexical channels only. Loading the local model
+        costs 22 s warm and 69 s cold on this machine, so anything answering a
+        person or a host must opt in rather than pay it by default.
         """
         if limit is not None and limit < 1 or byte_budget < 1:
             raise ValueError('positive limit and byte budget required')
@@ -1919,7 +1925,7 @@ class MemoryStore:
             # Optional semantic candidates supplement lexical results. Invalid, drifted
             # (embedding_model mismatch — design §5) or unavailable vectors are ignored,
             # preserving lexical-only behavior.
-            if self.embedder is not None and tokens:
+            if semantic and self.embedder is not None and tokens:
                 try:
                     query_blob = self.embedder.encode(query)
                     query_vector = unpack_vector(query_blob, dimensions=self.embedder.dimensions)

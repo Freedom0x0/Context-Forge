@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -150,8 +151,18 @@ def _read_imports(root: Path, evidence: dict[str, list[str]], skip: frozenset[st
     return findings
 
 
+# Reading every source file under a root costs 1.7–4.4 s here and the result is
+# asked for on each recall that carries no explicit tags. A stack does not change
+# mid-session, so a short-lived answer is worth reusing.
+_CACHE_TTL = 300.0
+_cache: dict[str, tuple[float, TechProfile]] = {}
+
+
 def detect(root: Path) -> TechProfile:
     root = Path(root).resolve()
+    cached = _cache.get(str(root))
+    if cached is not None and time.monotonic() - cached[0] < _CACHE_TTL:
+        return cached[1]
     skip = frozenset(variant for path in root.iterdir()
                      if path.name not in _SKIP_DIRS and (path.is_dir() or path.suffix == '.py')
                      for variant in (_root_package(path.name), _root_package(path.name.replace('_', '-'))))
@@ -161,8 +172,10 @@ def detect(root: Path) -> TechProfile:
     haystack = ' '.join(list(evidence) + paths)
     domains = {domain: tuple(hits) for domain, hits in _DOMAIN_KEYWORDS.items()
                if any(keyword in haystack for keyword in hits)}
-    return TechProfile(
+    profile = TechProfile(
         technologies=frozenset(evidence),
         domains=frozenset(domains),
         raw_evidence={token: tuple(dict.fromkeys(sources)) for token, sources in sorted(evidence.items())},
     )
+    _cache[str(root)] = (time.monotonic(), profile)
+    return profile

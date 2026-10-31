@@ -204,7 +204,13 @@ class FinalizationReceipt(BaseModel):
     end_kind: Literal["explicit", "manual", "inferred"]
     extraction_json: str | None = None
     write_plan_json: str | None = None
-    status: Literal["extracting", "planned", "committed", "projected", "failed"]
+    # `superseded`: the session kept talking and rewrote its own episode row, so the
+    # frozen input this receipt was planned against no longer exists. Retired without
+    # being a failure; a later receipt carries the whole conversation.
+    # `dismissed`: a human decided this receipt will never be applied. Also not a
+    # failure — without it, one dead API key would keep `doctor` red forever.
+    status: Literal["extracting", "planned", "committed", "projected", "failed",
+                    "superseded", "dismissed"]
     error: str | None = None
     created_at: str
     updated_at: str

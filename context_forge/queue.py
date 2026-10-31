@@ -590,6 +590,66 @@ class JobStore:
                 "WHERE finalization_id=?", (status, error, attempts, _now(), finalization_id))
         return status
 
+    def supersede_stale_receipts(self, session_id: str, segment: int,
+                                 digest: str) -> int:
+        """Retire receipts whose frozen episode text has been rewritten.
+
+        Every turn of a live session rewrites its episode row with a new digest.
+        A receipt frozen against an earlier digest can never be applied, and
+        letting it fail turned the first N-1 turns of every multi-turn session
+        into permanent errors.
+        """
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE finalization_receipts SET status='superseded',updated_at=? "
+                "WHERE session_id=? AND segment=? AND episode_digest<>? "
+                "AND status IN ('extracting','planned','failed')",
+                (_now(), session_id, segment, digest))
+        return cursor.rowcount
+
+    def supersede_finalization(self, finalization_id: str) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE finalization_receipts SET status='superseded',updated_at=? "
+                "WHERE finalization_id=? AND status IN ('extracting','planned','failed')",
+                (_now(), finalization_id))
+
+    def receipts(self, *, status: str | None = None, limit: int = 50) -> list[FinalizationReceipt]:
+        sql = "SELECT * FROM finalization_receipts"
+        params: list = []
+        if status:
+            sql += " WHERE status=?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [FinalizationReceipt(**dict(row)) for row in self.db.execute(sql, params)]
+
+    def retry_finalization(self, finalization_id: str) -> bool:
+        """Hand a failed receipt back to the worker with a fresh attempt budget.
+
+        A stale one retires itself on the next pass (the episode digest no longer
+        matches), so the operator does not have to classify before requeueing.
+        """
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE finalization_receipts SET status='planned',attempts=0,error=NULL,"
+                "updated_at=? WHERE finalization_id=? AND status IN ('failed','dismissed')",
+                (_now(), finalization_id))
+        return cursor.rowcount == 1
+
+    def dismiss_finalization(self, finalization_id: str, reason: str) -> bool:
+        """Retire a receipt a human decided will never be applied.
+
+        Only a terminal failure can be dismissed: a `planned` one belongs to the
+        worker, and dismissing it mid-flight would strand its operations.
+        """
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE finalization_receipts SET status='dismissed',error=?,updated_at=? "
+                "WHERE finalization_id=? AND status='failed'",
+                (reason, _now(), finalization_id))
+        return cursor.rowcount == 1
+
     def fail_finalization_operation(self, operation_key: str, error: str) -> None:
         """Mark one write as failed without voiding the ones already applied."""
         with self.db:
@@ -600,7 +660,8 @@ class JobStore:
     def mark_receipt_committed(self, finalization_id: str) -> FinalizationReceipt:
         with self.db:
             row = self.db.execute(
-                "SELECT session_id,segment FROM finalization_receipts WHERE finalization_id=?",
+                "SELECT session_id,segment,episode_digest FROM finalization_receipts "
+                "WHERE finalization_id=?",
                 (finalization_id,),
             ).fetchone()
             if row is None:
@@ -609,9 +670,13 @@ class JobStore:
                 "UPDATE finalization_receipts SET status='committed',updated_at=? WHERE finalization_id=?",
                 (_now(), finalization_id),
             )
+            # Only the text this receipt read counts as finalized. Marking a newer
+            # episode row finalized would send the next turn to a fresh segment that
+            # starts after text nobody extracted, and retention would then delete it.
             self.db.execute(
-                "UPDATE session_episodes SET state='finalized' WHERE session_id=? AND segment=?",
-                (row["session_id"], row["segment"]),
+                "UPDATE session_episodes SET state='finalized' "
+                "WHERE session_id=? AND segment=? AND transcript_digest=?",
+                (row["session_id"], row["segment"], row["episode_digest"]),
             )
         result = self.receipt(finalization_id)
         assert result is not None

@@ -372,6 +372,21 @@ nothing to look at. Every message that matters in `watcher.py`, `worker.py` and
 `runtime_dir()/runtime.log` (rotating once at 1 MB). `report` never raises: a diagnostic
 must not be the reason a pass fails. `forge doctor` prints the log path in the watcher line.
 
+### A pass must not re-read history
+
+A pass runs every fifteen seconds. Counting lines reads the whole file, and this machine's
+transcript tree is 248 MB across 437 files: counting them all each pass re-reads everything, and
+on a starved disk that turns one pass into minutes spent re-answering a settled question.
+
+- `scan_once` skips a transcript whose mtime is older than the pass that last collected it.
+  `EpisodeCollector.collect` stamps `last_activity_at` **after** reading, so the comparison keeps a
+  one-second margin: a write landing between the read and the stamp is re-read next pass, never
+  skipped forever.
+- `_awaiting_tool_result` reads the last 64 KB, not the file; it only needs the last complete line.
+
+A pass slower than 5 s logs `[watcher] slow pass: scan …s, finalize …s, N collected`, so a stall
+carries its phase instead of being a silent gap between two timestamps.
+
 ### Liveness must come from the lock, not the heartbeat
 
 `doctor.check_watcher` must read **who holds `runtime_dir()/watcher.lock`** (`watcher.lock_holder_pid()`),

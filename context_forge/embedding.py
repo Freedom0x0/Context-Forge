@@ -60,26 +60,30 @@ class LocalEmbedder:
         if self._load_error is not None:
             raise self._load_error
         if self._model is None:
+            # huggingface_hub snapshots these flags at import time, so they have to be
+            # set *before* sentence-transformers is imported. Setting HF_HUB_OFFLINE
+            # after the import silenced nothing: every cold load still queued HTTP
+            # requests to a blocked host and spent minutes in retry timeouts.
+            flags = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+            previous = {name: os.environ.get(name) for name in flags}
+            for name in flags:
+                os.environ[name] = "1"
             try:
                 from sentence_transformers import SentenceTransformer
+                self._model = SentenceTransformer(self.model_name)
             except ImportError as exc:
                 self._load_error = EmbeddingError("sentence-transformers is not installed")
                 raise self._load_error from exc
-            # Force offline resolution even on versions whose constructor does not
-            # expose a local_files_only argument.
-            previous = os.environ.get("HF_HUB_OFFLINE")
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            try:
-                self._model = SentenceTransformer(self.model_name)
             except Exception as exc:
                 self._load_error = EmbeddingError(
                     f"cannot load cached local embedding model {self.model_name}")
                 raise self._load_error from exc
             finally:
-                if previous is None:
-                    os.environ.pop("HF_HUB_OFFLINE", None)
-                else:
-                    os.environ["HF_HUB_OFFLINE"] = previous
+                for name, value in previous.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
         return self._model
 
     def encode(self, text: str) -> bytes:

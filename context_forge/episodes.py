@@ -23,6 +23,28 @@ def _complete_text(path: Path) -> tuple[str, int]:
     return complete.decode("utf-8", errors="replace"), count
 
 
+def _tail_complete_line(path: Path, limit: int = 65536) -> str | None:
+    """The last newline-terminated line, read from the tail only.
+
+    The caller runs on every pass for every live episode; reading whole
+    transcripts there cost a full re-read of the history each time.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            data = handle.read()
+    except OSError:
+        return None
+    end = data.rfind(b"\n")
+    if end < 0:
+        return None
+    lines = [line for line in data[: end].decode("utf-8", errors="replace").splitlines()
+             if line.strip()]
+    return lines[-1] if lines else None
+
+
 def _awaiting_tool_result(path: Path) -> bool:
     """True when the last complete line is an assistant turn holding a tool_use.
 
@@ -31,15 +53,11 @@ def _awaiting_tool_result(path: Path) -> bool:
     unreadable or missing transcript is treated the same way: skip this pass
     instead of finalizing on evidence we cannot check.
     """
-    try:
-        text, _ = _complete_text(Path(path))
-    except OSError:
-        return True
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
+    line = _tail_complete_line(Path(path))
+    if line is None:
         return True
     try:
-        record = json.loads(lines[-1])
+        record = json.loads(line)
     except json.JSONDecodeError:
         return True
     if not isinstance(record, dict) or record.get("type") != "assistant":
@@ -93,7 +111,11 @@ class EpisodeCollector:
             state="open", started_at=moment if segment != (current.segment if current else 1) else (current.started_at if current else moment),
             last_activity_at=moment,
         )
-        return self.store.save_episode(record)
+        saved = self.store.save_episode(record)
+        # Receipts planned against the previous digest of this segment are now
+        # unappliable; retire them here, at the moment their input is replaced.
+        self.store.supersede_stale_receipts(session_id, segment, record.transcript_digest)
+        return saved
 
     def advance_inferred(self, now: datetime | None = None, *,
                          new_activity: bool = False,

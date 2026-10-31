@@ -26,10 +26,16 @@ DAILY_SECONDS = 86400
 
 @dataclass(frozen=True)
 class Context:
-    """What a step may touch. Steps get the queue always and memory when it exists."""
+    """What a step may touch. Steps get the queue always and memory when it exists.
+
+    `now` is the moment the step was scheduled for. A step that compares
+    timestamps must use it rather than the wall clock, or `run_due(now=...)`
+    becomes a fiction and its tests start failing on the calendar.
+    """
 
     queue: JobStore
     memory: MemoryStore | None = None
+    now: datetime | None = None
 
 
 def _retention(ctx: Context) -> None:
@@ -43,7 +49,8 @@ def _retention(ctx: Context) -> None:
     # sources it fed as `source_deleted` and keeps the minimal audit facts. The
     # store's own path skipped that, so the same deletion meant two different
     # things depending on who ran it.
-    EpisodeCollector(ctx.queue).apply_retention(days, memory_store=ctx.memory)
+    EpisodeCollector(ctx.queue).apply_retention(days, memory_store=ctx.memory,
+                                                 now=ctx.now)
 
 
 def _month_keys(today: date | None = None) -> tuple[str, str]:
@@ -100,9 +107,9 @@ def run_due(store: JobStore, now: datetime | None = None, *,
             steps: dict[str, Callable[[Context], None]] | None = None,
             memory_store: MemoryStore | None = None) -> list[str]:
     """Run every overdue step once and return the names that succeeded."""
-    ctx = Context(store, memory_store)
-    steps = steps if steps is not None else STEPS
     moment = now or datetime.now().astimezone()
+    ctx = Context(store, memory_store, moment)
+    steps = steps if steps is not None else STEPS
     executed: list[str] = []
     for name, step in steps.items():
         if name in MEMORY_STEPS and memory_store is None:

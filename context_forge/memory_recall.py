@@ -117,7 +117,8 @@ class MemoryRecall:
                limit: int | None = 8, byte_budget: int = 65536,
                request_id: str | None = None, session_id: str | None = None,
                stage: str = 'retrieved', technologies: frozenset[str] = frozenset(),
-               domains: frozenset[str] = frozenset(), legacy_filter: bool = False
+               domains: frozenset[str] = frozenset(), legacy_filter: bool = False,
+               semantic: bool = True
                ) -> RecallResponse:
         """Scoped recall units with a four-part explanation.
 
@@ -131,7 +132,7 @@ class MemoryRecall:
         pool = self.store.search_candidates(
             query, project=project, changed_path=changed_path, candidate_limit=100,
             technologies=ctx.technologies, domains=ctx.domains,
-            legacy_filter=legacy_filter)
+            legacy_filter=legacy_filter, semantic=semantic)
         families = group_for_presentation(pool.items)
         selected = [item for family in families for item in family.members]
         if limit is not None:

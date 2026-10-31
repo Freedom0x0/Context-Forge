@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .runtime_log import log_path, report
@@ -95,6 +96,19 @@ def probe_session_liveness(transcript: Path, session_id: str, store: JobStore, *
         return process_alive, None
     tools = state["active_tools"]
     return process_alive, bool(tools) if isinstance(tools, bool) else None
+
+
+def _unchanged_since(episode, mtime: float) -> bool:
+    """True when the transcript has not been written since it was collected.
+
+    A one-second margin: `last_activity_at` is stamped after the file is read,
+    so a write landing between the two must be re-read next pass rather than
+    skipped forever.
+    """
+    try:
+        return datetime.fromisoformat(episode.last_activity_at).timestamp() - 1.0 >= mtime
+    except (TypeError, ValueError):
+        return False
 
 
 def baseline_path() -> Path:
@@ -189,12 +203,18 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
             continue  # predates the watcher; never replay history
         if current - mtime < settle_seconds:
             continue  # still being written, or user is mid-session
-        total = count_complete_lines(transcript)
         session_id = transcript.stem
         process, tools = probe_session_liveness(transcript, session_id, store,
                                                 now=current)
         session_liveness[session_id] = (process, tools)
         episode = store.latest_episode(session_id)
+        if episode is not None and _unchanged_since(episode, mtime):
+            # Counting lines means reading the whole file. On a 248 MB history
+            # that re-read every 15 s was the watcher's main cost, and a
+            # transcript that has not been written since its last collection
+            # cannot have anything new.
+            continue
+        total = count_complete_lines(transcript)
         collected = episode.collected_through_line if episode else 0
         if total <= collected:
             if total == 0:
@@ -415,20 +435,30 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
             while True:
                 _beat()
                 processed = 0
+                scan_seconds = finalize_seconds = 0.0
                 try:
+                    started = time.monotonic()
                     processed = scan_once(store, vault, gateway,
                                           settle_seconds=settle_seconds,
                                           max_attempts=max_attempts,
                                           memory_store=memory_store)
+                    scan_seconds = time.monotonic() - started
                     if memory_store is not None:
                         from .memory_projection import MemoryProjector
                         from .worker import process_pending_finalizations
+                        started = time.monotonic()
                         process_pending_finalizations(
                             store, gateway or NoOpGateway(), memory_store,
                             MemoryProjector(memory_store, vault.root),
                         )
+                        finalize_seconds = time.monotonic() - started
                 except Exception as exc:  # noqa: BLE001
                     report(f"[watcher] scan error: {type(exc).__name__}: {exc}")
+                if scan_seconds > 5 or finalize_seconds > 5:
+                    # A pass should take about a second. Record the slow ones so a
+                    # stall is a log line with a phase attached, not a mystery.
+                    report(f"[watcher] slow pass: scan {scan_seconds:.1f}s, "
+                           f"finalize {finalize_seconds:.1f}s, {processed} collected")
                 try:
                     from . import scheduled
                     for name in scheduled.run_due(store, memory_store=memory_store):

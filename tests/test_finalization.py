@@ -554,3 +554,58 @@ def test_a_failed_attempt_keeps_the_receipt_retryable_until_the_cap(tmp_path: Pa
     assert queue.fail_finalization(receipt.finalization_id, "timeout", max_attempts=3) == "failed"
     assert queue.receipt(receipt.finalization_id).attempts == 3
     assert receipt.finalization_id not in [item.finalization_id for item in queue.pending_receipts()]
+
+
+def test_a_stale_receipt_is_retired_instead_of_failing(tmp_path: Path):
+    """The session talked again while this receipt waited, so its frozen input is
+    gone. That is not a provider failure and must not be counted as one."""
+    queue, receipt = setup_receipt(tmp_path)
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    gateway = Gateway(output())
+    with queue.db:
+        queue.db.execute("UPDATE session_episodes SET transcript_digest='moved' "
+                         "WHERE session_id='s1'")
+
+    assert FinalizationService(queue, memory, gateway).finalize(receipt.finalization_id) == []
+    assert gateway.calls == 0
+    assert queue.receipt(receipt.finalization_id).status == "superseded"
+
+
+def test_committing_does_not_finalize_a_newer_episode_row(tmp_path: Path):
+    """Marking the newer row finalized would send the next turn to a fresh segment
+    that starts after text nobody extracted, and retention would delete it."""
+    queue, receipt = setup_receipt(tmp_path)
+    with queue.db:
+        queue.db.execute("UPDATE session_episodes SET transcript_digest='newer', "
+                         "collected_through_line=2, state='open' WHERE session_id='s1'")
+
+    queue.mark_receipt_committed(receipt.finalization_id)
+
+    assert queue.episode('s1', 1).state == 'open'
+
+
+def test_a_failed_receipt_can_be_requeued_or_dismissed(tmp_path, monkeypatch):
+    """One dead API key left nineteen receipts red with no way back short of SQL."""
+    from typer.testing import CliRunner
+    import context_forge.cli as cli
+
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    queue, receipt = setup_receipt(tmp_path)
+    queue.fail_finalization(receipt.finalization_id, "GatewayError: 401", max_attempts=1)
+    runner = CliRunner()
+
+    listed = runner.invoke(cli.app, ["receipts", "--status", "failed"])
+    assert listed.exit_code == 0 and receipt.finalization_id in listed.output
+
+    assert runner.invoke(cli.app, ["receipt-retry", receipt.finalization_id]).exit_code == 0
+    assert queue.receipt(receipt.finalization_id).status == "planned"
+    assert [item.finalization_id for item in queue.pending_receipts()] == [
+        receipt.finalization_id]
+
+    queue.fail_finalization(receipt.finalization_id, "GatewayError: 401", max_attempts=1)
+    assert runner.invoke(cli.app, ["receipt-dismiss", receipt.finalization_id,
+                                   "--reason", "dead key"]).exit_code == 0
+    dismissed = queue.receipt(receipt.finalization_id)
+    assert dismissed.status == "dismissed"
+    assert dismissed.error == "dead key"
+    assert queue.pending_receipts() == []

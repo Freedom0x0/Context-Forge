@@ -107,14 +107,22 @@ class FinalizationService:
             raise KeyError(finalization_id)
         episode = self.queue.episode(receipt.session_id, receipt.segment)
         if episode is None or episode.transcript_digest != receipt.episode_digest:
-            raise ValueError("receipt episode no longer matches its frozen digest")
+            # The session kept talking and rewrote its episode row, or retention took
+            # the whole session. There is nothing left for this receipt to apply, and
+            # a later receipt covers the newer text; retiring it is not a failure.
+            self.queue.supersede_finalization(finalization_id)
+            return []
         if receipt.extraction_json is None:
             owner = str(uuid.uuid4())
             if not self.queue.claim_extraction(finalization_id, owner):
                 return []
             transcript = sanitize_text(Path(episode.transcript_path).read_text(
                 encoding="utf-8", errors="replace"))
-            existing = self.memory.search(transcript[:1000], project=episode.project, limit=20)
+            # Lexical only: this lookup fills "what do we already know" for the prompt,
+            # and asking the vector channel would load a model (tens of seconds) into
+            # the watcher process for every episode.
+            existing = self.memory.search(transcript[:1000], project=episode.project,
+                                          limit=20, semantic=False)
             raw = self.gateway.finalize_episode({
                 "schema_version": 1, "session_id": episode.session_id,
                 "segment": episode.segment, "episode_digest": episode.transcript_digest,
@@ -131,6 +139,13 @@ class FinalizationService:
             extraction_json = output.model_dump_json()
             operations = self._plan(receipt.finalization_id, output, episode.session_id,
                                     episode.project, episode.host)
+            # The session may have talked again while the model was reading it. The
+            # extraction is still about real text, but it is now a subset of what the
+            # next receipt will read; freezing it too would write the overlap twice.
+            latest = self.queue.episode(receipt.session_id, receipt.segment)
+            if latest is None or latest.transcript_digest != receipt.episode_digest:
+                self.queue.supersede_finalization(finalization_id)
+                return []
             receipt = self.queue.freeze_finalization(finalization_id, extraction_json, operations)
         operations = self.queue.finalization_operations(finalization_id)
         results: list[str] = []

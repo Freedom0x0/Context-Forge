@@ -841,7 +841,7 @@ worker run --once 是首版的主要测试入口；常驻 worker 只是重复调
 
 **日常用（6）**：`forge init` / `forge install-hook` / `forge worker run` / `forge status` / `forge doctor` / `forge retention`。
 
-**escape hatch（5）**：`forge provider-check` / `forge import-transcript` / `forge session-info` / `forge jobs` / `forge jobs-retry`。
+**escape hatch（8）**：`forge provider-check` / `forge import-transcript` / `forge session-info` / `forge jobs` / `forge jobs-retry` / `forge receipts` / `forge receipt-retry` / `forge receipt-dismiss`。
 
 **MCP 工具（5）**：`context_forge_search` / `context_forge_get` / `context_forge_match_rules` / `context_forge_recent_knowledge` / `context_forge_recent_rules` + `context_forge_record_feedback`。
 

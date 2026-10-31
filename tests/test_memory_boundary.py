@@ -365,3 +365,16 @@ def test_rule_ranking_layers_on_confidence_and_path_hit(tmp_path):
     assert [match.rule_id for match in matcher.match('demo', 'src/main.py', limit=2)] == [
         'hit-high', 'hit-medium']
     assert len(matcher.match('demo', 'src/main.py', limit=0, legacy_filter=True)) == 5
+
+
+def test_detect_reuses_its_answer_instead_of_walking_the_tree_again(tmp_path, monkeypatch):
+    """Reading every source file under a root cost 1.7–4.4 s and it ran on every
+    recall without explicit tags. The stack does not change mid-session."""
+    from context_forge import tech_detect
+
+    (tmp_path / "requirements.txt").write_text("httpx\n", encoding="utf-8")
+    first = tech_detect.detect(tmp_path)
+
+    monkeypatch.setattr(tech_detect, "_read_imports",
+                        lambda *args, **kwargs: pytest.fail("walked the tree again"))
+    assert tech_detect.detect(tmp_path) is first

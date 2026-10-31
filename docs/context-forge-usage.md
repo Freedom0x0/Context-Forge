@@ -46,6 +46,9 @@ embedding_dimensions = 384
 语义模型未安装或未缓存时自动回退到词法检索；安装 `.[semantic]` 并在本地缓存模型后，运行
 `forge reindex-embeddings` 为已有记忆生成向量。
 
+MCP 的 `context_forge_memory_search` **默认只用词法通道**，要加语义通道需显式传
+`semantic=true`。本地模型在装有 torch 的机器上冷启动要一分钟左右，这个代价不该由每次对话中途的召回承担。
+
 ## Claude Code hook 接入
 
 ```bash
@@ -73,14 +76,17 @@ forge doctor                    # 健康检查
 forge retention --apply         # 手动清理过期 session
 ```
 
-### 5 个 escape hatch（debug 用）
+### escape hatch（debug 用）
 
 ```bash
-forge provider-check            # ping 模型 provider
+forge provider-check            # ping 模型 provider（带真实鉴权头）
 forge import-transcript <path>   # 历史 transcript 导入
 forge session-info <id>         # 单 session 完整 JSON
 forge jobs [--status dead_letter]
 forge jobs-retry <id>            # 死信救回
+forge receipts [--status failed] # 定稿收据列表
+forge receipt-retry <id>         # 失败收据重新排队（输入已过期会自判 superseded）
+forge receipt-dismiss <id> --reason "..."   # 人工判定永不应用，不再计入 doctor 失败
 ```
 
 ### 整理与判决（每天自动 + 偶尔人工）

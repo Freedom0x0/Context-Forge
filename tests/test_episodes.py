@@ -598,3 +598,84 @@ def test_a_cwd_and_a_directory_name_land_on_the_same_project(tmp_path: Path):
     watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
                       settle_seconds=0, baseline=0)
     assert store.latest_episode("s1").project == "demo"
+
+
+def test_new_text_supersedes_the_receipt_frozen_against_the_older_text(tmp_path: Path):
+    """A session that keeps talking rewrites its own episode row per turn. Every
+    receipt but the last was frozen against a digest that no longer existed and
+    ended as a permanent failure."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"message":"one"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    collector.collect("session-1", transcript, "demo", "claude_code")
+    first = collector.request_finalize("session-1", end_kind="explicit", event_id="end-1")
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"message":"two"}\n')
+    collector.collect("session-1", transcript, "demo", "claude_code")
+
+    assert store.receipt(first.finalization_id).status == "superseded"
+    assert store.pending_receipts() == []
+
+    second = collector.request_finalize("session-1", end_kind="explicit", event_id="end-2")
+    assert second.finalization_id != first.finalization_id
+    assert second.status == "extracting"
+
+
+def test_the_tail_check_reads_only_the_last_complete_line(tmp_path: Path):
+    from context_forge.episodes import _awaiting_tool_result
+
+    transcript = tmp_path / "session.jsonl"
+    filler = json.dumps({"type": "user", "fill": "x" * 200_000})
+    transcript.write_text(filler + "\n" + json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1"}]}}
+    ) + "\n", encoding="utf-8")
+
+    assert _awaiting_tool_result(transcript) is True
+
+    transcript.write_text(filler + "\n" + json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+    ) + "\n", encoding="utf-8")
+    assert _awaiting_tool_result(transcript) is False
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "assistant", "message": {"content": [{"type": "tool_u')
+    assert _awaiting_tool_result(transcript) is False   # half a line is not evidence
+
+
+def test_a_pass_skips_a_transcript_it_already_collected(tmp_path: Path):
+    """Counting lines reads the whole file. Re-reading 248 MB of history every
+    fifteen seconds was the watcher's cost; an unchanged file has nothing new."""
+    import os
+
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "p"
+    projects.mkdir(parents=True)
+    transcript = projects / "s1.jsonl"
+    transcript.write_text('{"cwd":"/work/demo","message":"x"}\n', encoding="utf-8")
+    two_seconds_ago = time.time() - 2
+    os.utime(transcript, (two_seconds_ago, two_seconds_ago))
+    store = JobStore(tmp_path / "queue.db")
+    original_root = watcher.transcript_root
+    watcher.transcript_root = lambda: tmp_path / "projects"
+    try:
+        assert watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                                 settle_seconds=0, baseline=0) == 1
+
+        def reread(path):
+            raise AssertionError("re-read a transcript that had not changed")
+        original_count = watcher.count_complete_lines
+        watcher.count_complete_lines = reread
+        assert watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                                 settle_seconds=0, baseline=0) == 0
+        watcher.count_complete_lines = original_count
+
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write('{"cwd":"/work/demo","message":"y"}\n')
+        assert watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                                 settle_seconds=0, baseline=0) == 1
+        assert store.latest_episode("s1").collected_through_line == 2
+    finally:
+        watcher.transcript_root = original_root

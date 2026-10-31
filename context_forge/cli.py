@@ -1109,13 +1109,12 @@ def provider_check() -> None:
         typer.echo(f"provider={provider} FAILED to construct: {exc}")
         raise typer.Exit(code=1)
     try:
-        gateway._post(  # type: ignore[attr-defined]
-            url=gateway.api_url,  # type: ignore[attr-defined]
-            headers={"content-type": "application/json"},
-            body={"model": gateway.model,  # type: ignore[attr-defined]
-                  "max_tokens": 8,
-                  "messages": [{"role": "user", "content": "ping"}]},
-        )
+        # The same call a real extraction makes, auth headers included. A bare POST
+        # without x-api-key only proved the host resolves and answered 401 for every
+        # key, which made this check report a healthy provider as unreachable.
+        # The prompt asks for words on purpose: a literal "ping" was answered inside
+        # a thinking block with no text block, which looks like an empty reply.
+        gateway._call_chat("Reply with the single word: pong")  # type: ignore[attr-defined]
     except GatewayError as exc:
         typer.echo(f"provider={provider} UNREACHABLE: {exc}")
         raise typer.Exit(code=1)
@@ -1181,6 +1180,44 @@ def jobs_retry(job_id: str) -> None:
         typer.echo(f"requeued {job_id}")
     else:
         typer.echo(f"job not found or not in failed/dead_letter: {job_id}")
+        raise typer.Exit(code=1)
+
+
+@app.command("receipts")
+def receipts(limit: int = typer.Option(50, "--limit", min=1),
+             status_filter: str = typer.Option("", "--status")) -> None:
+    """List finalization receipts, newest first (debug only)."""
+    for receipt in _store().receipts(status=status_filter or None, limit=limit):
+        typer.echo(f"{receipt.finalization_id}\t{receipt.status}\tattempts={receipt.attempts}"
+                   f"\t{receipt.session_id[:8]}\t{(receipt.error or '')[:120]}")
+
+
+@app.command("receipt-retry")
+def receipt_retry(receipt_id: str) -> None:
+    """Hand a failed receipt back to the worker.
+
+    A receipt whose episode text has moved on retires itself on the next pass
+    instead of failing again, so requeueing is always safe.
+    """
+    if _store().retry_finalization(receipt_id):
+        typer.echo(f"requeued {receipt_id}")
+    else:
+        typer.echo(f"receipt not found or not failed/dismissed: {receipt_id}")
+        raise typer.Exit(code=1)
+
+
+@app.command("receipt-dismiss")
+def receipt_dismiss(receipt_id: str,
+                    reason: str = typer.Option("", "--reason")) -> None:
+    """Retire a failed receipt a human decided will never be applied.
+
+    Recorded as `dismissed`, not `failed`: a dead key or an abandoned probe
+    should stop colouring `doctor` red once someone has looked at it.
+    """
+    if _store().dismiss_finalization(receipt_id, reason or "dismissed by operator"):
+        typer.echo(f"dismissed {receipt_id}")
+    else:
+        typer.echo(f"receipt not found or not failed: {receipt_id}")
         raise typer.Exit(code=1)
 
 

@@ -155,7 +155,7 @@ Claude Code hooks (SessionStart/PreToolUse/Stop/…)     transcript *.jsonl
 
 1. **BM25 严格 AND**（`bm25`）：全部词都要命中。单汉字查询走 `instr()` 子串路。
 2. **关键词放宽**（`widened`）：AND 命中不足时，先把"库里根本不存在的词"免费丢掉（丢它不损失任何命中），仍不足再降级为**词并集**（命中任一词即可，结果数封顶 `WIDEN_RESULT_CAP=100`）。放宽由**允许的算子**界定，不由能丢几个词界定。
-3. **语义 top-K**（`semantic`，可选）：本地 `all-MiniLM-L6-v2` 向量，原始余弦（0–1）。`embedding_model` 与当前 embedder 身份不符的行被跳过（模型漂移不自动重算）。
+3. **语义 top-K**（`semantic`，可选）：本地 `all-MiniLM-L6-v2` 向量，原始余弦（0–1）。`embedding_model` 与当前 embedder 身份不符的行被跳过（模型漂移不自动重算）。**宿主调用默认关闭**（`context_forge_memory_search(semantic=true)` 才启用）：本机实测加载该模型冷启动 69 s、热 22 s，放在对话中途的召回里就是一次卡死。
 
 ### 5.2 统一管线
 

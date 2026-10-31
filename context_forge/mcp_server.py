@@ -12,20 +12,31 @@ Tools:
 
 from __future__ import annotations
 
+import uuid
+
 from .rules import RuleMatcher
 
 
+# One store per host process. Rebuilding it per tool call also rebuilt the lazy
+# embedder, so a model that failed to load was retried on every single call instead
+# of being remembered as failed.
+_STORE = None
+
+
 def _memory():
-    from .config import runtime_dir
-    from .memory import MemoryStore
-    from .config import load_settings
-    settings = load_settings()
-    embedder = None
-    if settings and settings.embedding_model:
-        from .embedding import LocalEmbedder
-        embedder = LocalEmbedder(settings.embedding_model,
-                                 dimensions=settings.embedding_dimensions)
-    return MemoryStore(runtime_dir() / "memory.db", readonly=False, embedder=embedder)
+    global _STORE
+    if _STORE is None:
+        from .config import runtime_dir
+        from .memory import MemoryStore
+        from .config import load_settings
+        settings = load_settings()
+        embedder = None
+        if settings and settings.embedding_model:
+            from .embedding import LocalEmbedder
+            embedder = LocalEmbedder(settings.embedding_model,
+                                     dimensions=settings.embedding_dimensions)
+        _STORE = MemoryStore(runtime_dir() / "memory.db", readonly=False, embedder=embedder)
+    return _STORE
 
 
 def _recall():
@@ -105,13 +116,17 @@ def create_server():
                                     changed_path: str = "", limit: int = 8,
                                     request_id: str = "", technologies: str = "",
                                     domains: str = "", root: str = "",
-                                    legacy_filter: bool = False) -> list[dict]:
+                                    legacy_filter: bool = False,
+                                    semantic: bool = False) -> list[dict]:
         """Scoped recall with a four-part explanation.
 
         `technologies` / `domains` are comma-separated context tags used for
         applicability scoring and candidate-pool admission. Leave both empty to
         auto-detect them from `root` (the project root, default cwd).
         `legacy_filter` reverts scoring and top-K only (the rollback hatch).
+        `semantic` adds the local vector channel, which loads a model (22 s warm,
+        69 s cold) before it can answer; it is off by default so a recall never
+        makes the caller wait for a model.
 
         A high-risk rule nobody has approved comes back without its text: the item carries
         `confirmation_required`, a summary and a handle. A human answers the handle in their own
@@ -120,12 +135,16 @@ def create_server():
         techs, doms = _tags(technologies), _tags(domains)
         if not techs and not doms:
             techs, doms = _stack(root)
+        # A host never mints a request id, and without one the recall was never
+        # written to `retrieval_events` -- every tool recall was invisible to the
+        # effectiveness report. The id is ours; the host was never asked for it.
+        request_id = request_id or f"mcp:{uuid.uuid4().hex}"
         results = _recall().search(
             query, project=project or None, changed_path=changed_path or None,
-            limit=None if limit == 0 else limit, request_id=request_id or None,
+            limit=None if limit == 0 else limit, request_id=request_id,
             stage="tool_returned",
             technologies=frozenset(techs), domains=frozenset(doms),
-            legacy_filter=legacy_filter,
+            legacy_filter=legacy_filter, semantic=semantic,
         )
         return [result.as_dict() for result in results]
 
