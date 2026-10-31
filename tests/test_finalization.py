@@ -609,6 +609,9 @@ def test_a_failed_receipt_can_be_requeued_or_dismissed(tmp_path, monkeypatch):
     assert dismissed.status == "dismissed"
     assert dismissed.error == "dead key"
     assert queue.pending_receipts() == []
+    # The episode closes with it: otherwise every pass offers it again and
+    # retention never sees a finalized episode.
+    assert queue.episode("s1", 1).state == "finalized"
 
 
 def test_a_backlog_is_drained_a_few_receipts_per_pass(tmp_path: Path):

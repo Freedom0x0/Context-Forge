@@ -642,13 +642,31 @@ class JobStore:
 
         Only a terminal failure can be dismissed: a `planned` one belongs to the
         worker, and dismissing it mid-flight would strand its operations.
+
+        The episode is closed with the receipt, as a commit would close it. Left
+        active, the watcher offered it again on every pass (the same digest mints
+        the same receipt id), and retention never saw a finalized episode, so its
+        transcript was kept forever.
         """
+        closed = 0
         with self.db:
-            cursor = self.db.execute(
-                "UPDATE finalization_receipts SET status='dismissed',error=?,updated_at=? "
+            row = self.db.execute(
+                "SELECT session_id,segment,episode_digest FROM finalization_receipts "
                 "WHERE finalization_id=? AND status='failed'",
-                (reason, _now(), finalization_id))
-        return cursor.rowcount == 1
+                (finalization_id,)).fetchone()
+            if row is None:
+                return False
+            self.db.execute(
+                "UPDATE finalization_receipts SET status='dismissed',error=?,updated_at=? "
+                "WHERE finalization_id=?", (reason, _now(), finalization_id))
+            closed = self.db.execute(
+                "UPDATE session_episodes SET state='finalized' "
+                "WHERE session_id=? AND segment=? AND transcript_digest=?",
+                (row["session_id"], row["segment"], row["episode_digest"]),
+            ).rowcount
+        if closed:
+            self.drop_checkpoint_bodies(row["session_id"], row["segment"])
+        return True
 
     def fail_finalization_operation(self, operation_key: str, error: str) -> None:
         """Mark one write as failed without voiding the ones already applied."""
