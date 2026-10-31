@@ -204,6 +204,9 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         if current - mtime < settle_seconds:
             continue  # still being written, or user is mid-session
         session_id = transcript.stem
+        deleted_through = store.deleted_through(session_id)
+        if deleted_through is not None and count_complete_lines(transcript) <= deleted_through:
+            continue  # deleted by a person; only text appended later is new work
         process, tools = probe_session_liveness(transcript, session_id, store,
                                                 now=current)
         session_liveness[session_id] = (process, tools)

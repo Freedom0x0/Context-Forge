@@ -679,3 +679,33 @@ def test_a_pass_skips_a_transcript_it_already_collected(tmp_path: Path):
         assert store.latest_episode("s1").collected_through_line == 2
     finally:
         watcher.transcript_root = original_root
+
+
+def test_a_deleted_session_is_not_imported_again_by_the_watcher(tmp_path: Path):
+    """`delete_session` removes rows; the transcript stays on disk, so the next
+    scan imported the deleted session right back."""
+    from context_forge import watcher
+
+    projects = tmp_path / "projects" / "p"
+    projects.mkdir(parents=True)
+    transcript = projects / "s-deleted.jsonl"
+    transcript.write_text('{"cwd":"/work/demo","message":"x"}\n', encoding="utf-8")
+    store = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(store)
+    collector.collect("s-deleted", transcript, "demo", "claude_code")
+    collector.delete("s-deleted")
+
+    original_root = watcher.transcript_root
+    watcher.transcript_root = lambda: tmp_path / "projects"
+    try:
+        assert watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                                 settle_seconds=0, baseline=0) == 0
+        assert store.latest_episode("s-deleted") is None
+
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write('{"cwd":"/work/demo","message":"y"}\n')
+        assert watcher.scan_once(store, Vault(tmp_path / "vault"), NoOpGateway(),
+                                 settle_seconds=0, baseline=0) == 1
+        assert store.latest_episode("s-deleted").collected_through_line == 2
+    finally:
+        watcher.transcript_root = original_root

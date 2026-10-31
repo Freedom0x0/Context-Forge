@@ -127,6 +127,10 @@ class JobStore:
           attempts INTEGER NOT NULL DEFAULT 0,
           UNIQUE(session_id,segment,episode_digest)
         );
+        CREATE TABLE IF NOT EXISTS deleted_sessions (
+          session_id TEXT PRIMARY KEY, transcript_path TEXT NOT NULL,
+          deleted_through_line INTEGER NOT NULL DEFAULT 0, deleted_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS finalization_operations (
           operation_key TEXT PRIMARY KEY, finalization_id TEXT NOT NULL,
           ordinal INTEGER NOT NULL, request_hash TEXT NOT NULL,
@@ -953,6 +957,30 @@ class JobStore:
             )
             counts["jobs"] = cur.rowcount
         return counts
+
+    def tombstone_session(self, session_id: str, transcript_path: str,
+                          through_line: int) -> None:
+        """Remember that a session was deleted, and how much of it was seen.
+
+        `delete_session` removes rows; without this the watcher re-imports the
+        transcript on its next pass because the file is still on disk. The line
+        count is the key: text appended later is new work and gets collected,
+        while the deleted prefix never comes back.
+        """
+        with self.db:
+            self.db.execute(
+                "INSERT INTO deleted_sessions"
+                "(session_id,transcript_path,deleted_through_line,deleted_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                "deleted_through_line=excluded.deleted_through_line,"
+                "transcript_path=excluded.transcript_path,deleted_at=excluded.deleted_at",
+                (session_id, transcript_path, through_line, _now()))
+
+    def deleted_through(self, session_id: str) -> int | None:
+        row = self.db.execute(
+            "SELECT deleted_through_line FROM deleted_sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        return int(row[0]) if row else None
 
     def drop_checkpoint_bodies(self, session_id: str, segment: int) -> int:
         """Keep the line ranges and digests; drop the text.

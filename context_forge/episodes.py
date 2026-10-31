@@ -209,6 +209,15 @@ class EpisodeCollector:
 
     def delete(self, session_id: str, memory_store=None) -> dict[str, int]:
         tombstones = memory_store.tombstone_session_sources(session_id) if memory_store else 0
+        episode = self.store.latest_episode(session_id)
+        if episode is not None:
+            try:
+                _, lines = _complete_text(Path(episode.transcript_path))
+            except OSError:
+                lines = episode.collected_through_line
+            # The transcript stays on disk, so without a tombstone the watcher
+            # imports the deleted session again on its next pass.
+            self.store.tombstone_session(session_id, episode.transcript_path, lines)
         counts = self.store.delete_session(session_id)
         counts["source_tombstones"] = tombstones
         return counts
