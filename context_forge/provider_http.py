@@ -304,7 +304,15 @@ class HttpGateway:
             "Return strict JSON only matching this schema:\n" + schema + "\nEpisode:\n" +
             json.dumps(payload, ensure_ascii=False)
         )
-        data = self._parse_json_object(self._call_chat(prompt))
+        text = self._call_chat(prompt)          # transport failures propagate as-is
+        try:
+            data = self._parse_json_object(text)
+        except GatewayError as exc:
+            # A reply cut off at `max_tokens` lands here as "no JSON object". Ask
+            # once more with the failure named instead of failing the receipt.
+            repair = ("The reply was not one complete JSON object (" + str(exc)[:200] +
+                      "). Return corrected strict JSON only.\n" + prompt)
+            data = self._parse_json_object(self._call_chat(repair))
         try:
             return FinalizationOutput.model_validate(data).model_dump(mode="json")
         except Exception as exc:
@@ -348,11 +356,12 @@ class RemoteGateway(HttpGateway):
         }
         body = {
             "model": self.model,
-            # Reasoning-capable models spend most of the budget on a
-            # thinking block before emitting text. At 2048 the reply
-            # was cut off mid-thought and contained no text block at
-            # all (measured: stop_reason=max_tokens, thinking only).
-            "max_tokens": 8192,
+            # Reasoning models spend most of the budget on a thinking block before
+            # emitting text. At 2048 the reply was cut off mid-thought with no text
+            # block; at 8192 a 20K-token episode still came back with
+            # stop_reason=max_tokens and nothing to parse. 32768 is the provider's
+            # documented default output cap and leaves room for both.
+            "max_tokens": 32768,
             "messages": [{"role": "user", "content": prompt}],
         }
         result = self._post(self.api_url, headers, body)

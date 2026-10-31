@@ -637,3 +637,25 @@ def test_a_backlog_is_drained_a_few_receipts_per_pass(tmp_path: Path):
     assert queue.receipt(receipts[2].finalization_id).status == "extracting"
     assert [item.finalization_id for item in queue.pending_receipts()] == [
         receipts[2].finalization_id]
+
+
+def test_a_truncated_reply_is_asked_again_instead_of_failing(tmp_path: Path):
+    """A reply cut off at max_tokens arrives as "no JSON object". Retrying is
+    cheaper than failing a receipt whose extraction is one call away."""
+    from context_forge.provider_http import RemoteGateway
+
+    class Flaky(RemoteGateway):
+        def __init__(self):
+            super().__init__(api_url="https://api.test", api_key="sk-x", model="m")
+            self.replies = ['{"schema_version": 1, "candidates": [', json.dumps(output())]
+            self.prompts: list[str] = []
+
+        def _call_chat(self, prompt):
+            self.prompts.append(prompt)
+            return self.replies.pop(0)
+
+    gateway = Flaky()
+
+    assert gateway.finalize_episode({"transcript": "x"})["candidates"]
+    assert len(gateway.prompts) == 2
+    assert "not one complete JSON object" in gateway.prompts[1]
