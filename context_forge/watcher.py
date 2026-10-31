@@ -98,6 +98,15 @@ def probe_session_liveness(transcript: Path, session_id: str, store: JobStore, *
     return process_alive, bool(tools) if isinstance(tools, bool) else None
 
 
+def _timestamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def _unchanged_since(episode, mtime: float) -> bool:
     """True when the transcript has not been written since it was collected.
 
@@ -204,9 +213,15 @@ def scan_once(store: JobStore, vault: Vault, gateway, *,
         if current - mtime < settle_seconds:
             continue  # still being written, or user is mid-session
         session_id = transcript.stem
-        deleted_through = store.deleted_through(session_id)
-        if deleted_through is not None and count_complete_lines(transcript) <= deleted_through:
-            continue  # deleted by a person; only text appended later is new work
+        deleted = store.deleted_session(session_id)
+        if deleted is not None:
+            # Deleted by a person; only text appended later is new work. The mtime
+            # gate keeps a long tombstone list from re-reading every file per pass.
+            deleted_at = _timestamp(deleted["deleted_at"])
+            if deleted_at is not None and mtime < deleted_at:
+                continue
+            if count_complete_lines(transcript) <= deleted["through_line"]:
+                continue
         process, tools = probe_session_liveness(transcript, session_id, store,
                                                 now=current)
         session_liveness[session_id] = (process, tools)

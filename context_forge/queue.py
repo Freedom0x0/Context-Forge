@@ -976,11 +976,13 @@ class JobStore:
                 "transcript_path=excluded.transcript_path,deleted_at=excluded.deleted_at",
                 (session_id, transcript_path, through_line, _now()))
 
-    def deleted_through(self, session_id: str) -> int | None:
+    def deleted_session(self, session_id: str) -> dict | None:
         row = self.db.execute(
-            "SELECT deleted_through_line FROM deleted_sessions WHERE session_id=?",
+            "SELECT deleted_through_line,deleted_at FROM deleted_sessions WHERE session_id=?",
             (session_id,)).fetchone()
-        return int(row[0]) if row else None
+        if row is None:
+            return None
+        return {"through_line": int(row[0]), "deleted_at": row[1]}
 
     def drop_checkpoint_bodies(self, session_id: str, segment: int) -> int:
         """Keep the line ranges and digests; drop the text.
