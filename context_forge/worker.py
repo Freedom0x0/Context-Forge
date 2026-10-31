@@ -197,7 +197,12 @@ def process_one(store: JobStore, vault: Vault,
 
 
 def process_pending_finalizations(store: JobStore, gateway, memory_store,
-                                  projector=None) -> int:
+                                  projector=None, limit: int | None = None) -> int:
+    """Drain pending receipts; `limit` caps how many one pass may hold.
+
+    Each receipt can occupy the caller for the provider's whole timeout (300 s
+    with a thinking model), so a backlog must not starve the transcript scan.
+    """
     if memory_store is None:
         return 0
     from .finalization import FinalizationService
@@ -207,7 +212,7 @@ def process_pending_finalizations(store: JobStore, gateway, memory_store,
                                   model=getattr(gateway, "model", None)
                                   or getattr(gateway, "name", None),
                                   prompt_version=PROMPT_VERSION)
-    for receipt in store.pending_receipts():
+    for receipt in store.pending_receipts()[:limit]:
         try:
             memory_ids = service.finalize(receipt.finalization_id)
         except Exception as exc:

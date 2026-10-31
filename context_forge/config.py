@@ -24,6 +24,13 @@ class Settings(BaseModel):
     remote_api_key: str = ""
     remote_model: str = ""
 
+    # A thinking model answers a finalization-sized prompt in ~65 s (measured
+    # with 20K input tokens); the old 30 s read timeout failed every such call
+    # and the 90 s whole-call budget left no room for one. The read timeout is
+    # per attempt, the total bounds the call including retries and backoff.
+    request_timeout_seconds: float = Field(default=120.0, gt=0)
+    total_timeout_seconds: float = Field(default=300.0, gt=0)
+
     # local (Ollama-compatible /api/chat)
     local_api_url: str = "http://localhost:11434"
     local_model: str = "llama3"

@@ -33,6 +33,11 @@ remote_api_url = ""             # 留空走 ANTHROPIC_BASE_URL
 remote_api_key = ""             # 留空走 ANTHROPIC_AUTH_TOKEN
 remote_model = ""               # 留空走 ANTHROPIC_DEFAULT_SONNET_MODEL 等
 
+# 单次 HTTP 读超时与整次调用预算（秒）。思考型模型一次定稿实测 65 s，
+# 默认 30 s 会让每一次都超时重试。
+request_timeout_seconds = 120
+total_timeout_seconds = 300
+
 # 本地 provider 配置（model_provider = "local" 时使用）
 local_api_url = "http://localhost:11434"
 local_model = "llama3"

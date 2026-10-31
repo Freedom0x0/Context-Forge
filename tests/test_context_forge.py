@@ -332,6 +332,23 @@ def test_select_gateway_remote_without_key_raises(monkeypatch, tmp_path) -> None
         select_gateway("remote", FakeSettings())
 
 
+def test_provider_timeouts_come_from_settings() -> None:
+    """A thinking model needs ~65 s for a 20K-token finalization; the old 30 s
+    read timeout failed every one of them."""
+
+    class FakeSettings:
+        model_provider = "remote"
+        remote_api_key = "sk-test"
+        remote_model = "deepseek-v4-flash"
+        remote_api_url = "https://api.test"
+        request_timeout_seconds = 45.0
+        total_timeout_seconds = 120.0
+
+    gateway = select_gateway("remote", FakeSettings())
+
+    assert (gateway.timeout, gateway.total_timeout) == (45.0, 120.0)
+
+
 # -- worker daemon loop -------------------------------------------------
 
 

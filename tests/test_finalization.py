@@ -609,3 +609,28 @@ def test_a_failed_receipt_can_be_requeued_or_dismissed(tmp_path, monkeypatch):
     assert dismissed.status == "dismissed"
     assert dismissed.error == "dead key"
     assert queue.pending_receipts() == []
+
+
+def test_a_backlog_is_drained_a_few_receipts_per_pass(tmp_path: Path):
+    """Each receipt can hold the watcher for the provider's whole timeout, so a
+    backlog must not stop the transcript scan from running."""
+    from context_forge.worker import process_pending_finalizations
+
+    queue = JobStore(tmp_path / "queue.db")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    collector = EpisodeCollector(queue)
+    receipts = []
+    for index in range(3):
+        transcript = tmp_path / f"s{index}.jsonl"
+        transcript.write_text('{"message":"cache fix"}\n', encoding="utf-8")
+        collector.collect(f"s{index}", transcript, "demo", "claude_code")
+        receipts.append(collector.request_finalize(
+            f"s{index}", end_kind="manual", event_id=f"manual-{index}"))
+    gateway = Gateway(output())
+
+    process_pending_finalizations(queue, gateway, memory, limit=2)
+
+    assert gateway.calls == 2
+    assert queue.receipt(receipts[2].finalization_id).status == "extracting"
+    assert [item.finalization_id for item in queue.pending_receipts()] == [
+        receipts[2].finalization_id]

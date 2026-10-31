@@ -173,6 +173,8 @@ def select_gateway(provider: str, settings=None) -> LlmGateway:
         return build_local(
             model=getattr(settings, "local_model", None) or None,
             api_url=getattr(settings, "local_api_url", None) or None,
+            timeout=getattr(settings, "request_timeout_seconds", 120.0),
+            total_timeout=getattr(settings, "total_timeout_seconds", 300.0),
         )
     if name == "remote":
         if settings is None:
@@ -181,5 +183,7 @@ def select_gateway(provider: str, settings=None) -> LlmGateway:
             api_key=getattr(settings, "remote_api_key", None) or None,
             model=getattr(settings, "remote_model", None) or None,
             api_url=getattr(settings, "remote_api_url", None) or None,
+            timeout=getattr(settings, "request_timeout_seconds", 120.0),
+            total_timeout=getattr(settings, "total_timeout_seconds", 300.0),
         )
     return NoOpGateway()

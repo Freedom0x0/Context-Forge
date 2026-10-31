@@ -132,7 +132,7 @@ class HttpGateway:
     rate_limit_delay = 20.0
 
     def __init__(self, max_attempts: int = 3, base_delay: float = 1.0,
-                 timeout: float = 30.0, total_timeout: float = 90.0) -> None:
+                 timeout: float = 120.0, total_timeout: float = 300.0) -> None:
         self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.timeout = timeout
@@ -330,8 +330,10 @@ class RemoteGateway(HttpGateway):
     name = "remote"
 
     def __init__(self, api_url: str, api_key: str, model: str,
-                 max_attempts: int = 3) -> None:
-        super().__init__(max_attempts=max_attempts)
+                 max_attempts: int = 3, timeout: float = 120.0,
+                 total_timeout: float = 300.0) -> None:
+        super().__init__(max_attempts=max_attempts, timeout=timeout,
+                         total_timeout=total_timeout)
         if not api_key:
             raise GatewayError("remote_api_key is empty")
         self.api_url = api_url.rstrip("/") + "/v1/messages"
@@ -383,8 +385,10 @@ class LocalGateway(HttpGateway):
     name = "local"
 
     def __init__(self, api_url: str, model: str,
-                 max_attempts: int = 3) -> None:
-        super().__init__(max_attempts=max_attempts)
+                 max_attempts: int = 3, timeout: float = 120.0,
+                 total_timeout: float = 300.0) -> None:
+        super().__init__(max_attempts=max_attempts, timeout=timeout,
+                         total_timeout=total_timeout)
         self.api_url = api_url.rstrip("/") + "/api/chat"
         self.model = model
 
@@ -436,7 +440,8 @@ def resolve_remote_url(settings=None) -> str:
 
 
 def build_remote(api_key: str | None = None, model: str | None = None,
-                 api_url: str | None = None) -> LlmGateway:
+                 api_url: str | None = None, timeout: float = 120.0,
+                 total_timeout: float = 300.0) -> LlmGateway:
     """Factory honouring environment overrides for the remote gateway.
 
     Priority: explicit arg > os.environ > ~/.claude/settings.json env block
@@ -465,11 +470,14 @@ def build_remote(api_key: str | None = None, model: str | None = None,
         raise GatewayError(
             "ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN not set"
         )
-    return RemoteGateway(api_url=url, api_key=key, model=chosen)
+    return RemoteGateway(api_url=url, api_key=key, model=chosen,
+                         timeout=timeout, total_timeout=total_timeout)
 
 
 def build_local(model: str | None = None,
-                api_url: str | None = None) -> LlmGateway:
+                api_url: str | None = None, timeout: float = 120.0,
+                total_timeout: float = 300.0) -> LlmGateway:
     url = api_url or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     chosen = model or os.environ.get("OLLAMA_MODEL", "llama3")
-    return LocalGateway(api_url=url, model=chosen)
+    return LocalGateway(api_url=url, model=chosen, timeout=timeout,
+                        total_timeout=total_timeout)

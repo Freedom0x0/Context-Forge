@@ -450,6 +450,7 @@ def run(store: JobStore, vault: Vault, gateway=None, *,
                         process_pending_finalizations(
                             store, gateway or NoOpGateway(), memory_store,
                             MemoryProjector(memory_store, vault.root),
+                            limit=3,
                         )
                         finalize_seconds = time.monotonic() - started
                 except Exception as exc:  # noqa: BLE001
