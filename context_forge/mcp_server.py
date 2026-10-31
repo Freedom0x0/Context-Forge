@@ -108,7 +108,12 @@ def create_server():
     @server.tool()
     def context_forge_search(query: str,
                              project: str = "") -> list[dict[str, str]]:
-        """Full-text lookup; `project` narrows to one project ("" = all)."""
+        """Search the published knowledge vault: markdown documents and rules.
+
+        This is the library of written notes, not what was learned in past
+        sessions. For "what do you remember / did we decide X", call
+        context_forge_memory_search instead.
+        """
         return [dict(row) for row in _index().search(query, project=project or None)]
 
     @server.tool()
@@ -118,8 +123,11 @@ def create_server():
                                     domains: str = "", root: str = "",
                                     legacy_filter: bool = False,
                                     semantic: bool = False) -> list[dict]:
-        """Scoped recall with a four-part explanation.
+        """Recall long-term memories learned from past sessions, with a four-part explanation.
 
+        This is the memory: conventions, decisions and facts distilled from
+        earlier conversations. It is not the vault document search
+        (context_forge_search).
         `technologies` / `domains` are comma-separated context tags used for
         applicability scoring and candidate-pool admission. Leave both empty to
         auto-detect them from `root` (the project root, default cwd).
