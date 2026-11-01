@@ -54,6 +54,9 @@ embedding_dimensions = 384
 MCP 的 `context_forge_memory_search` **默认只用词法通道**，要加语义通道需显式传
 `semantic=true`。本地模型在装有 torch 的机器上冷启动要一分钟左右，这个代价不该由每次对话中途的召回承担。
 
+**写入路径不加载模型**：定稿写记忆时不再编码，新记忆默认没有向量（常驻 watcher 因此只占几十 MB）。
+需要语义通道时先运行 `forge reindex-embeddings`，那是唯一会加载模型的命令。
+
 ## Claude Code hook 接入
 
 ```bash

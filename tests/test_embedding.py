@@ -322,3 +322,18 @@ def test_channel_mix_counts_recalls_by_channel_and_reaches_the_report(tmp_path):
     mix = store.channel_mix()
     assert '' not in mix and mix.get('unknown', 0) >= 1
     assert mix['bm25'] == 1 and mix['semantic'] == 1
+
+
+def test_the_cli_does_not_load_the_model_unless_reindexing(tmp_path, monkeypatch):
+    """The resident watcher wrote every memory with an encoder attached: ~500 MB
+    RSS and a 69 s cold start in a process that should cost tens of megabytes."""
+    import context_forge.cli as cli
+
+    monkeypatch.setenv("CONTEXT_FORGE_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        f'vault_path = "{tmp_path.as_posix()}"\nmodel_provider = "none"\n',
+        encoding="utf-8")
+    MemoryStore.initialize(tmp_path / "memory.db")
+
+    assert cli._memory().embedder is None
+    assert cli._memory(embed=True).embedder is not None

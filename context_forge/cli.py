@@ -48,7 +48,14 @@ def _store() -> JobStore:
     return JobStore(runtime_dir() / "queue.db")
 
 
-def _memory():
+def _memory(*, embed: bool = False):
+    """Open the memory store.
+
+    Embedding is off by default: loading the local model costs ~500 MB of RSS and
+    a 69 s cold start, and every write after that pays an encode. The vectors are
+    only read by the opt-in semantic channel, and `forge reindex-embeddings` builds
+    them on demand -- it is the one caller that asks for them.
+    """
     from .config import runtime_dir
     from .memory import MemoryStore
     path = runtime_dir() / "memory.db"
@@ -56,7 +63,7 @@ def _memory():
         return None
     settings = load_settings()
     embedder = None
-    if settings and settings.embedding_model:
+    if embed and settings and settings.embedding_model:
         from .embedding import LocalEmbedder
         embedder = LocalEmbedder(settings.embedding_model,
                                  dimensions=settings.embedding_dimensions)
@@ -473,7 +480,7 @@ def memory_report(days: int = typer.Option(90, "--days", min=0)) -> None:
 @app.command("reindex-embeddings")
 def reindex_embeddings() -> None:
     """Generate local cached vectors for current memories; never calls a remote API."""
-    store = _memory()
+    store = _memory(embed=True)
     if store is None:
         raise typer.BadParameter("memory database is not initialized")
     if store.embedder is None:
