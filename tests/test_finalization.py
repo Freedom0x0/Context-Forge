@@ -659,3 +659,50 @@ def test_a_truncated_reply_is_asked_again_instead_of_failing(tmp_path: Path):
     assert gateway.finalize_episode({"transcript": "x"})["candidates"]
     assert len(gateway.prompts) == 2
     assert "not one complete JSON object" in gateway.prompts[1]
+
+
+def test_a_relation_survives_sources_being_content_addressed(tmp_path: Path):
+    """The store checks relation evidence against the version's sources. Renaming
+    sources for de-duplication left every relation citing an identity that no
+    longer existed, so the candidate write was refused outright."""
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text('{"message":"cache fix"}\n', encoding="utf-8")
+    queue = JobStore(tmp_path / "queue.db")
+    collector = EpisodeCollector(queue)
+    collector.collect("s1", transcript, "demo", "claude_code")
+    receipt = collector.request_finalize("s1", end_kind="manual", event_id="manual-1")
+    memory = MemoryStore.initialize(tmp_path / "memory.db")
+    target = memory.put("target", MemoryDraft(body="cache fix policy", status="active",
+                                              provenance=Provenance(sessions=("s0",))),
+                        expected_version=0, idempotency_key="put:target", reason="test")
+    payload = output()
+    payload["candidates"][0]["relations"] = [{
+        "target_id": target.id, "target_version": 1, "kind": "refines",
+        "evidence_ids": ["episode:s1:1:1"]}]
+
+    FinalizationService(queue, memory, Gateway(payload)).finalize(receipt.finalization_id)
+
+    written = [record for record in memory.current_records() if record.id != target.id]
+    assert written
+    assert memory.relations(written[0].id, written[0].version)
+
+
+def test_a_projected_receipt_with_a_failed_write_is_replanned(tmp_path: Path):
+    queue, receipt = setup_receipt(tmp_path)
+    queue.mark_receipt_committed(receipt.finalization_id)
+    queue.mark_receipt_projected(receipt.finalization_id)
+
+    assert queue.retry_finalization(receipt.finalization_id) is False   # nothing failed
+
+    with queue.db:
+        queue.db.execute(
+            "INSERT INTO finalization_operations(operation_key,finalization_id,ordinal,"
+            "request_hash,memory_id,payload_json,status,result_json,error,created_at,updated_at,vetoed) "
+            "VALUES (?,?,0,'hash','m','{}','failed',NULL,'boom',?,?,0)",
+            (f"{receipt.finalization_id}:memory:0", receipt.finalization_id,
+             "2026-11-04T00:00:00+00:00", "2026-11-04T00:00:00+00:00"))
+    assert queue.retry_finalization(receipt.finalization_id) is True
+    replanned = queue.receipt(receipt.finalization_id)
+    assert (replanned.status, replanned.extraction_json, replanned.write_plan_json) == (
+        "planned", None, None)
+    assert queue.finalization_operations(receipt.finalization_id) == []

@@ -61,8 +61,24 @@ def _save(path: Path, payload: dict) -> None:
     save_config(path, payload)
 
 
+def _is_owned(entry: object) -> bool:
+    """True when this hook entry is ours.
+
+    The marker alone is not enough: `claude plugin ...` round-trips settings.json
+    through the host's writer, which keeps the known fields and drops the rest.
+    After one such command every marker was gone while the hooks still ran, and
+    `doctor` reported all eight missing. The command is the identity that matters.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get(HOOK_OWNER_KEY):
+        return True
+    return any(isinstance(hook, dict) and hook.get("command") == HOOK_COMMAND
+               for hook in entry.get("hooks", []))
+
+
 def _owned_entries(hooks: list[dict]) -> list[dict]:
-    return [h for h in hooks if isinstance(h, dict) and h.get(HOOK_OWNER_KEY)]
+    return [h for h in hooks if _is_owned(h)]
 
 
 def install(target: Path | None = None) -> dict[str, int]:
@@ -77,8 +93,9 @@ def install(target: Path | None = None) -> dict[str, int]:
 
     def _add_or_update(bucket: list, command: str) -> None:
         nonlocal added, updated
-        owned = [h for h in bucket if isinstance(h, dict) and h.get(HOOK_OWNER_KEY)]
+        owned = [h for h in bucket if _is_owned(h)]
         if owned:
+            owned[0][HOOK_OWNER_KEY] = True       # re-stamp after a host round-trip
             current = owned[0].get("hooks", [{}])[0].get("command", "")
             if current == command:
                 return
@@ -106,7 +123,7 @@ def uninstall(target: Path | None = None) -> dict[str, int]:
     removed = 0
     for event in list(hooks_root.keys()):
         bucket = hooks_root.get(event, [])
-        kept = [h for h in bucket if not (isinstance(h, dict) and h.get(HOOK_OWNER_KEY))]
+        kept = [h for h in bucket if not _is_owned(h)]
         removed += len(bucket) - len(kept)
         if kept:
             hooks_root[event] = kept

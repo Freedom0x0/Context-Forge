@@ -56,7 +56,7 @@ def _fit_budget(conversation: str) -> str:
     return TRUNCATION_NOTICE + tail
 
 
-def _content_addressed(draft: MemoryDraft) -> MemoryDraft:
+def _content_addressed(draft: MemoryDraft) -> tuple[MemoryDraft, dict[str, str]]:
     """Rename each source after what it carries, not after which file it came from.
 
     The model names a source by file and then quotes different passages in
@@ -65,7 +65,7 @@ def _content_addressed(draft: MemoryDraft) -> MemoryDraft:
     that collision impossible and still de-duplicates a genuine repeat.
     """
     if not draft.sources:
-        return draft
+        return draft, {}
     mapping = {source.identity: f"{source.identity}#{digest(source.excerpt)[:8]}"
                for source in draft.sources}
     sources = tuple(source.model_copy(update={"identity": mapping[source.identity]})
@@ -74,7 +74,7 @@ def _content_addressed(draft: MemoryDraft) -> MemoryDraft:
         entry.model_copy(update={"evidence_ids": tuple(
             mapping.get(item, item) for item in entry.evidence_ids)})
         for entry in draft.applicability)
-    return draft.model_copy(update={"sources": sources, "applicability": applicability})
+    return draft.model_copy(update={"sources": sources, "applicability": applicability}), mapping
 
 
 def _model_input(transcript: str) -> str:
@@ -226,7 +226,7 @@ class FinalizationService:
               session_id: str, project: str | None, host: str = 'unknown') -> list[dict]:
         operations = []
         for ordinal, candidate in enumerate(output.candidates):
-            draft = _content_addressed(candidate.draft)
+            draft, renamed = _content_addressed(candidate.draft)
             projects = tuple(sorted(set(draft.provenance.projects) | ({project} if project else set())))
             sessions = tuple(sorted(set(draft.provenance.sessions) | {session_id}))
             draft = draft.model_copy(update={
@@ -262,8 +262,21 @@ class FinalizationService:
             # silent because the next step issues a confirmation for exactly this version.
             if requires_confirmation(draft):
                 draft = draft.model_copy(update={'status': 'candidate'})
+            # Relations name sources too, and the store checks those names against the
+            # version's sources. Renaming only the draft left every relation citing an
+            # identity that no longer exists, so the whole candidate write was refused.
+            relations = [
+                relation.model_copy(update={
+                    "evidence_ids": tuple(renamed.get(item, item)
+                                          for item in relation.evidence_ids),
+                    "applicability": tuple(
+                        condition.model_copy(update={"evidence_ids": tuple(
+                            renamed.get(item, item) for item in condition.evidence_ids)})
+                        for condition in relation.applicability),
+                })
+                for relation in candidate.relations]
             payload = {"draft": draft.model_dump(mode="json"), "expected_version": expected,
-                       "relations": [item.model_dump(mode="json") for item in candidate.relations]}
+                       "relations": [item.model_dump(mode="json") for item in relations]}
             operation_key = f"{finalization_id}:memory:{ordinal}"
             operations.append({
                 "operation_key": operation_key, "ordinal": ordinal,

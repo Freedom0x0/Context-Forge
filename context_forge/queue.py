@@ -629,11 +629,37 @@ class JobStore:
         return [FinalizationReceipt(**dict(row)) for row in self.db.execute(sql, params)]
 
     def retry_finalization(self, finalization_id: str) -> bool:
-        """Hand a failed receipt back to the worker with a fresh attempt budget.
+        """Hand a receipt back to the worker with a fresh attempt budget.
 
         A stale one retires itself on the next pass (the episode digest no longer
         matches), so the operator does not have to classify before requeueing.
+
+        A projected receipt whose plan held a failed write is replanned from the
+        episode: the failure was in how we built the write, not in the provider's
+        answer, so keeping the frozen plan would replay the same defect. Sibling
+        writes are idempotent, so asking the model again cannot double-apply them.
         """
+        row = self.db.execute(
+            "SELECT status FROM finalization_receipts WHERE finalization_id=?",
+            (finalization_id,)).fetchone()
+        if row is None:
+            return False
+        status = row[0]
+        if status in ("committed", "projected"):
+            failed = self.db.execute(
+                "SELECT COUNT(*) FROM finalization_operations "
+                "WHERE finalization_id=? AND status='failed'", (finalization_id,)).fetchone()[0]
+            if not failed:
+                return False
+            with self.db:
+                self.db.execute(
+                    "DELETE FROM finalization_operations WHERE finalization_id=?",
+                    (finalization_id,))
+                self.db.execute(
+                    "UPDATE finalization_receipts SET status='planned',attempts=0,error=NULL,"
+                    "extraction_json=NULL,write_plan_json=NULL,updated_at=? "
+                    "WHERE finalization_id=?", (_now(), finalization_id))
+            return True
         with self.db:
             cursor = self.db.execute(
                 "UPDATE finalization_receipts SET status='planned',attempts=0,error=NULL,"

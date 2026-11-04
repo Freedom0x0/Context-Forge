@@ -1319,3 +1319,27 @@ def test_a_dribbling_response_is_abandoned_at_the_total_deadline() -> None:
         gw.extract_session(None, None, "s1")
 
     assert time.time() - started < 0.9      # the deadline, not the read timeout
+
+
+def test_hooks_are_recognized_after_the_host_strips_our_marker(tmp_path: Path) -> None:
+    """`claude plugin ...` round-trips settings.json through the host writer,
+    which keeps known fields and drops the rest. All eight markers vanished while
+    the hooks still ran, and doctor reported every event missing."""
+    from context_forge import install_hook
+
+    settings = tmp_path / "settings.json"
+    install_hook.install(settings)
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    for entries in payload["hooks"].values():
+        for entry in entries:
+            entry.pop(install_hook.HOOK_OWNER_KEY, None)
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert install_hook.status(settings)["ok"] is True
+
+    install_hook.install(settings)                      # re-stamps the marker
+    restored = json.loads(settings.read_text(encoding="utf-8"))
+    assert all(entry.get(install_hook.HOOK_OWNER_KEY)
+               for entries in restored["hooks"].values() for entry in entries)
+    install_hook.uninstall(settings)
+    assert install_hook.status(settings)["ok"] is False
