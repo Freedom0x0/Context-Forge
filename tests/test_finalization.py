@@ -687,13 +687,7 @@ def test_a_relation_survives_sources_being_content_addressed(tmp_path: Path):
     assert memory.relations(written[0].id, written[0].version)
 
 
-def test_a_projected_receipt_with_a_failed_write_is_replanned(tmp_path: Path):
-    queue, receipt = setup_receipt(tmp_path)
-    queue.mark_receipt_committed(receipt.finalization_id)
-    queue.mark_receipt_projected(receipt.finalization_id)
-
-    assert queue.retry_finalization(receipt.finalization_id) is False   # nothing failed
-
+def _failed_operation(queue, receipt):
     with queue.db:
         queue.db.execute(
             "INSERT INTO finalization_operations(operation_key,finalization_id,ordinal,"
@@ -701,8 +695,21 @@ def test_a_projected_receipt_with_a_failed_write_is_replanned(tmp_path: Path):
             "VALUES (?,?,0,'hash','m','{}','failed',NULL,'boom',?,?,0)",
             (f"{receipt.finalization_id}:memory:0", receipt.finalization_id,
              "2026-11-04T00:00:00+00:00", "2026-11-04T00:00:00+00:00"))
-    assert queue.retry_finalization(receipt.finalization_id) is True
-    replanned = queue.receipt(receipt.finalization_id)
-    assert (replanned.status, replanned.extraction_json, replanned.write_plan_json) == (
-        "planned", None, None)
-    assert queue.finalization_operations(receipt.finalization_id) == []
+
+
+def test_a_projected_receipt_can_only_accept_its_failed_writes(tmp_path: Path):
+    """Re-extracting under the same operation keys mints a different payload for
+    an idempotency key that is already taken, so retrying is not an option --
+    the operator records the loss instead."""
+    queue, receipt = setup_receipt(tmp_path)
+    queue.mark_receipt_committed(receipt.finalization_id)
+    queue.mark_receipt_projected(receipt.finalization_id)
+    _failed_operation(queue, receipt)
+
+    assert queue.retry_finalization(receipt.finalization_id) is False
+    assert queue.dismiss_finalization(receipt.finalization_id, "known defect") is True
+
+    operations = queue.finalization_operations(receipt.finalization_id)
+    assert [item["status"] for item in operations] == ["skipped"]
+    assert operations[0]["error"] == "known defect"
+    assert queue.receipt(receipt.finalization_id).status == "projected"

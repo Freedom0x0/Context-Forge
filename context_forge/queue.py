@@ -629,37 +629,16 @@ class JobStore:
         return [FinalizationReceipt(**dict(row)) for row in self.db.execute(sql, params)]
 
     def retry_finalization(self, finalization_id: str) -> bool:
-        """Hand a receipt back to the worker with a fresh attempt budget.
+        """Hand a failed receipt back to the worker with a fresh attempt budget.
 
         A stale one retires itself on the next pass (the episode digest no longer
         matches), so the operator does not have to classify before requeueing.
 
-        A projected receipt whose plan held a failed write is replanned from the
-        episode: the failure was in how we built the write, not in the provider's
-        answer, so keeping the frozen plan would replay the same defect. Sibling
-        writes are idempotent, so asking the model again cannot double-apply them.
+        A receipt that already ran is NOT retryable: its operations are keyed by
+        `(receipt, ordinal)`, and asking the model again mints a different payload
+        under the same idempotency key, which the store refuses (measured). The
+        recovery for a partially-applied receipt is `dismiss_finalization`.
         """
-        row = self.db.execute(
-            "SELECT status FROM finalization_receipts WHERE finalization_id=?",
-            (finalization_id,)).fetchone()
-        if row is None:
-            return False
-        status = row[0]
-        if status in ("committed", "projected"):
-            failed = self.db.execute(
-                "SELECT COUNT(*) FROM finalization_operations "
-                "WHERE finalization_id=? AND status='failed'", (finalization_id,)).fetchone()[0]
-            if not failed:
-                return False
-            with self.db:
-                self.db.execute(
-                    "DELETE FROM finalization_operations WHERE finalization_id=?",
-                    (finalization_id,))
-                self.db.execute(
-                    "UPDATE finalization_receipts SET status='planned',attempts=0,error=NULL,"
-                    "extraction_json=NULL,write_plan_json=NULL,updated_at=? "
-                    "WHERE finalization_id=?", (_now(), finalization_id))
-            return True
         with self.db:
             cursor = self.db.execute(
                 "UPDATE finalization_receipts SET status='planned',attempts=0,error=NULL,"
@@ -670,30 +649,40 @@ class JobStore:
     def dismiss_finalization(self, finalization_id: str, reason: str) -> bool:
         """Retire a receipt a human decided will never be applied.
 
-        Only a terminal failure can be dismissed: a `planned` one belongs to the
-        worker, and dismissing it mid-flight would strand its operations.
+        Only terminal states qualify: a `planned` receipt belongs to the worker,
+        and dismissing it mid-flight would strand its operations.
 
-        The episode is closed with the receipt, as a commit would close it. Left
-        active, the watcher offered it again on every pass (the same digest mints
-        the same receipt id), and retention never saw a finalized episode, so its
-        transcript was kept forever.
+        - A `failed` receipt is closed together with its episode, as a commit
+          would close it. Left active, the watcher offered it again on every
+          pass (the same digest mints the same receipt id), and retention never
+          saw a finalized episode, so its transcript was kept forever.
+        - A `projected` receipt already applied its siblings. Dismissing it marks
+          the failed writes `skipped` with the reason, so one known defect does
+          not keep `doctor` red forever after a person has accepted the loss.
         """
         closed = 0
         with self.db:
             row = self.db.execute(
-                "SELECT session_id,segment,episode_digest FROM finalization_receipts "
-                "WHERE finalization_id=? AND status='failed'",
-                (finalization_id,)).fetchone()
-            if row is None:
+                "SELECT session_id,segment,episode_digest,status FROM finalization_receipts "
+                "WHERE finalization_id=?", (finalization_id,)).fetchone()
+            if row is None or row["status"] not in ("failed", "projected"):
                 return False
-            self.db.execute(
-                "UPDATE finalization_receipts SET status='dismissed',error=?,updated_at=? "
-                "WHERE finalization_id=?", (reason, _now(), finalization_id))
-            closed = self.db.execute(
-                "UPDATE session_episodes SET state='finalized' "
-                "WHERE session_id=? AND segment=? AND transcript_digest=?",
-                (row["session_id"], row["segment"], row["episode_digest"]),
-            ).rowcount
+            if row["status"] == "projected":
+                skipped = self.db.execute(
+                    "UPDATE finalization_operations SET status='skipped',error=?,updated_at=? "
+                    "WHERE finalization_id=? AND status='failed'",
+                    (reason, _now(), finalization_id)).rowcount
+                if not skipped:
+                    return False
+            else:
+                self.db.execute(
+                    "UPDATE finalization_receipts SET status='dismissed',error=?,updated_at=? "
+                    "WHERE finalization_id=?", (reason, _now(), finalization_id))
+                closed = self.db.execute(
+                    "UPDATE session_episodes SET state='finalized' "
+                    "WHERE session_id=? AND segment=? AND transcript_digest=?",
+                    (row["session_id"], row["segment"], row["episode_digest"]),
+                ).rowcount
         if closed:
             self.drop_checkpoint_bodies(row["session_id"], row["segment"])
         return True

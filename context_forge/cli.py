@@ -1216,15 +1216,16 @@ def receipt_retry(receipt_id: str) -> None:
 @app.command("receipt-dismiss")
 def receipt_dismiss(receipt_id: str,
                     reason: str = typer.Option("", "--reason")) -> None:
-    """Retire a failed receipt a human decided will never be applied.
+    """Retire a receipt a human decided will never be applied.
 
     Recorded as `dismissed`, not `failed`: a dead key or an abandoned probe
-    should stop colouring `doctor` red once someone has looked at it.
+    should stop colouring `doctor` red once someone has looked at it. A receipt
+    that already applied some writes can only accept its failed ones as skipped.
     """
     if _store().dismiss_finalization(receipt_id, reason or "dismissed by operator"):
         typer.echo(f"dismissed {receipt_id}")
     else:
-        typer.echo(f"receipt not found or not failed: {receipt_id}")
+        typer.echo(f"receipt not found, or its state cannot be dismissed: {receipt_id}")
         raise typer.Exit(code=1)
 
 
